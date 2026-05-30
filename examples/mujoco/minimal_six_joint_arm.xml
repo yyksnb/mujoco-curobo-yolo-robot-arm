@@ -1,0 +1,46 @@
+<mujoco model="minimal_six_joint_arm">
+  <option timestep="0.01"/>
+
+  <default>
+    <joint damping="0.1" armature="0.01" limited="true"/>
+    <geom type="capsule" size="0.02 0.08" rgba="0.2 0.5 0.8 1"/>
+    <position kp="20" ctrllimited="true" ctrlrange="-3.14 3.14"/>
+  </default>
+
+  <worldbody>
+    <light name="top" pos="0 0 1"/>
+    <body name="link_1" pos="0 0 0.1">
+      <joint name="joint_1" type="hinge" axis="0 0 1" range="-180 180"/>
+      <geom fromto="0 0 0 0.1 0 0"/>
+      <body name="link_2" pos="0.1 0 0">
+        <joint name="joint_2" type="hinge" axis="0 1 0" range="-180 180"/>
+        <geom fromto="0 0 0 0.1 0 0"/>
+        <body name="link_3" pos="0.1 0 0">
+          <joint name="joint_3" type="hinge" axis="0 1 0" range="-180 180"/>
+          <geom fromto="0 0 0 0.1 0 0"/>
+          <body name="link_4" pos="0.1 0 0">
+            <joint name="joint_4" type="hinge" axis="1 0 0" range="-180 180"/>
+            <geom fromto="0 0 0 0.08 0 0"/>
+            <body name="link_5" pos="0.08 0 0">
+              <joint name="joint_5" type="hinge" axis="0 1 0" range="-180 180"/>
+              <geom fromto="0 0 0 0.06 0 0"/>
+              <body name="link_6" pos="0.06 0 0">
+                <joint name="joint_6" type="hinge" axis="1 0 0" range="-180 180"/>
+                <geom fromto="0 0 0 0.04 0 0"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="joint_1_position" joint="joint_1"/>
+    <position name="joint_2_position" joint="joint_2"/>
+    <position name="joint_3_position" joint="joint_3"/>
+    <position name="joint_4_position" joint="joint_4"/>
+    <position name="joint_5_position" joint="joint_5"/>
+    <position name="joint_6_position" joint="joint_6"/>
+  </actuator>
+</mujoco>
