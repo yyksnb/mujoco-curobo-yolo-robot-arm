@@ -1,0 +1,225 @@
+# AGENTS.md
+
+## Project Goal
+
+This repository implements robotic arm scene construction, motion planning, trajectory execution, and simulation validation.
+
+The user is responsible only for the following parts:
+
+* scene construction / mapping
+* robotic arm motion planning
+* trajectory execution
+* controller interface
+* simulation validation
+
+The user is **not** responsible for:
+
+* YOLO model training
+* deep modification of BODex
+* dataset annotation
+* low-level simulator engine development
+
+Treat YOLO and BODex as upstream modules.
+
+Main pipeline:
+
+```text
+YOLO or simulator object pose
+-> BODex grasp target
+-> collision scene construction
+-> cuRobo motion planning
+-> MuJoCo or simulator execution
+-> evaluation report
+```
+
+## Development Strategy
+
+Build the project in stages.
+
+Stage 1: mock pipeline
+
+* Use fake object poses.
+* Use fake BODex grasp targets.
+* Use a simple mock planner.
+* Use a simple mock executor.
+* Save trajectory and evaluation results under `outputs/`.
+
+Stage 2: cuRobo integration
+
+* Replace the mock planner with cuRobo.
+* Keep the input and output interfaces unchanged.
+* If cuRobo is unavailable, fail gracefully with a clear message.
+
+Stage 3: MuJoCo integration
+
+* Replace the mock executor with MuJoCo-based simulation.
+* Keep the planning interface unchanged.
+* If MuJoCo is unavailable, fail gracefully with a clear message.
+
+Stage 4: YOLO / BODex interface integration
+
+* Do not train YOLO.
+* Do not deeply modify BODex.
+* Only create adapters that convert their outputs into this repository's internal data format.
+
+## Required Research Behavior
+
+Before implementing features related to external libraries, check the latest official documentation or upstream repositories.
+
+Important sources:
+
+* Codex official docs:
+  https://developers.openai.com/codex/
+
+* cuRobo official docs:
+  https://curobo.org/
+
+* cuRobo GitHub:
+  https://github.com/NVlabs/curobo
+
+* MuJoCo official docs:
+  https://mujoco.readthedocs.io/
+
+* MuJoCo GitHub:
+  https://github.com/google-deepmind/mujoco
+
+* BODex GitHub:
+  https://github.com/JYChen18/BODex
+
+When using web search, prefer official documentation, official GitHub repositories, and installation instructions over blog posts.
+
+If installation or API behavior is uncertain, stop and summarize the uncertainty before making large changes.
+
+## Recommended Repository Structure
+
+Use this structure unless there is a strong reason to change it:
+
+```text
+.
+├── AGENTS.md
+├── README.md
+├── requirements.txt
+├── pyproject.toml
+├── scripts/
+│   ├── run_mock_pipeline.py
+│   ├── run_curobo_planning.py
+│   ├── run_mujoco_execution.py
+│   └── evaluate_outputs.py
+├── src/
+│   └── robot_arm_pipeline/
+│       ├── __init__.py
+│       ├── types.py
+│       ├── scene/
+│       │   ├── __init__.py
+│       │   └── collision_scene.py
+│       ├── perception/
+│       │   ├── __init__.py
+│       │   ├── yolo_adapter.py
+│       │   └── bodex_adapter.py
+│       ├── planning/
+│       │   ├── __init__.py
+│       │   ├── mock_planner.py
+│       │   └── curobo_planner.py
+│       ├── execution/
+│       │   ├── __init__.py
+│       │   ├── mock_executor.py
+│       │   └── mujoco_executor.py
+│       └── evaluation/
+│           ├── __init__.py
+│           └── metrics.py
+├── tests/
+│   ├── test_mock_pipeline.py
+│   ├── test_scene_contract.py
+│   ├── test_planner_contract.py
+│   └── test_executor_contract.py
+└── outputs/
+    └── .gitkeep
+```
+
+## Interface Rules
+
+Keep YOLO, BODex, planning, execution, and evaluation separated by clean interfaces.
+
+Use typed data structures for internal communication.
+
+At minimum, define internal data types for:
+
+* object pose
+* grasp target
+* collision object
+* collision scene
+* robot state
+* planned trajectory
+* execution result
+* evaluation report
+
+Do not pass raw YOLO outputs, raw BODex outputs, or simulator-specific objects through the entire pipeline.
+
+Instead, convert external outputs into internal project types in adapter modules.
+
+## Engineering Rules
+
+1. Use Python 3.10 unless the upstream library explicitly requires otherwise.
+2. Keep modules small and testable.
+3. Do not create a monolithic demo script.
+4. Keep YOLO, BODex, planning, execution, and evaluation separated by clean interfaces.
+5. Do not hard-code absolute paths.
+6. Save logs, trajectories, videos, and reports under `outputs/`.
+7. Any new feature must include:
+
+   * a runnable script under `scripts/`
+   * a minimal test under `tests/`
+   * README instructions
+8. If cuRobo or MuJoCo is unavailable, fail gracefully with a clear message.
+9. Always run `pytest` after code changes.
+10. Prefer simple, readable implementations over overly complex abstractions.
+11. Do not introduce large dependencies unless they are necessary.
+12. Do not remove existing tests unless they are clearly obsolete.
+13. Do not rewrite the entire project when a small change is enough.
+
+## Testing Rules
+
+Every major component should have a minimal test.
+
+Required test coverage:
+
+* mock pipeline can run end-to-end
+* collision scene can be constructed from object poses
+* planner interface returns a trajectory-like object
+* executor interface returns an execution result
+* evaluation module saves a report under `outputs/`
+
+Use:
+
+```bash
+pytest -q
+```
+
+If some tests require cuRobo, MuJoCo, GPU, or simulator runtime, mark them as optional or skip them gracefully when dependencies are unavailable.
+
+## Output Rules
+
+All generated files should be saved under `outputs/`.
+
+Examples:
+
+```text
+outputs/
+├── logs/
+├── trajectories/
+├── reports/
+├── videos/
+└── debug/
+```
+
+Do not save generated artifacts directly in the repository root.
+
+## Done Means
+
+A task is complete only when:
+
+* the relevant script runs
+* `pytest -q` passes
+* generated artifacts are saved under `outputs/`
+* README is updated if the workflow changed
+* uncertainty about external APIs or installation is clearly documented
