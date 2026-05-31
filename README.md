@@ -37,13 +37,9 @@ Use Python 3.10 or newer.
 python -m pip install -r requirements.txt
 ```
 
-No runtime dependencies are required for Stage 1.
-
-MuJoCo is optional for Stage 2:
-
-```powershell
-python -m pip install mujoco
-```
+The requirements file installs `numpy`, `pytest`, and `mujoco`. Stage 1 does
+not need MuJoCo at runtime, but Stage 2 uses it for real MJCF execution when it
+is available in the environment.
 
 ## Run Stage 1 Mock Pipeline
 
@@ -76,6 +72,7 @@ python scripts/run_mock_pipeline.py
 Then run the MuJoCo executor skeleton:
 
 ```powershell
+python -m pip install -r requirements.txt
 python scripts/run_mujoco_executor.py
 ```
 
@@ -98,7 +95,7 @@ If `mujoco` is not installed, the script still exits cleanly and writes a
 failure report with an installation message:
 
 ```powershell
-python -m pip install mujoco
+python -m pip install -r requirements.txt
 ```
 
 You can also provide explicit paths:
@@ -139,3 +136,11 @@ examples/mujoco/                  minimal MJCF models
 tests/                           pytest coverage for Stage 1 contracts
 outputs/                         generated artifacts
 ```
+
+## Troubleshooting
+
+If `python -m pip install -r requirements.txt` cannot install `mujoco`, check
+that the Python version and platform are supported by the published MuJoCo wheel.
+The executor will still import and run in this case, but
+`python scripts/run_mujoco_executor.py` will write a failure report explaining
+that MuJoCo is unavailable instead of crashing.

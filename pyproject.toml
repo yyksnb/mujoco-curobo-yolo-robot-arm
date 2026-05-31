@@ -5,9 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robot-arm-pipeline"
 version = "0.1.0"
-description = "Stage 1 mock robot arm planning and execution pipeline."
+description = "Mock robot arm planning pipeline with a MuJoCo executor skeleton."
 requires-python = ">=3.10"
 dependencies = []
+
+[project.optional-dependencies]
+mujoco = [
+    "numpy>=1.24",
+    "mujoco>=3.0",
+]
+test = [
+    "pytest>=7.0",
+]
+dev = [
+    "numpy>=1.24",
+    "mujoco>=3.0",
+    "pytest>=7.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -15,4 +29,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-
