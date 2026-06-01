@@ -106,6 +106,87 @@ python scripts/run_mujoco_executor.py `
   --model examples/mujoco/minimal_six_joint_arm.xml
 ```
 
+## Run Stage 3 Upstream Interface Pipeline
+
+Stage 3 standardizes the upstream JSON contracts for YOLO and BODex without
+integrating either project directly. It still uses the current mock planner and
+the MuJoCo executor.
+
+```powershell
+python scripts/run_stage3_pipeline.py
+```
+
+By default it reads:
+
+```text
+examples/yolo_detection.json
+examples/bodex_grasp_target.json
+examples/mujoco/minimal_six_joint_arm.xml
+```
+
+Expected outputs:
+
+```text
+outputs/
+  trajectories/object_001_trajectory.json
+  logs/mujoco_execution_log.csv
+  reports/mujoco_execution_report.json
+  reports/stage3_evaluation_report.json
+```
+
+### YOLO Input Contract
+
+The YOLO-side adapter reads `examples/yolo_detection.json`. The YOLO group
+should provide:
+
+```json
+{
+  "object_id": "object_001",
+  "class_name": "mock_cube",
+  "confidence": 0.97,
+  "bbox_xyxy": [120.0, 80.0, 220.0, 180.0],
+  "T_world_object": [
+    [1.0, 0.0, 0.0, 0.45],
+    [0.0, 1.0, 0.0, 0.05],
+    [0.0, 0.0, 1.0, 0.08],
+    [0.0, 0.0, 0.0, 1.0]
+  ]
+}
+```
+
+`T_world_object` is required. The current project does not estimate a 6D object
+pose from `bbox_xyxy`; if the field is missing, the adapter raises a clear
+error.
+
+### BODex Input Contract
+
+The BODex-side adapter reads `examples/bodex_grasp_target.json`. The BODex group
+should provide:
+
+```json
+{
+  "object_id": "object_001",
+  "T_world_pregrasp": [
+    [1.0, 0.0, 0.0, 0.45],
+    [0.0, 1.0, 0.0, 0.05],
+    [0.0, 0.0, 1.0, 0.20],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "T_world_grasp": [
+    [1.0, 0.0, 0.0, 0.45],
+    [0.0, 1.0, 0.0, 0.05],
+    [0.0, 0.0, 1.0, 0.10],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "approach_vector_world": [0.0, 0.0, -1.0],
+  "hand_joint_goal": [0.02, 0.02, 0.02, 0.02]
+}
+```
+
+The Stage 3 planner target currently uses `T_world_pregrasp`. `T_world_grasp`
+and `hand_joint_goal` are preserved in the internal `GraspTarget` for future
+controller and grasp execution stages.
+
 ## Test
 
 ```powershell
@@ -121,6 +202,9 @@ The tests cover:
 - MuJoCo executor missing-model behavior
 - MuJoCo availability detection
 - MuJoCo executor script report generation
+- Stage 3 YOLO/BODex JSON adapters
+- Stage 3 object_id validation
+- Stage 3 pipeline script report generation
 
 ## Repository Layout
 
@@ -133,6 +217,7 @@ src/robot_arm_pipeline/planning   mock planner and cuRobo placeholder
 src/robot_arm_pipeline/execution  mock executor and MuJoCo executor skeleton
 src/robot_arm_pipeline/evaluation metrics and JSON output helpers
 examples/mujoco/                  minimal MJCF models
+examples/*.json                   upstream interface examples
 tests/                           pytest coverage for Stage 1 contracts
 outputs/                         generated artifacts
 ```

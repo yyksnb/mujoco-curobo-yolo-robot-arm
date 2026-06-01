@@ -20,4 +20,13 @@ Stage 2 currently adds a minimal MuJoCo trajectory executor skeleton:
 * Save execution logs under `outputs/logs/`.
 * Save execution reports under `outputs/reports/`.
 
+Stage 3 standardizes upstream interfaces without integrating upstream projects:
+
+* Read YOLO-style detections from JSON.
+* Require `T_world_object`; do not estimate 6D pose from 2D bbox.
+* Read BODex-style grasp targets from JSON.
+* Use `T_world_pregrasp` as the current mock planning target.
+* Check YOLO and BODex `object_id` values before planning.
+* Reuse the mock planner and MuJoCo executor.
+
 Do not install or integrate cuRobo, YOLO, or BODex yet.
