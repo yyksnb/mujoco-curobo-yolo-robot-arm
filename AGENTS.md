@@ -29,4 +29,12 @@ Stage 3 standardizes upstream interfaces without integrating upstream projects:
 * Check YOLO and BODex `object_id` values before planning.
 * Reuse the mock planner and MuJoCo executor.
 
-Do not install or integrate cuRobo, YOLO, or BODex yet.
+Stage 4.1 adds a cuRobo planner skeleton without real CUDA planning:
+
+* Keep `MockPlanner` as the default planner.
+* Do not import cuRobo, torch, or CUDA libraries at module import time.
+* Return clear `PlanningResult` failures when cuRobo, torch CUDA, or config is
+  unavailable.
+* Keep cuRobo conversion helpers pure Python and testable.
+
+Do not integrate real cuRobo planning, YOLO, or BODex yet.

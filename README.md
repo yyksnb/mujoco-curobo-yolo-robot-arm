@@ -187,6 +187,39 @@ The Stage 3 planner target currently uses `T_world_pregrasp`. `T_world_grasp`
 and `hand_joint_goal` are preserved in the internal `GraspTarget` for future
 controller and grasp execution stages.
 
+## Run Stage 4.1 CuroboPlanner Skeleton
+
+Stage 4.1 adds a `CuroboPlanner` interface skeleton with lazy imports,
+configuration placeholders, conversion helpers, and graceful failure reports.
+It is not a formal cuRobo CUDA motion planner yet.
+
+```powershell
+python scripts/run_curobo_planner.py
+```
+
+By default it reads:
+
+```text
+examples/bodex_grasp_target.json
+configs/curobo/example_planner_config.json
+```
+
+Expected output when cuRobo or CUDA is not configured:
+
+```text
+outputs/
+  reports/curobo_planner_report.json
+```
+
+The report should contain `success: false` and an actionable message. This is
+intentional for non-cuRobo development environments.
+
+Real cuRobo validation should be done in an Ubuntu + CUDA + PyTorch environment
+following the notes in `docs/curobo_integration_notes.md`. The placeholder config
+under `configs/curobo/` documents required fields such as `robot_config_path`,
+`world_config_path`, `ee_link`, `base_link`, `joint_names`, and `use_cuda`; it is
+not a production robot model.
+
 ## Test
 
 ```powershell
@@ -205,6 +238,8 @@ The tests cover:
 - Stage 3 YOLO/BODex JSON adapters
 - Stage 3 object_id validation
 - Stage 3 pipeline script report generation
+- CuroboPlanner lazy-import skeleton and graceful failure behavior
+- cuRobo conversion helper schema validation
 
 ## Repository Layout
 
@@ -216,6 +251,7 @@ src/robot_arm_pipeline/scene      collision scene construction
 src/robot_arm_pipeline/planning   mock planner and cuRobo placeholder
 src/robot_arm_pipeline/execution  mock executor and MuJoCo executor skeleton
 src/robot_arm_pipeline/evaluation metrics and JSON output helpers
+configs/curobo/                   cuRobo planner placeholder config
 examples/mujoco/                  minimal MJCF models
 examples/*.json                   upstream interface examples
 tests/                           pytest coverage for Stage 1 contracts

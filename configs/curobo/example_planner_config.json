@@ -1,0 +1,15 @@
+{
+  "robot_config_path": "configs/curobo/replace_with_robot_config.yml",
+  "world_config_path": "configs/curobo/replace_with_world_config.yml",
+  "ee_link": "tool0",
+  "base_link": "base_link",
+  "joint_names": [
+    "joint_1",
+    "joint_2",
+    "joint_3",
+    "joint_4",
+    "joint_5",
+    "joint_6"
+  ],
+  "use_cuda": true
+}
