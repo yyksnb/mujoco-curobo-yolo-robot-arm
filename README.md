@@ -220,6 +220,23 @@ under `configs/curobo/` documents required fields such as `robot_config_path`,
 `world_config_path`, `ee_link`, `base_link`, `joint_names`, and `use_cuda`; it is
 not a production robot model.
 
+## Check cuRobo Environment
+
+Stage 4.2 adds an environment check for future real cuRobo validation. It does
+not run MotionGen or MotionPlanner.
+
+```powershell
+python scripts/check_curobo_environment.py
+```
+
+The script prints a JSON-style report with Python/platform details, PyTorch and
+CUDA availability, cuRobo import status, CUDA tensor allocation status, and a
+recommended next step. On Windows or when CUDA is unavailable, it recommends
+using Ubuntu 22.04 or WSL2 Ubuntu 22.04 with NVIDIA CUDA, a PyTorch CUDA build,
+and cuRobo installed from the official repository.
+
+See `docs/curobo_environment_setup.md` for the setup checklist.
+
 ## Test
 
 ```powershell
@@ -240,6 +257,7 @@ The tests cover:
 - Stage 3 pipeline script report generation
 - CuroboPlanner lazy-import skeleton and graceful failure behavior
 - cuRobo conversion helper schema validation
+- cuRobo environment check script output and recommended next step
 
 ## Repository Layout
 
