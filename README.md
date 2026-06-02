@@ -237,6 +237,37 @@ and cuRobo installed from the official repository.
 
 See `docs/curobo_environment_setup.md` for the setup checklist.
 
+## Run Stage 4.3 MotionGen Demo Adapter
+
+Stage 4.3 adds a minimal cuRobo MotionGen demo adapter entry point. It fixes the
+configuration, input, output, and fallback contract for future Linux CUDA
+validation. It still does not run real CUDA MotionGen planning in the current
+Windows environment.
+
+```powershell
+python scripts/run_curobo_motiongen_demo.py
+```
+
+By default it reads:
+
+```text
+configs/curobo/minimal_motiongen_demo.json
+```
+
+Expected Windows/no-cuRobo behavior:
+
+```text
+outputs/
+  reports/curobo_motiongen_demo_report.json
+```
+
+The report should contain `success: false`, no trajectory, and a clear message
+that cuRobo is not installed or configured. In a future Ubuntu 22.04/WSL2 CUDA
+environment, this script is intended to become the real MotionGen smoke-test
+entry point.
+
+See `docs/curobo_motiongen_demo_plan.md` for the input/output mapping.
+
 ## Test
 
 ```powershell
@@ -258,6 +289,7 @@ The tests cover:
 - CuroboPlanner lazy-import skeleton and graceful failure behavior
 - cuRobo conversion helper schema validation
 - cuRobo environment check script output and recommended next step
+- cuRobo MotionGen demo adapter graceful fallback
 
 ## Repository Layout
 
