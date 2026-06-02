@@ -268,6 +268,32 @@ entry point.
 
 See `docs/curobo_motiongen_demo_plan.md` for the input/output mapping.
 
+## Stage 4.4 Linux CUDA Validation Workflow
+
+Stage 4.4 defines the order for real cuRobo validation on Ubuntu 22.04, WSL2
+Ubuntu 22.04, or another Linux CUDA machine. It does not force cuRobo validation
+on Windows.
+
+Start with:
+
+```powershell
+python scripts/save_curobo_environment_report.py
+```
+
+This writes:
+
+```text
+outputs/reports/curobo_environment_report.json
+```
+
+In a real Linux CUDA environment, confirm the report shows `torch_installed`,
+`cuda_available`, `can_allocate_cuda_tensor`, and `curobo_installed` are all
+true before running the MotionGen demo adapter. On Windows, graceful failure and
+a Linux/WSL2 recommendation are expected.
+
+See `docs/stage4_4_linux_cuda_validation.md` for the full checklist and failure
+diagnostics.
+
 ## Test
 
 ```powershell
@@ -290,6 +316,7 @@ The tests cover:
 - cuRobo conversion helper schema validation
 - cuRobo environment check script output and recommended next step
 - cuRobo MotionGen demo adapter graceful fallback
+- cuRobo environment report saving and Linux CUDA validation workflow
 
 ## Repository Layout
 
