@@ -294,6 +294,25 @@ a Linux/WSL2 recommendation are expected.
 See `docs/stage4_4_linux_cuda_validation.md` for the full checklist and failure
 diagnostics.
 
+## Stage 4.5 Linux cuRobo Environment Validation Result
+
+Stage 4.5 was validated on Ubuntu 22.04.5 LTS with an NVIDIA GeForce RTX 4090
+using Python 3.10.12, PyTorch 2.11.0+cu128, and cuRobo
+0.8.0.post1.dev33. The environment check reports that PyTorch CUDA is available,
+a CUDA tensor can be allocated, and cuRobo imports successfully.
+
+The current cuRobo planner and MotionGen demo scripts now fail at the expected
+next boundary:
+
+```text
+cuRobo robot_config_path does not exist: configs/curobo/replace_with_robot_config.yml
+```
+
+This means the Linux CUDA/cuRobo environment is ready, and the next work is to
+prepare a real robot config, world config, joint order, `ee_link`, `base_link`,
+and collision spheres. See
+`docs/stage4_5_linux_curobo_validation_result.md` for the validation details.
+
 ## Test
 
 ```powershell

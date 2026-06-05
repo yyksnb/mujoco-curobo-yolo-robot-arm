@@ -12,7 +12,9 @@ BODEX_EXAMPLE = REPO_ROOT / "examples" / "bodex_grasp_target.json"
 MUJOCO_MODEL = REPO_ROOT / "examples" / "mujoco" / "minimal_six_joint_arm.xml"
 
 
-def test_run_curobo_motiongen_demo_gracefully_fails_without_curobo(tmp_path: Path) -> None:
+def test_run_curobo_motiongen_demo_gracefully_fails_until_real_robot_config_exists(
+    tmp_path: Path,
+) -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -32,7 +34,12 @@ def test_run_curobo_motiongen_demo_gracefully_fails_without_curobo(tmp_path: Pat
     assert "success=False" in result.stdout
     assert report["success"] is False
     assert report["trajectory_available"] is False
-    assert "cuRobo is not installed or not configured" in report["message"]
+    assert report["message"]
+    expected_messages = (
+        "cuRobo is not installed or not configured",
+        "cuRobo robot_config_path does not exist",
+    )
+    assert any(message in report["message"] for message in expected_messages)
 
 
 def test_stage3_pipeline_still_runs_with_motiongen_demo_present(tmp_path: Path) -> None:
