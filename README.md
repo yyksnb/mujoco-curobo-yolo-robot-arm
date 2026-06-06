@@ -313,6 +313,36 @@ prepare a real robot config, world config, joint order, `ee_link`, `base_link`,
 and collision spheres. See
 `docs/stage4_5_linux_curobo_validation_result.md` for the validation details.
 
+## Stage 5 Pick-and-Lift Demo
+
+Stage 5 adds a demo closure for pick-and-lift validation without changing the
+Stage 1/2/3 pipeline behavior.
+
+```powershell
+python scripts/find_curobo_example_configs.py
+python scripts/run_curobo_pick_lift_demo.py
+python scripts/run_mujoco_physical_grasp_demo.py
+python scripts/run_pick_lift_full_demo.py
+```
+
+The cuRobo side uses demo configuration under
+`configs/curobo/example_pick_lift_demo.json` and local cuRobo example resources
+when available. It may still fail gracefully at `robot_config`, `world_config`,
+or `motiongen_api` until a real robot planning model is prepared.
+
+The MuJoCo physical demo uses a toy two-finger gripper and cube model:
+
+```text
+examples/mujoco/two_finger_grasp_cube.xml
+```
+
+This model is a physical grasp smoke demo, not a real robot arm. The integrated
+full demo allows partial success, for example when MuJoCo physics is ready but
+cuRobo planning still needs a real robot/world config.
+
+See `docs/stage5_pick_lift_demo.md` for details and the real integration inputs
+needed next.
+
 ## Test
 
 ```powershell

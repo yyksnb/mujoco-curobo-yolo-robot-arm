@@ -1,0 +1,27 @@
+{
+  "demo_name": "stage5_franka_pick_lift_smoke_demo",
+  "robot_config_path": "franka.yml",
+  "world_config_path": "collision_table.yml",
+  "base_link": "panda_link0",
+  "ee_link": "panda_hand",
+  "joint_names": [
+    "panda_joint1",
+    "panda_joint2",
+    "panda_joint3",
+    "panda_joint4",
+    "panda_joint5",
+    "panda_joint6",
+    "panda_joint7",
+    "panda_finger_joint1",
+    "panda_finger_joint2"
+  ],
+  "start_joint_state": [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8, 0.04, 0.04],
+  "object_pose_world": [0.5, 0.0, 0.05, 1.0, 0.0, 0.0, 0.0],
+  "pregrasp_pose_world": [0.5, 0.0, 0.25, 1.0, 0.0, 0.0, 0.0],
+  "grasp_pose_world": [0.5, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
+  "lift_pose_world": [0.5, 0.0, 0.32, 1.0, 0.0, 0.0, 0.0],
+  "retreat_pose_world": [0.35, 0.0, 0.32, 1.0, 0.0, 0.0, 0.0],
+  "object_size": [0.04, 0.04, 0.04],
+  "is_demo_config": true,
+  "notes": "Demo-only config using cuRobo's official Franka example resources. This is not the final real robot arm configuration."
+}

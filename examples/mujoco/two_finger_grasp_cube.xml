@@ -1,0 +1,47 @@
+<mujoco model="stage5_two_finger_grasp_cube_demo">
+  <compiler angle="radian"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <default>
+    <geom friction="4.0 1.0 0.02" solref="0.004 1" solimp="0.95 0.99 0.001"/>
+    <joint damping="5"/>
+  </default>
+
+  <worldbody>
+    <light name="top_light" pos="0 -0.5 1.0"/>
+    <geom name="floor" type="plane" size="0.5 0.5 0.02" rgba="0.7 0.7 0.7 1"/>
+    <geom name="table" type="box" pos="0 0 0.015" size="0.18 0.18 0.015" rgba="0.45 0.45 0.45 1"/>
+
+    <!-- Toy cube for physical grasp smoke testing. This is not a real robot asset. -->
+    <body name="cube" pos="0 0 0.058">
+      <freejoint name="cube_free"/>
+      <geom name="cube_geom" type="box" size="0.025 0.025 0.025" mass="0.03"
+            friction="5.0 1.2 0.02" rgba="0.1 0.4 0.9 1"/>
+    </body>
+
+    <!-- Demo-only vertical two-finger gripper with one lift joint and two closing joints. -->
+    <body name="gripper_lift" pos="0 0 0.165">
+      <joint name="lift_z" type="slide" axis="0 0 1" limited="true" range="-0.03 0.18" damping="25"/>
+      <geom name="palm_geom" type="box" pos="0 0 0.005" size="0.055 0.08 0.01" mass="0.2"
+            contype="0" conaffinity="0" rgba="0.2 0.2 0.2 1"/>
+
+      <body name="left_finger" pos="0 0.070 -0.060">
+        <joint name="left_finger_slide" type="slide" axis="0 -1 0" limited="true" range="0 0.052" damping="12"/>
+        <geom name="left_finger_geom" type="box" pos="0 0 -0.020" size="0.016 0.008 0.035"
+              mass="0.05" friction="6.0 1.5 0.03" rgba="0.85 0.2 0.2 1"/>
+      </body>
+
+      <body name="right_finger" pos="0 -0.070 -0.060">
+        <joint name="right_finger_slide" type="slide" axis="0 1 0" limited="true" range="0 0.052" damping="12"/>
+        <geom name="right_finger_geom" type="box" pos="0 0 -0.020" size="0.016 0.008 0.035"
+              mass="0.05" friction="6.0 1.5 0.03" rgba="0.85 0.2 0.2 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="lift_z_ctrl" joint="lift_z" kp="450" ctrlrange="-0.03 0.18"/>
+    <position name="left_finger_ctrl" joint="left_finger_slide" kp="260" ctrlrange="0 0.052"/>
+    <position name="right_finger_ctrl" joint="right_finger_slide" kp="260" ctrlrange="0 0.052"/>
+  </actuator>
+</mujoco>
