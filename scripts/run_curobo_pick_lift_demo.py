@@ -11,8 +11,10 @@ from _bootstrap import add_src_to_path
 
 add_src_to_path()
 
-from robot_arm_pipeline.planning.curobo_planner import CuroboPlanner
-from robot_arm_pipeline.types import GraspTarget, ObjectPose, PlanningRequest, Pose3D, RobotState
+from robot_arm_pipeline.planning.curobo_motiongen_smoke import (
+    MotionGenSmokeConfig,
+    run_motiongen_smoke,
+)
 
 
 DEFAULT_CUROBO_ROOT = Path("/home/yyk/projects/curobo")
@@ -70,28 +72,31 @@ def run_demo(config_path: Path, curobo_root: Path = DEFAULT_CUROBO_ROOT) -> dict
         return _finish(base_report, "world_config", f"world_config_path does not exist: {config.get('world_config_path')}", started)
 
     stages: list[dict[str, Any]] = []
-    current_state = tuple(float(value) for value in config["start_joint_state"])
     for stage_name, pose_key in STAGE_POSES:
         stage_started = time.perf_counter()
         try:
-            request = _build_request(config, pose_key, current_state)
-            planner = CuroboPlanner(
-                robot_config_path=robot_path,
-                world_config_path=world_path,
-                ee_link=config.get("ee_link"),
-                base_link=config.get("base_link"),
-                joint_names=tuple(config.get("joint_names", ())),
-                use_cuda=True,
+            smoke_config = MotionGenSmokeConfig(
+                demo_name=f"{config.get('demo_name')}_{stage_name}",
+                robot=str(config.get("robot_config_path")),
+                scene_model=str(config.get("world_config_path")),
+                goal_pose=_as_pose(config[pose_key]),
+                max_attempts=int(config.get("max_attempts", 1)),
+                num_ik_seeds=int(config.get("num_ik_seeds", 16)),
+                num_trajopt_seeds=int(config.get("num_trajopt_seeds", 2)),
+                use_cuda_graph=bool(config.get("use_cuda_graph", False)),
+                enable_graph_attempt=int(config.get("enable_graph_attempt", 10)),
+                is_demo_config=bool(config.get("is_demo_config", True)),
+                notes=str(config.get("notes", "")),
             )
-            result = planner.plan(request)
-            category = None if result.success else _categorize_message(result.message)
+            result = run_motiongen_smoke(smoke_config)
             stages.append(
                 {
                     "stage_name": stage_name,
                     "success": result.success,
                     "message": result.message,
-                    "failure_category": category,
-                    "trajectory_available": result.trajectory is not None,
+                    "failure_category": result.failure_category,
+                    "trajectory_available": result.trajectory_available,
+                    "motiongen_api_called": result.motiongen_api_called,
                     "planning_time_sec": round(time.perf_counter() - stage_started, 6),
                 }
             )
@@ -105,6 +110,7 @@ def run_demo(config_path: Path, curobo_root: Path = DEFAULT_CUROBO_ROOT) -> dict
             break
 
     base_report["stages"] = stages
+    base_report["motiongen_entered"] = any(bool(stage.get("motiongen_api_called")) for stage in stages)
     success = bool(stages) and all(bool(stage["success"]) for stage in stages)
     base_report["success"] = success
     first_failure = next((stage for stage in stages if not stage["success"]), None)
@@ -151,78 +157,11 @@ def _resolve_curobo_config(value: Any, curobo_root: Path, category: str) -> Path
     return candidate
 
 
-def _build_request(config: dict[str, Any], pose_key: str, joint_positions: tuple[float, ...]) -> PlanningRequest:
-    joint_names = tuple(str(name) for name in config["joint_names"])
-    if len(joint_names) != len(joint_positions):
-        raise ValueError("joint_names and start_joint_state must have the same length")
-
-    pose_values = tuple(float(value) for value in config[pose_key])
-    object_values = tuple(float(value) for value in config["object_pose_world"])
-    pose = _pose_from_curobo_pose(pose_values)
-    transform = _pose_to_transform(pose_values)
-    object_pose = _pose_from_curobo_pose(object_values)
-    object_transform = _pose_to_transform(object_values)
-    return PlanningRequest(
-        object_pose=ObjectPose(
-            object_id="stage5_demo_cube",
-            label="demo_cube",
-            pose=object_pose,
-            T_world_object=object_transform,
-        ),
-        grasp_target=GraspTarget(
-            object_id="stage5_demo_cube",
-            pose=pose,
-            approach_vector=(0.0, 0.0, -1.0),
-            gripper_width_m=0.04,
-            T_world_pregrasp=transform,
-            T_world_grasp=transform,
-        ),
-        robot_state=RobotState(joint_names=joint_names, joint_positions=joint_positions),
-    )
-
-
-def _pose_from_curobo_pose(values: tuple[float, ...]) -> Pose3D:
-    if len(values) != 7:
+def _as_pose(values: Any) -> tuple[float, float, float, float, float, float, float]:
+    pose = tuple(float(value) for value in values)
+    if len(pose) != 7:
         raise ValueError("pose must be [x, y, z, qw, qx, qy, qz]")
-    x, y, z, qw, qx, qy, qz = values
-    return Pose3D(position=(x, y, z), orientation_xyzw=(qx, qy, qz, qw))
-
-
-def _pose_to_transform(values: tuple[float, ...]) -> tuple[
-    tuple[float, float, float, float],
-    tuple[float, float, float, float],
-    tuple[float, float, float, float],
-    tuple[float, float, float, float],
-]:
-    if len(values) != 7:
-        raise ValueError("pose must be [x, y, z, qw, qx, qy, qz]")
-    x, y, z, qw, qx, qy, qz = values
-    xx, yy, zz = qx * qx, qy * qy, qz * qz
-    xy, xz, yz = qx * qy, qx * qz, qy * qz
-    wx, wy, wz = qw * qx, qw * qy, qw * qz
-    return (
-        (1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy), x),
-        (2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx), y),
-        (2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy), z),
-        (0.0, 0.0, 0.0, 1.0),
-    )
-
-
-def _categorize_message(message: str) -> str:
-    lowered = message.lower()
-    if "real cuda motion planning is not implemented" in lowered:
-        return "motiongen_api"
-    if "cuda" in lowered or "installed" in lowered:
-        return "environment"
-    if "robot_config" in lowered:
-        return "robot_config"
-    if "world_config" in lowered:
-        return "world_config"
-    if "joint" in lowered:
-        return "joint_order"
-    if "pose" in lowered or "transform" in lowered:
-        return "pose_conversion"
-    return "unknown"
+    return pose
 
 
 def _failed_stage(stage_name: str, category: str, message: str, started: float) -> dict[str, Any]:

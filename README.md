@@ -41,6 +41,17 @@ The requirements file installs `numpy`, `pytest`, and `mujoco`. Stage 1 does
 not need MuJoCo at runtime, but Stage 2 uses it for real MJCF execution when it
 is available in the environment.
 
+For Linux CUDA cuRobo validation, first install a PyTorch CUDA build using the
+official PyTorch command for your platform and CUDA runtime. Then install this
+project's extra cuRobo Linux runtime requirements:
+
+```bash
+python -m pip install -r requirements-curobo-linux.txt
+```
+
+This currently installs `cuda-core[cu12]>=0.7`, which is required by cuRobo V2
+MotionPlanner on the validated Linux CUDA environment.
+
 ## Run Stage 1 Mock Pipeline
 
 ```powershell
@@ -320,15 +331,34 @@ Stage 1/2/3 pipeline behavior.
 
 ```powershell
 python scripts/find_curobo_example_configs.py
+python scripts/run_curobo_motiongen_smoke.py
 python scripts/run_curobo_pick_lift_demo.py
 python scripts/run_mujoco_physical_grasp_demo.py
 python scripts/run_pick_lift_full_demo.py
 ```
 
-The cuRobo side uses demo configuration under
-`configs/curobo/example_pick_lift_demo.json` and local cuRobo example resources
-when available. It may still fail gracefully at `robot_config`, `world_config`,
-or `motiongen_api` until a real robot planning model is prepared.
+Stage 5.1 validates the real cuRobo V2 `MotionPlanner` API with the official
+Franka demo resources. The smoke script writes:
+
+```text
+outputs/reports/curobo_motiongen_smoke_report.json
+outputs/trajectories/curobo_motiongen_smoke_trajectory.json
+```
+
+The cuRobo pick-lift side uses demo configuration under
+`configs/curobo/example_pick_lift_demo.json` and local cuRobo example resources.
+It can run four demo planning stages with the official Franka config on the
+validated Linux CUDA environment. These are still demo trajectories, not final
+real-arm trajectories.
+
+Current validated Stage 5.1 result:
+
+```text
+run_curobo_motiongen_smoke.py -> success=True, motiongen_api_called=True
+run_curobo_pick_lift_demo.py -> success=True, four planning stages succeeded
+run_mujoco_physical_grasp_demo.py -> success=True
+run_pick_lift_full_demo.py -> overall_status=success
+```
 
 The MuJoCo physical demo uses a toy two-finger gripper and cube model:
 

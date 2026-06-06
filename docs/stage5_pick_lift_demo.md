@@ -8,6 +8,45 @@ Stage 5 builds two runnable demo lines and an integration scaffold:
 
 This stage is a demo closure, not the final real robot integration.
 
+## Stage 5.1 MotionPlanner Smoke Result
+
+On Ubuntu 22.04.5 with RTX 4090, PyTorch 2.11.0+cu128, and cuRobo
+0.8.0.post1.dev33, the real cuRobo V2 `MotionPlanner` path has been validated
+with the official Franka demo config.
+
+The environment required the cuRobo V2 CUDA runtime dependency:
+
+```bash
+python -m pip install "cuda-core[cu12]>=0.7"
+```
+
+Without this package, cuRobo imports but MotionPlanner construction can fail
+with `No module named 'cuda.core'`.
+
+Run:
+
+```bash
+python scripts/run_curobo_motiongen_smoke.py
+```
+
+Expected Linux CUDA result:
+
+```text
+success=True
+motiongen_api_called=True
+trajectory_available=True
+```
+
+The script writes:
+
+```text
+outputs/reports/curobo_motiongen_smoke_report.json
+outputs/trajectories/curobo_motiongen_smoke_trajectory.json
+```
+
+The smoke trajectory is a demo trajectory for cuRobo's official Franka example
+robot. It is not a trajectory for the final real arm.
+
 ## cuRobo Planning Demo
 
 `scripts/run_curobo_pick_lift_demo.py` reads
@@ -27,9 +66,10 @@ The default config uses cuRobo's local Franka example resources when available:
 ```
 
 These are demo resources only. They are not the final real robot model for this
-project. If the current project-side cuRobo adapter cannot yet enter the
-official MotionPlanner/MotionGen API, the script writes a graceful failure
-report with `failure_category: motiongen_api`.
+project. The Stage 5.1 implementation uses the real cuRobo V2 `MotionPlanner`
+API. If the local cuRobo runtime, robot config, scene config, start state, or
+goal pose is invalid, the script writes a graceful failure report with a
+specific `failure_category`.
 
 ## MuJoCo Physical Demo
 
@@ -64,7 +104,14 @@ outputs/reports/pick_lift_full_demo_report.json
 
 For this stage, the bridge is intentionally loose. The full demo does not force
 cuRobo output directly into MuJoCo. It records whether planning and physics are
-individually ready. A common expected state is:
+individually ready. With the Stage 5.1 Linux CUDA environment, the expected
+status is:
+
+```text
+success
+```
+
+If planning fails but MuJoCo physics still succeeds, the status can be:
 
 ```text
 partial_success_physics_ready_planning_needs_robot_config
@@ -100,6 +147,7 @@ description is not validated yet. Stage 5.1 or Stage 6 should prepare:
 
 ```bash
 python scripts/find_curobo_example_configs.py
+python scripts/run_curobo_motiongen_smoke.py
 python scripts/run_curobo_pick_lift_demo.py
 python scripts/run_mujoco_physical_grasp_demo.py
 python scripts/run_pick_lift_full_demo.py

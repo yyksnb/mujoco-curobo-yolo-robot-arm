@@ -1,0 +1,13 @@
+{
+  "demo_name": "stage5_1_official_franka_motionplanner_smoke",
+  "robot": "franka.yml",
+  "scene_model": "collision_table.yml",
+  "goal_pose": [0.45, 0.0, 0.35, 1.0, 0.0, 0.0, 0.0],
+  "max_attempts": 1,
+  "num_ik_seeds": 16,
+  "num_trajopt_seeds": 2,
+  "use_cuda_graph": false,
+  "enable_graph_attempt": 10,
+  "is_demo_config": true,
+  "notes": "Official cuRobo Franka demo config for MotionPlanner smoke testing only. This is not the final real robot configuration."
+}
