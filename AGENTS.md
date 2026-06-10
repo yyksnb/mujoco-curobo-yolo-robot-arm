@@ -37,4 +37,26 @@ Stage 4.1 adds a cuRobo planner skeleton without real CUDA planning:
   unavailable.
 * Keep cuRobo conversion helpers pure Python and testable.
 
-Do not integrate real cuRobo planning, YOLO, or BODex yet.
+Later stages validate real cuRobo smoke demos, but YOLO and BODex remain
+upstream modules. Do not fake real robot parameters, and keep cuRobo, torch, and
+CUDA imports lazy outside explicit validation/demo entry points.
+
+## Codex Collaboration Rules
+
+* Do not modify `main` directly. Create an independent branch for each task,
+  such as `feature/xxx`, `fix/xxx`, `docs/xxx`, or `experiment/xxx`.
+* Before making changes, read `README.md`, `AGENTS.md`, and `docs/HANDOFF.md`.
+* Keep changes scoped to the requested task and preserve the existing project
+  structure.
+* After changes, run the existing tests when the environment supports them.
+* If tests fail, do not claim success. Summarize the failed command, key error,
+  likely cause, and next step.
+* Do not implement YOLO training in this repository. Treat YOLO as an upstream
+  module that provides detection and pose inputs.
+* Do not deeply modify BODex in this repository. Treat BODex as an upstream
+  module that provides grasp targets.
+* Prefer mature open-source libraries and the current project structure over
+  rebuilding existing planning, simulation, parsing, or robotics logic from
+  scratch.
+* Do not commit large datasets, model weights, generated `outputs/`,
+  `__pycache__/`, or `.pytest_cache/`.
