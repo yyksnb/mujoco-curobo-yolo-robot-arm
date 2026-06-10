@@ -373,6 +373,25 @@ cuRobo planning still needs a real robot/world config.
 See `docs/stage5_pick_lift_demo.md` for details and the real integration inputs
 needed next.
 
+## Team Collaboration / 多人协作
+
+`main` is the stable branch. `main` 是稳定分支，应该保持可运行、可复现实验。
+
+Team members should create their own feature branches from the latest `main`.
+队友开发时请从最新 `main` 新建自己的分支，例如 `feature/xxx`、`fix/xxx`、
+`docs/xxx` 或 `experiment/xxx`。
+
+All changes should be merged through Pull Request. 所有代码、文档、实验结果
+都必须通过 PR 合并，不要直接向 `main` 提交。
+
+Before merging, run the relevant tests and ask at least one teammate to review
+the PR. 合并前请运行相关测试，并至少让一名成员 review。
+
+If there is a conflict, sync the latest `main` first, then resolve the conflict
+on your own branch. 如果出现冲突，先同步最新 `main`，再在自己的分支上解决冲突。
+
+See `CONTRIBUTING.md` for the full workflow.
+
 ## Test
 
 ```powershell
