@@ -90,3 +90,25 @@ git merge main
 ```
 
 解决冲突后重新运行相关测试，再推送分支。不要为了省事直接覆盖队友的改动。
+
+## GitHub Flow and main branch protection
+
+Use GitHub Flow for team integration work:
+
+1. Start from the latest stable `main`.
+2. Create a scoped branch such as `feature/yolo-camera-capture`,
+   `feature/object-assets`, `feature/robot-mujoco-scene`,
+   `fix/stage3-adapter-validation`, or `docs/team-notes`.
+3. Commit only source, tests, examples, configs, and docs that belong to the
+   task.
+4. Push the branch and open a Pull Request.
+5. Run `pytest -q` or the task-specific validation commands before review.
+6. Merge only after review and passing tests.
+
+Keep `main` stable. Do not push directly to `main`, and do not commit
+`outputs/`, `__pycache__/`, `.pytest_cache/`, model weights, datasets, temporary
+logs, or large generated assets.
+
+Raw YOLO/BODex formats should not replace the repository's Stage 3 canonical
+contract. If an upstream format is different, add an adapter or converter and
+document any mock pose or stub behavior clearly.

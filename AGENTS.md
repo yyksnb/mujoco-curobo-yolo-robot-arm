@@ -55,6 +55,15 @@ CUDA imports lazy outside explicit validation/demo entry points.
   module that provides detection and pose inputs.
 * Do not deeply modify BODex in this repository. Treat BODex as an upstream
   module that provides grasp targets.
+* Team integration work must reuse the existing Stage 3 canonical contract:
+  `examples/yolo_detection.json`, `examples/bodex_grasp_target.json`, and
+  `src/robot_arm_pipeline/types.py`.
+* If a teammate's raw format does not match the Stage 3 contract, add a small
+  adapter or converter instead of changing the main pipeline contract.
+* YOLO bbox-only output is a raw upstream format. It must be converted and must
+  include or derive a clearly sourced `T_world_object` before planning.
+* Mock poses, mock assets, stub planners, and placeholder configs must be
+  explicitly labeled as mock or stub in code, data, docs, or reports.
 * Prefer mature open-source libraries and the current project structure over
   rebuilding existing planning, simulation, parsing, or robotics logic from
   scratch.
