@@ -4,6 +4,20 @@ Codex-assisted robot arm simulation pipeline with clean interfaces for scene
 construction, grasp target conversion, motion planning, execution, and
 evaluation.
 
+## Quick Navigation / 快速导航
+
+| Topic | Start here |
+|---|---|
+| New teammate onboarding | [docs/START_HERE.md](docs/START_HERE.md) |
+| Team task split | [docs/team_task_split.md](docs/team_task_split.md) |
+| Git branch and PR flow | [docs/team_git_flow.md](docs/team_git_flow.md) |
+| End-to-end integration workflow | [docs/integration_workflow.md](docs/integration_workflow.md) |
+| Data format policy | [docs/interface_contracts/data_format_policy.md](docs/interface_contracts/data_format_policy.md) |
+| YOLO detection contract | [docs/interface_contracts/yolo_detection_contract.md](docs/interface_contracts/yolo_detection_contract.md) |
+| Robot and scene contract | [docs/interface_contracts/robot_scene_contract.md](docs/interface_contracts/robot_scene_contract.md) |
+| Object asset contract | [docs/interface_contracts/object_asset_contract.md](docs/interface_contracts/object_asset_contract.md) |
+| Demo recording checklist | [docs/demo_recording_checklist.md](docs/demo_recording_checklist.md) |
+
 ## Current Stage
 
 This repository currently implements Stage 1 and a minimal Stage 2 MuJoCo
@@ -197,6 +211,24 @@ should provide:
 The Stage 3 planner target currently uses `T_world_pregrasp`. `T_world_grasp`
 and `hand_joint_goal` are preserved in the internal `GraspTarget` for future
 controller and grasp execution stages.
+
+### Convert Raw YOLO Output to Stage 3 Contract
+
+YOLO teammates may keep their own raw output format, but raw bbox output must
+not enter the main planning pipeline directly. Convert it to the canonical Stage
+3 detection contract first:
+
+```powershell
+python scripts/convert_yolo_raw_to_stage3_contract.py `
+  --raw examples/yolo_raw_output_sample.json `
+  --output outputs/tmp_yolo_detection_converted.json `
+  --allow-mock-pose
+```
+
+`--allow-mock-pose` inserts a clearly marked mock `T_world_object` for adapter
+tests only. Without a real pose, bbox-only YOLO output is not enough for cuRobo
+planning. Generated files under `outputs/` are ignored and should not be
+committed.
 
 ## Run Stage 4.1 CuroboPlanner Skeleton
 

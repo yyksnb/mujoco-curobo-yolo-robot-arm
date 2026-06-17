@@ -1,0 +1,12 @@
+{
+  "image_path": "outputs/images/wrist_camera_0001.png",
+  "camera_name": "wrist_camera",
+  "detections": [
+    {
+      "object_id": "object_001",
+      "class_name": "mock_cube",
+      "confidence": 0.97,
+      "bbox_xyxy": [120.0, 80.0, 220.0, 180.0]
+    }
+  ]
+}
