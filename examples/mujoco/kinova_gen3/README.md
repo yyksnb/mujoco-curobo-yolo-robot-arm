@@ -49,6 +49,21 @@ mujoco.mj_saveLastXML('gen3.xml', model)
     - Added keyframes for "home" and "retract".
 6. Added `scene.xml` which includes the robot, with a textured groundplane, skybox, and haze.
 
+## Robot Scene Contract
+
+This scene exposes the following fields for downstream planning and execution:
+
+```json
+{
+  "robot_xml": "examples/mujoco/kinova_gen3/gen3_with_robotiq_2f85.xml",
+  "camera_name": "wrist",
+  "camera_frame": "T_bracelet_link_wrist (parent body: bracelet_link; local pose: pos=[0, -0.05639, -0.058475], quat_xyzw=[0, 0, 0, 1])",
+  "base_link": "base_link",
+  "ee_link": "pinch_site",
+  "joint_names": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"]
+}
+```
+
 ## Robotiq 2F-85
 
 Do not include the Robotiq mechanical coupling used in arms such as the UR and Franka since for the Kinova Gen3, it is built into the end effector interface. Specifically, if using Menagerie's `robotiq_2f85`, the "base_mount" link (mechanical coupling) should be excluded. Instead, the "base" link should be directly mounted at pose `pos="0 0 -0.06149039" quat="0 -1 1 0"` like so:
