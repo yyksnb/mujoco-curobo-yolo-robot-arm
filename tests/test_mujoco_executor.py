@@ -113,23 +113,23 @@ def test_mujoco_executor_rejects_mismatched_waypoint_joint_count(tmp_path: Path)
     assert "joint_positions must match the length of joint_names" in report.message
 
 
-def test_mujoco_gui_replay_control_handles_space_n_and_r() -> None:
-    keymap = _GuiKeyMap(space=32, n=78, r=82)
+def test_mujoco_gui_replay_control_handles_space_f9_and_f12() -> None:
+    keymap = _GuiKeyMap(space=32, step=298, reset=301)
     control = _ReplayControl(paused=True)
 
     assert control.snapshot() == (True, 0)
     control.handle_key(32, keymap)
     assert control.snapshot() == (False, 0)
-    control.handle_key(78, keymap)
+    control.handle_key(298, keymap)
     assert control.snapshot() == (True, 1)
     assert control.consume_segment_request() is True
-    control.handle_key(82, keymap)
+    control.handle_key(301, keymap)
     assert control.snapshot() == (True, 0)
     assert control.consume_reset_request() is True
     assert control.consume_reset_request() is False
 
 
-def test_mujoco_gui_executor_step_by_step_advances_on_n(monkeypatch, tmp_path: Path) -> None:
+def test_mujoco_gui_executor_step_by_step_advances_on_f9(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("mujoco")
     if not MujocoGuiExecutor.is_available():
         pytest.skip("MuJoCo GUI viewer not available")
@@ -172,7 +172,7 @@ def test_mujoco_gui_executor_step_by_step_advances_on_n(monkeypatch, tmp_path: P
         def sync(self):
             self.sync_calls += 1
             if self.key_callback is not None and self.n_events_remaining > 0 and self.sync_calls >= 2:
-                self.key_callback(int(mujoco.viewer.glfw.KEY_N))
+                self.key_callback(int(mujoco.viewer.glfw.KEY_F9))
                 self.n_events_remaining -= 1
 
     def fake_launch_passive(model, data, *, key_callback=None, **kwargs):

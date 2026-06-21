@@ -14,8 +14,8 @@ from robot_arm_pipeline.execution.mujoco_executor import MujocoExecutionReport, 
 @dataclass(frozen=True)
 class _GuiKeyMap:
     space: int
-    n: int
-    r: int
+    step: int
+    reset: int
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,10 @@ class _ReplayControl:
                 self.paused = not self.paused
                 if not self.paused:
                     self.segment_requests = 0
-            elif key == keymap.n:
+            elif key == keymap.step:
                 self.paused = True
                 self.segment_requests += 1
-            elif key == keymap.r:
+            elif key == keymap.reset:
                 self.paused = True
                 self.segment_requests = 0
                 self.reset_requested = True
@@ -489,8 +489,8 @@ class MujocoGuiExecutor(MujocoExecutor):
         viewer_module = getattr(mujoco, "viewer", None)
         glfw = getattr(viewer_module, "glfw", None)
         if glfw is not None:
-            return _GuiKeyMap(space=int(glfw.KEY_SPACE), n=int(glfw.KEY_N), r=int(glfw.KEY_R))
-        return _GuiKeyMap(space=32, n=78, r=82)
+            return _GuiKeyMap(space=int(glfw.KEY_SPACE), step=int(glfw.KEY_F9), reset=int(glfw.KEY_F12))
+        return _GuiKeyMap(space=32, step=298, reset=301)
 
     def _render_overlay(
         self,
@@ -520,8 +520,8 @@ class MujocoGuiExecutor(MujocoExecutor):
             [
                 "Keys:",
                 "Space: pause/resume",
-                "N: next waypoint",
-                "R: reset to initial state",
+                "F9: next waypoint",
+                "F12: reset to initial state",
             ]
         )
         state_text = "State: paused" if paused else "State: running"
