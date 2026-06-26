@@ -1,0 +1,142 @@
+<mujoco model="tank_model">
+  <compiler angle="degree"/>
+
+  <asset>
+    <material name="tank_material" rgba="0.58 0.43 0.25 1"/>
+    <mesh name="visual_mesh" file="ZNJQRBS-YOUXIANG.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_000" file="collision/youxiang_coacd_000.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_001" file="collision/youxiang_coacd_001.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_002" file="collision/youxiang_coacd_002.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_003" file="collision/youxiang_coacd_003.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_004" file="collision/youxiang_coacd_004.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_005" file="collision/youxiang_coacd_005.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_006" file="collision/youxiang_coacd_006.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_007" file="collision/youxiang_coacd_007.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_008" file="collision/youxiang_coacd_008.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_009" file="collision/youxiang_coacd_009.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_010" file="collision/youxiang_coacd_010.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_011" file="collision/youxiang_coacd_011.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_012" file="collision/youxiang_coacd_012.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_013" file="collision/youxiang_coacd_013.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_014" file="collision/youxiang_coacd_014.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_015" file="collision/youxiang_coacd_015.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_016" file="collision/youxiang_coacd_016.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_017" file="collision/youxiang_coacd_017.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_018" file="collision/youxiang_coacd_018.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_019" file="collision/youxiang_coacd_019.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_020" file="collision/youxiang_coacd_020.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_021" file="collision/youxiang_coacd_021.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_022" file="collision/youxiang_coacd_022.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_023" file="collision/youxiang_coacd_023.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_024" file="collision/youxiang_coacd_024.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_025" file="collision/youxiang_coacd_025.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_026" file="collision/youxiang_coacd_026.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_027" file="collision/youxiang_coacd_027.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_028" file="collision/youxiang_coacd_028.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_029" file="collision/youxiang_coacd_029.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_030" file="collision/youxiang_coacd_030.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_031" file="collision/youxiang_coacd_031.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_032" file="collision/youxiang_coacd_032.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_033" file="collision/youxiang_coacd_033.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_034" file="collision/youxiang_coacd_034.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_035" file="collision/youxiang_coacd_035.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_036" file="collision/youxiang_coacd_036.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_037" file="collision/youxiang_coacd_037.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_038" file="collision/youxiang_coacd_038.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_039" file="collision/youxiang_coacd_039.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_040" file="collision/youxiang_coacd_040.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_041" file="collision/youxiang_coacd_041.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_042" file="collision/youxiang_coacd_042.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_043" file="collision/youxiang_coacd_043.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_044" file="collision/youxiang_coacd_044.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_045" file="collision/youxiang_coacd_045.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_046" file="collision/youxiang_coacd_046.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_047" file="collision/youxiang_coacd_047.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_048" file="collision/youxiang_coacd_048.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_049" file="collision/youxiang_coacd_049.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_050" file="collision/youxiang_coacd_050.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_051" file="collision/youxiang_coacd_051.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_052" file="collision/youxiang_coacd_052.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_053" file="collision/youxiang_coacd_053.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_054" file="collision/youxiang_coacd_054.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_055" file="collision/youxiang_coacd_055.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_056" file="collision/youxiang_coacd_056.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_057" file="collision/youxiang_coacd_057.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_058" file="collision/youxiang_coacd_058.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_059" file="collision/youxiang_coacd_059.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_060" file="collision/youxiang_coacd_060.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_061" file="collision/youxiang_coacd_061.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_062" file="collision/youxiang_coacd_062.obj" scale="0.001 0.001 0.001"/>
+    <mesh name="collision_063" file="collision/youxiang_coacd_063.obj" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <body name="root">
+      <geom name="visual" type="mesh" mesh="visual_mesh" material="tank_material" contype="0" conaffinity="0" group="0"/>
+      <geom name="collision_000" type="mesh" mesh="collision_000" group="3"/>
+      <geom name="collision_001" type="mesh" mesh="collision_001" group="3"/>
+      <geom name="collision_002" type="mesh" mesh="collision_002" group="3"/>
+      <geom name="collision_003" type="mesh" mesh="collision_003" group="3"/>
+      <geom name="collision_004" type="mesh" mesh="collision_004" group="3"/>
+      <geom name="collision_005" type="mesh" mesh="collision_005" group="3"/>
+      <geom name="collision_006" type="mesh" mesh="collision_006" group="3"/>
+      <geom name="collision_007" type="mesh" mesh="collision_007" group="3"/>
+      <geom name="collision_008" type="mesh" mesh="collision_008" group="3"/>
+      <geom name="collision_009" type="mesh" mesh="collision_009" group="3"/>
+      <geom name="collision_010" type="mesh" mesh="collision_010" group="3"/>
+      <geom name="collision_011" type="mesh" mesh="collision_011" group="3"/>
+      <geom name="collision_012" type="mesh" mesh="collision_012" group="3"/>
+      <geom name="collision_013" type="mesh" mesh="collision_013" group="3"/>
+      <geom name="collision_014" type="mesh" mesh="collision_014" group="3"/>
+      <geom name="collision_015" type="mesh" mesh="collision_015" group="3"/>
+      <geom name="collision_016" type="mesh" mesh="collision_016" group="3"/>
+      <geom name="collision_017" type="mesh" mesh="collision_017" group="3"/>
+      <geom name="collision_018" type="mesh" mesh="collision_018" group="3"/>
+      <geom name="collision_019" type="mesh" mesh="collision_019" group="3"/>
+      <geom name="collision_020" type="mesh" mesh="collision_020" group="3"/>
+      <geom name="collision_021" type="mesh" mesh="collision_021" group="3"/>
+      <geom name="collision_022" type="mesh" mesh="collision_022" group="3"/>
+      <geom name="collision_023" type="mesh" mesh="collision_023" group="3"/>
+      <geom name="collision_024" type="mesh" mesh="collision_024" group="3"/>
+      <geom name="collision_025" type="mesh" mesh="collision_025" group="3"/>
+      <geom name="collision_026" type="mesh" mesh="collision_026" group="3"/>
+      <geom name="collision_027" type="mesh" mesh="collision_027" group="3"/>
+      <geom name="collision_028" type="mesh" mesh="collision_028" group="3"/>
+      <geom name="collision_029" type="mesh" mesh="collision_029" group="3"/>
+      <geom name="collision_030" type="mesh" mesh="collision_030" group="3"/>
+      <geom name="collision_031" type="mesh" mesh="collision_031" group="3"/>
+      <geom name="collision_032" type="mesh" mesh="collision_032" group="3"/>
+      <geom name="collision_033" type="mesh" mesh="collision_033" group="3"/>
+      <geom name="collision_034" type="mesh" mesh="collision_034" group="3"/>
+      <geom name="collision_035" type="mesh" mesh="collision_035" group="3"/>
+      <geom name="collision_036" type="mesh" mesh="collision_036" group="3"/>
+      <geom name="collision_037" type="mesh" mesh="collision_037" group="3"/>
+      <geom name="collision_038" type="mesh" mesh="collision_038" group="3"/>
+      <geom name="collision_039" type="mesh" mesh="collision_039" group="3"/>
+      <geom name="collision_040" type="mesh" mesh="collision_040" group="3"/>
+      <geom name="collision_041" type="mesh" mesh="collision_041" group="3"/>
+      <geom name="collision_042" type="mesh" mesh="collision_042" group="3"/>
+      <geom name="collision_043" type="mesh" mesh="collision_043" group="3"/>
+      <geom name="collision_044" type="mesh" mesh="collision_044" group="3"/>
+      <geom name="collision_045" type="mesh" mesh="collision_045" group="3"/>
+      <geom name="collision_046" type="mesh" mesh="collision_046" group="3"/>
+      <geom name="collision_047" type="mesh" mesh="collision_047" group="3"/>
+      <geom name="collision_048" type="mesh" mesh="collision_048" group="3"/>
+      <geom name="collision_049" type="mesh" mesh="collision_049" group="3"/>
+      <geom name="collision_050" type="mesh" mesh="collision_050" group="3"/>
+      <geom name="collision_051" type="mesh" mesh="collision_051" group="3"/>
+      <geom name="collision_052" type="mesh" mesh="collision_052" group="3"/>
+      <geom name="collision_053" type="mesh" mesh="collision_053" group="3"/>
+      <geom name="collision_054" type="mesh" mesh="collision_054" group="3"/>
+      <geom name="collision_055" type="mesh" mesh="collision_055" group="3"/>
+      <geom name="collision_056" type="mesh" mesh="collision_056" group="3"/>
+      <geom name="collision_057" type="mesh" mesh="collision_057" group="3"/>
+      <geom name="collision_058" type="mesh" mesh="collision_058" group="3"/>
+      <geom name="collision_059" type="mesh" mesh="collision_059" group="3"/>
+      <geom name="collision_060" type="mesh" mesh="collision_060" group="3"/>
+      <geom name="collision_061" type="mesh" mesh="collision_061" group="3"/>
+      <geom name="collision_062" type="mesh" mesh="collision_062" group="3"/>
+      <geom name="collision_063" type="mesh" mesh="collision_063" group="3"/>
+    </body>
+  </worldbody>
+</mujoco>

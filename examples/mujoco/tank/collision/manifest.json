@@ -1,0 +1,18 @@
+{
+  "part_count": 64,
+  "seconds": 32.55114984512329,
+  "settings": {
+    "threshold": 0.04,
+    "max_convex_hull": 64,
+    "preprocess_mode": "auto",
+    "preprocess_resolution": 40,
+    "resolution": 2000,
+    "mcts_nodes": 20,
+    "mcts_iterations": 100,
+    "mcts_max_depth": 3,
+    "merge": true,
+    "decimate": false,
+    "max_ch_vertex": 128,
+    "seed": 0
+  }
+}
