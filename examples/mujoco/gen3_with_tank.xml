@@ -7,6 +7,8 @@
     <model name="gen3" file="kinova_gen3/gen3_with_robotiq_2f85.xml"/>
     <model name="tank_model" file="tank/tank.xml"/>
 
+    <include file="things/target_object_assets.xml"/>
+
     <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
     <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
       markrgb="0.8 0.8 0.8" width="300" height="300"/>
@@ -32,5 +34,7 @@
     <body name="tank" pos="0 0 0" euler="0 0 0">
       <attach model="tank_model" prefix="tank_"/>
     </body>
+
+    <include file="things/target_objects.xml"/>
   </worldbody>
 </mujoco>

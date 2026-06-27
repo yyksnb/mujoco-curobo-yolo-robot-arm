@@ -1,0 +1,102 @@
+<mujoco>
+    <option gravity="0 0 -9.81"/>
+
+    <asset>
+        <mesh name="Wrench" file="Wrench.STL" scale="0.001 0.001 0.001"/>
+        <mesh name="drill" file="drill.STL" scale="0.001 0.001 0.001"/>
+        <mesh name="glove" file="Glove.stl" scale="0.01 0.01 0.01"/>
+        <material name="mat_glove" rgba="0.65 0.65 0.65 1.0" specular="0.25" shininess="0.2"/>
+        <mesh name="book" file="Hard.STL" scale="0.0008 0.0008 0.0008"/>
+        <mesh name="sharpie" file="Sharpie.stl" scale="0.001 0.001 0.001"/>
+        <mesh name="gluegun" file="Glue.STL" scale="0.3 0.3 0.3"/>
+        <mesh name="screw" file="Screw.stl" scale="0.001 0.001 0.001"/>
+        <mesh name="tape" file="tape.STL" scale="0.004 0.004 0.004"/>
+    <material name="mat_hex_key"   rgba="0.75 0.76 0.78 1.0" specular="0.85" shininess="0.7"/>
+    <material name="mat_drill_bit" rgba="0.50 0.52 0.55 1.0" specular="0.55" shininess="0.4"/>
+    <material name="mat_screw"     rgba="0.30 0.32 0.35 1.0" specular="0.40" shininess="0.3"/>
+    
+    <material name="mat_glue_gun"  rgba="0.15 0.15 0.15 1.0" specular="0.20" shininess="0.1"/>
+    <material name="mat_pen"       rgba="0.08 0.08 0.08 1.0" specular="0.45" shininess="0.6"/>
+    <material name="mat_book"      rgba="0.10 0.25 0.60 1.0" specular="0.05" shininess="0.05"/>
+    <material name="mat_tape"      rgba="0.80 0.65 0.45 1.0" specular="0.08" shininess="0.1"/>
+    <material name="mat_table" rgba="0.45 0.62 0.75 1.0" specular="0.10" shininess="0.05"/>
+    </asset>
+
+    <worldbody>
+
+        <!-- 地面 -->
+        <geom type="plane" size="2 2 0.1" rgba="0.8 0.8 0.8 1"/>
+
+        <!-- 桌子 -->
+        <body name="table">
+            <geom type="box" pos="0 0 0.75" size="0.5 0.3 0.025"
+                  material ="mat_table"
+                  contype="1" conaffinity="1"/>
+
+            <!-- 桌腿 -->
+            <geom type="box" pos="-0.45 -0.25 0.375" size="0.025 0.025 0.375"/>
+            <geom type="box" pos="0.45 -0.25 0.375" size="0.025 0.025 0.375"/>
+            <geom type="box" pos="-0.45 0.25 0.375" size="0.025 0.025 0.375"/>
+            <geom type="box" pos="0.45 0.25 0.375" size="0.025 0.025 0.375"/>
+        </body>
+
+        <!-- 扳手 -->
+        <body name="wrench" pos="0 0 0.78">
+            <geom type="mesh" mesh="Wrench" euler="90 0 0" 
+       material ="mat_hex_key"
+                  contype="1" conaffinity="1"/>
+        </body>
+
+        <!-- drill -->
+        <body name="drill" pos="0.2 0 0.78">
+            <geom type="mesh" mesh="drill" 
+        material ="mat_drill_bit"
+        contype="1" conaffinity="1"/>
+        </body>
+
+        <!-- 手套 -->
+        <body name="glove_body" pos="-0.2 0 0.78">
+            <geom type="mesh" mesh="glove" contype="1"euler="90 0 0"
+        material="mat_glove"
+         conaffinity="1"/>
+        </body>
+        <!-- 书 -->
+        <body name="book_body" pos="-0.1 0.2 0.79">
+            <geom type="mesh" mesh="book" contype="1" euler="0 90 180"
+           material ="mat_book" 
+         conaffinity="1"/>
+        </body>
+
+        <!--pen -->
+        <body name="sharpie_body" pos="0 -0.2 0.78">
+            <geom type="mesh" mesh="sharpie" contype="1"euler="0 90 0"
+ conaffinity="1" material ="mat_pen"   />
+        </body>
+
+        <!-- 胶枪 -->
+        <body name="gluegun_body" pos="-0.2 -0.2 0.78">
+            <geom type="mesh" mesh="gluegun" contype="1" euler="0 90 0" 
+          material ="mat_glue_gun"
+           conaffinity="1"/>
+        </body>
+<!-- 螺丝 -->
+<body name="screw_body" pos="-0.1 0.1 0.85">
+    <geom type="mesh"
+          mesh="screw"
+          euler="90 0 0"
+          contype="1"
+          material="mat_screw"
+          conaffinity="1"/>
+</body>
+
+<!-- 胶带 -->
+<body name="tape_body" pos="0.25 -0.15 0.80">
+    <geom type="mesh"
+          mesh="tape"
+          euler="180 0 90"
+          contype="1"
+          material="mat_tape"
+          conaffinity="1"/>
+</body>
+    </worldbody>
+</mujoco>

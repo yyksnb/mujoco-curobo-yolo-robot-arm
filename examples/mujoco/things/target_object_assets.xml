@@ -1,0 +1,19 @@
+<asset>
+  <mesh name="target_hex_key_mesh" file="Wrench.STL" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_mesh" file="drill.STL" scale="0.001 0.001 0.001"/>
+  <mesh name="target_glove_mesh" file="Glove.stl" scale="0.01 0.01 0.01"/>
+  <mesh name="target_notebook_mesh" file="Hard.STL" scale="0.0008 0.0008 0.0008"/>
+  <mesh name="target_marker_mesh" file="Sharpie.stl" scale="0.001 0.001 0.001"/>
+  <mesh name="target_rivet_gun_mesh" file="Glue.STL" scale="0.3 0.3 0.3"/>
+  <mesh name="target_standard_part_mesh" file="Screw.stl" scale="0.001 0.001 0.001"/>
+  <mesh name="target_tape_mesh" file="tape.STL" scale="0.004 0.004 0.004"/>
+
+  <material name="target_metal_light" rgba="0.75 0.76 0.78 1.0" specular="0.85" shininess="0.7"/>
+  <material name="target_metal_dark" rgba="0.30 0.32 0.35 1.0" specular="0.40" shininess="0.3"/>
+  <material name="target_drill_bit" rgba="0.50 0.52 0.55 1.0" specular="0.55" shininess="0.4"/>
+  <material name="target_glove" rgba="0.65 0.65 0.65 1.0" specular="0.25" shininess="0.2"/>
+  <material name="target_tool_black" rgba="0.15 0.15 0.15 1.0" specular="0.20" shininess="0.1"/>
+  <material name="target_marker" rgba="0.08 0.08 0.08 1.0" specular="0.45" shininess="0.6"/>
+  <material name="target_notebook" rgba="0.10 0.25 0.60 1.0" specular="0.05" shininess="0.05"/>
+  <material name="target_tape" rgba="0.80 0.65 0.45 1.0" specular="0.08" shininess="0.1"/>
+</asset>
