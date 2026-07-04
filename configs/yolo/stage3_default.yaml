@@ -1,0 +1,91 @@
+{
+  "schema_version": "stage3_yolo_model_migration_v1",
+  "profile_name": "stage3_default_yolo",
+  "artifact": {
+    "model_format": "ultralytics_yolo_pt",
+    "model_path": "outputs/yolo_models/current/best.pt",
+    "dataset_yaml_path": "outputs/yolo_models/current/dataset.yaml"
+  },
+  "inference": {
+    "default_camera_name": "wrist",
+    "image_size": 640,
+    "confidence_threshold": 0.25,
+    "iou_threshold": 0.7
+  },
+  "dataset": {
+    "source_format": "coco",
+    "class_count": 8,
+    "class_names": [
+      "铆枪",
+      "钻头",
+      "记号笔",
+      "纸胶带",
+      "标准件",
+      "本子",
+      "手套",
+      "内六角扳手"
+    ]
+  },
+  "stage3": {
+    "object_id_strategy": "mapped_default_object_id",
+    "default_mock_confidence": 0.0,
+    "default_mock_bbox_xyxy": [0.0, 0.0, 1.0, 1.0],
+    "default_mock_T_world_object": [
+      [1.0, 0.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0, 0.0],
+      [0.0, 0.0, 1.0, 0.03],
+      [0.0, 0.0, 0.0, 1.0]
+    ],
+    "pose_source_when_mocked": "mock_pose_for_stage3_yolo_profile_placeholder",
+    "class_map": [
+      {
+        "yolo_id": 0,
+        "yolo_name": "铆枪",
+        "stage3_class_name": "rivet_gun",
+        "default_object_id": "target_rivet_gun"
+      },
+      {
+        "yolo_id": 1,
+        "yolo_name": "钻头",
+        "stage3_class_name": "drill_bit",
+        "default_object_id": "target_drill_bit"
+      },
+      {
+        "yolo_id": 2,
+        "yolo_name": "记号笔",
+        "stage3_class_name": "marker",
+        "default_object_id": "target_marker"
+      },
+      {
+        "yolo_id": 3,
+        "yolo_name": "纸胶带",
+        "stage3_class_name": "tape",
+        "default_object_id": "target_tape"
+      },
+      {
+        "yolo_id": 4,
+        "yolo_name": "标准件",
+        "stage3_class_name": "standard_part",
+        "default_object_id": "target_standard_part"
+      },
+      {
+        "yolo_id": 5,
+        "yolo_name": "本子",
+        "stage3_class_name": "notebook",
+        "default_object_id": "target_notebook"
+      },
+      {
+        "yolo_id": 6,
+        "yolo_name": "手套",
+        "stage3_class_name": "glove",
+        "default_object_id": "target_glove"
+      },
+      {
+        "yolo_id": 7,
+        "yolo_name": "内六角扳手",
+        "stage3_class_name": "hex_key",
+        "default_object_id": "target_hex_key"
+      }
+    ]
+  }
+}
