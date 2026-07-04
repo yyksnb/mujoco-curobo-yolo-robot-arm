@@ -20,10 +20,10 @@ DEFAULT_COLLISION_MARGIN_M = 0.012
 
 @dataclass(frozen=True)
 class PlacementBounds:
-    x_min: float = 0.22
-    x_max: float = 0.78
-    y_min: float = 0.22
-    y_max: float = 0.78
+    x_min: float = 0.15
+    x_max: float = 0.85
+    y_min: float = 0.15
+    y_max: float = 0.85
 
 
 @dataclass(frozen=True)
