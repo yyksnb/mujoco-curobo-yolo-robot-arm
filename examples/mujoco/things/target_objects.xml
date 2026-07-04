@@ -1,40 +1,40 @@
 <body name="target_object_include_root">
-  <body name="target_hex_key" pos="0.50 0.45 0.53" euler="0 0 0">
+  <body name="target_hex_key" pos="0.50 0.45 0.03" euler="0 0 0">
     <geom name="target_hex_key_geom" type="mesh" mesh="target_hex_key_mesh" euler="90 0 0"
       material="target_metal_light" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_drill_bit" pos="0.70 0.45 0.53" euler="0 0 0">
+  <body name="target_drill_bit" pos="0.70 0.45 0.03" euler="0 0 0">
     <geom name="target_drill_bit_geom" type="mesh" mesh="target_drill_bit_mesh"
       material="target_drill_bit" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_glove" pos="0.30 0.45 0.53" euler="0 0 0">
+  <body name="target_glove" pos="0.30 0.45 0.03" euler="0 0 0">
     <geom name="target_glove_geom" type="mesh" mesh="target_glove_mesh" euler="90 0 0"
       material="target_glove" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_notebook" pos="0.40 0.65 0.54" euler="0 0 0">
+  <body name="target_notebook" pos="0.40 0.65 0.03" euler="0 0 0">
     <geom name="target_notebook_geom" type="mesh" mesh="target_notebook_mesh" euler="0 90 180"
       material="target_notebook" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_marker" pos="0.50 0.25 0.53" euler="0 0 0">
+  <body name="target_marker" pos="0.50 0.25 0.03" euler="0 0 0">
     <geom name="target_marker_geom" type="mesh" mesh="target_marker_mesh" euler="0 90 0"
       material="target_marker" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_rivet_gun" pos="0.30 0.25 0.53" euler="0 0 0">
+  <body name="target_rivet_gun" pos="0.30 0.25 0.03" euler="0 0 0">
     <geom name="target_rivet_gun_geom" type="mesh" mesh="target_rivet_gun_mesh" euler="0 90 0"
       material="target_tool_black" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_standard_part" pos="0.40 0.55 0.60" euler="0 0 0">
+  <body name="target_standard_part" pos="0.40 0.55 0.03" euler="0 0 0">
     <geom name="target_standard_part_geom" type="mesh" mesh="target_standard_part_mesh" euler="90 0 0"
       material="target_metal_dark" contype="1" conaffinity="1"/>
   </body>
 
-  <body name="target_tape" pos="0.75 0.30 0.55" euler="0 0 0">
+  <body name="target_tape" pos="0.75 0.30 0.03" euler="0 0 0">
     <geom name="target_tape_geom" type="mesh" mesh="target_tape_mesh" euler="180 0 90"
       material="target_tape" contype="1" conaffinity="1"/>
   </body>

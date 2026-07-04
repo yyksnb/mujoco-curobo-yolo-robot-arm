@@ -4,7 +4,7 @@
   <option integrator="implicitfast"/>
 
   <asset>
-    <model name="gen3" file="kinova_gen3/gen3_with_robotiq_2f85.xml"/>
+    <model name="gen3" file="kinova_gen3/gen3.xml"/>
     <model name="tank_model" file="tank/tank.xml"/>
 
     <include file="things/target_object_assets.xml"/>
