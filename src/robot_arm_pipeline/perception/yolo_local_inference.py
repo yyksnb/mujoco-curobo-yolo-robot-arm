@@ -24,58 +24,86 @@ def run_ultralytics_yolo_inference(
     device: str | None = None,
     max_detections: int | None = None,
 ) -> dict[str, Any]:
-    profile = load_stage3_yolo_profile(profile_path)
-    image = Path(image_path)
-    if not image.exists():
-        raise FileNotFoundError(f"YOLO input image does not exist: {image}")
-    if profile.model_format != "ultralytics_yolo_pt":
-        raise ValueError(f"unsupported YOLO model_format for local inference: {profile.model_format}")
-    if not profile.model_path.exists():
-        raise FileNotFoundError(f"YOLO model file does not exist: {profile.model_path}")
-
-    try:
-        from ultralytics import YOLO
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("ultralytics is required for local YOLO inference. Install it in the active env.") from exc
-
-    inference_config = _inference_config(profile)
-    resolved_confidence = (
-        float(confidence_threshold)
-        if confidence_threshold is not None
-        else float(inference_config.get("confidence_threshold", 0.25))
+    runner = YoloLocalInferenceRunner(
+        profile_path=profile_path,
+        confidence_threshold=confidence_threshold,
+        iou_threshold=iou_threshold,
+        image_size=image_size,
+        device=device,
+        max_detections=max_detections,
     )
-    resolved_iou = float(iou_threshold) if iou_threshold is not None else float(inference_config.get("iou_threshold", 0.7))
-    resolved_image_size = int(image_size) if image_size is not None else int(inference_config.get("image_size", 640))
+    return runner.predict(image_path=image_path, camera_name=camera_name)
 
-    model = YOLO(str(profile.model_path))
-    predict_kwargs: dict[str, Any] = {
-        "source": str(image),
-        "conf": resolved_confidence,
-        "iou": resolved_iou,
-        "imgsz": resolved_image_size,
-        "verbose": False,
-    }
-    if device:
-        predict_kwargs["device"] = device
-    if max_detections is not None:
-        predict_kwargs["max_det"] = int(max_detections)
 
-    results = model.predict(**predict_kwargs)
-    result = results[0] if results else None
-    detections = _detections_from_ultralytics_result(result, profile=profile)
-    return build_yolo_raw_payload(
-        image_path=image,
-        camera_name=camera_name or profile.default_camera_name,
-        profile=profile,
-        detections=detections,
-        inference={
-            "image_size": resolved_image_size,
-            "confidence_threshold": resolved_confidence,
-            "iou_threshold": resolved_iou,
-            "device": device,
-            "max_detections": max_detections,
-        },
-    )
+class YoloLocalInferenceRunner:
+    def __init__(
+        self,
+        *,
+        profile_path: Path | str,
+        confidence_threshold: float | None = None,
+        iou_threshold: float | None = None,
+        image_size: int | None = None,
+        device: str | None = None,
+        max_detections: int | None = None,
+    ) -> None:
+        self.profile = load_stage3_yolo_profile(profile_path)
+        if self.profile.model_format != "ultralytics_yolo_pt":
+            raise ValueError(f"unsupported YOLO model_format for local inference: {self.profile.model_format}")
+        if not self.profile.model_path.exists():
+            raise FileNotFoundError(f"YOLO model file does not exist: {self.profile.model_path}")
+
+        try:
+            from ultralytics import YOLO
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("ultralytics is required for local YOLO inference. Install it in the active env.") from exc
+
+        inference_config = _inference_config(self.profile)
+        self.resolved_confidence = (
+            float(confidence_threshold)
+            if confidence_threshold is not None
+            else float(inference_config.get("confidence_threshold", 0.25))
+        )
+        self.resolved_iou = (
+            float(iou_threshold) if iou_threshold is not None else float(inference_config.get("iou_threshold", 0.7))
+        )
+        self.resolved_image_size = int(image_size) if image_size is not None else int(inference_config.get("image_size", 640))
+        self.device = device
+        self.max_detections = max_detections
+        self.model = YOLO(str(self.profile.model_path))
+
+    def predict(self, *, image_path: Path | str, camera_name: str | None = None) -> dict[str, Any]:
+        image = Path(image_path)
+        if not image.exists():
+            raise FileNotFoundError(f"YOLO input image does not exist: {image}")
+
+        predict_kwargs: dict[str, Any] = {
+            "source": str(image),
+            "conf": self.resolved_confidence,
+            "iou": self.resolved_iou,
+            "imgsz": self.resolved_image_size,
+            "verbose": False,
+        }
+        if self.device:
+            predict_kwargs["device"] = self.device
+        if self.max_detections is not None:
+            predict_kwargs["max_det"] = int(self.max_detections)
+
+        results = self.model.predict(**predict_kwargs)
+        result = results[0] if results else None
+        detections = _detections_from_ultralytics_result(result, profile=self.profile)
+        return build_yolo_raw_payload(
+            image_path=image,
+            camera_name=camera_name or self.profile.default_camera_name,
+            profile=self.profile,
+            detections=detections,
+            inference={
+                "image_size": self.resolved_image_size,
+                "confidence_threshold": self.resolved_confidence,
+                "iou_threshold": self.resolved_iou,
+                "device": self.device,
+                "max_detections": self.max_detections,
+            },
+        )
 
 
 def build_yolo_raw_payload(
