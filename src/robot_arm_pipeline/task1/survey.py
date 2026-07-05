@@ -933,6 +933,8 @@ class MujocoSurveyBackend:
             result["resolved_camera_name"] = self.resolved_camera_name
             actual_position = self._camera_position()
             result["actual_camera_position_world"] = [_round(value) for value in actual_position]
+            result["actual_T_world_camera"] = [list(row) for row in self._camera_transform()]
+            result["camera_fovy_rad"] = _round(self._camera_fovy_rad())
             self.workspace.validate_camera_position(actual_position)
             collision = self._collision_report()
             result["collision"] = collision

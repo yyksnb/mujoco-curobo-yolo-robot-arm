@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,15 @@ from robot_arm_pipeline.task1.survey import (
     fuse_survey_observations,
     load_stage0_layout,
     survey_scene_from_stage0_layout,
+)
+from robot_arm_pipeline.task1.row import (
+    RowConfig,
+    RowObservation,
+    build_row_inspection_plan,
+    fuse_row_observations,
+    load_task1_survey_report,
+    select_row_objects_with_policy,
+    select_stable_row_objects,
 )
 
 
@@ -271,6 +281,173 @@ def test_task1_recognition_script_plan_only_writes_report(tmp_path: Path) -> Non
     assert report["camera_name"] == "wrist"
 
 
+def test_row_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+
+    workspace, planned_views = build_row_inspection_plan(
+        survey_report,
+        RowConfig(plan_only=True, row_views_per_candidate=3, camera_z_m=0.34, row_standoff_m=0.16),
+    )
+
+    assert len(planned_views) == 6
+    assert planned_views[0].candidate_id == "candidate_001"
+    for planned in planned_views:
+        position = planned.view.desired_camera_position_world
+        target = planned.candidate_rough_position_world
+        assert workspace.x_min <= position[0] <= workspace.x_max
+        assert workspace.y_min <= position[1] <= workspace.y_max
+        assert position[2] < workspace.tank_opening_z_m
+        assert ((position[0] - target[0]) ** 2 + (position[1] - target[1]) ** 2) ** 0.5 >= 0.08
+        assert position[1] >= target[1] - 1e-6
+
+
+def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
+            "--step",
+            "row",
+            "--survey-report",
+            str(survey_report_path),
+            "--plan-only",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert '"status": "plan_only"' in result.stdout
+    row_report_path = survey_report_path.parent.parent / "row" / "row_report.json"
+    report = json.loads(row_report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == "task1_row_report_v1"
+    assert report["stage"] == "row"
+    assert report["status"] == "plan_only"
+    assert report["source_survey_report_path"] == str(survey_report_path)
+    assert len(report["survey_candidates"]) == 2
+    assert len(report["planned_views"]) == 6
+    assert report["stable_objects"] == []
+    assert report["tentative_objects"] == []
+    assert report["ambiguous_objects"] == []
+    assert report["rejected_hypotheses"] == []
+    assert report["object_selection_summary"]["status"] == "not_run"
+    assert report["stable_object_selection"]["status"] == "not_run"
+
+
+def test_row_fusion_merges_duplicate_candidates_but_keeps_separate_nearby_objects() -> None:
+    hypotheses = fuse_row_observations(
+        [
+            _row_observation("candidate_001", "row_candidate_001_00", "记号笔", 0.82, (0.30, 0.30, 0.03), yaw=0.10),
+            _row_observation("candidate_002", "row_candidate_002_00", "记号笔", 0.78, (0.32, 0.31, 0.03), yaw=0.14),
+            _row_observation("candidate_003", "row_candidate_003_00", "标准件", 0.90, (0.43, 0.31, 0.03), yaw=None),
+        ],
+        cluster_radius_m=0.055,
+    )
+
+    assert len(hypotheses) == 2
+    assert hypotheses[0]["source_candidate_ids"] == ["candidate_001", "candidate_002"]
+    assert hypotheses[0]["class_name"] == "记号笔"
+    assert hypotheses[0]["yaw_rad"] == pytest.approx(0.1195, abs=0.01)
+    assert hypotheses[1]["class_name"] == "标准件"
+    assert hypotheses[1]["pose_quality"]["yaw_source"] == "unresolved_fallback_zero_in_T_world_object"
+
+
+def test_stable_row_objects_filter_noise_and_suppress_same_class_duplicates() -> None:
+    stable_objects, metadata = select_stable_row_objects(
+        [
+            _hypothesis("hyp_marker_best", "记号笔", 0.92, 8, (0.30, 0.30, 0.03)),
+            _hypothesis("hyp_marker_fragment", "记号笔", 0.82, 5, (0.37, 0.33, 0.03)),
+            _hypothesis("hyp_standard", "标准件", 0.58, 3, (0.60, 0.31, 0.03)),
+            _hypothesis("hyp_low_support", "纸胶带", 0.88, 1, (0.70, 0.70, 0.03)),
+            _hypothesis("hyp_low_conf", "钻头", 0.31, 7, (0.72, 0.72, 0.03)),
+            _hypothesis("hyp_outside", "手套", 0.99, 7, (1.20, 0.50, 0.03)),
+        ],
+        workspace={
+            "x_min": 0.15,
+            "x_max": 0.85,
+            "y_min": 0.15,
+            "y_max": 0.85,
+            "bottom_z_m": 0.03,
+            "tank_opening_z_m": 0.50,
+        },
+    )
+
+    assert [obj["class_name"] for obj in stable_objects] == ["记号笔", "标准件"]
+    assert stable_objects[0]["source_hypothesis_id"] == "hyp_marker_best"
+    assert stable_objects[0]["suppressed_duplicate_hypothesis_ids"] == ["hyp_marker_fragment"]
+    assert metadata["stable_object_count"] == 2
+    assert metadata["suppressed_same_class_duplicate_count"] == 1
+    assert metadata["rejected_counts"]["low_support_count"] == 1
+    assert metadata["rejected_counts"]["low_confidence"] == 1
+    assert metadata["rejected_counts"]["outside_workspace"] == 1
+
+
+def test_row_object_selection_keeps_small_low_evidence_as_tentative() -> None:
+    selection = select_row_objects_with_policy(
+        [
+            _hypothesis("hyp_small", "标准件", 0.42, 1, (0.30, 0.30, 0.03)),
+            _hypothesis("hyp_stable", "记号笔", 0.90, 4, (0.70, 0.70, 0.03)),
+        ],
+        workspace=_unit_workspace(),
+        tentative_small_bbox_area_px=2_000.0,
+    )
+
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔"]
+    assert [obj["class_name"] for obj in selection["tentative_objects"]] == ["标准件"]
+    assert selection["tentative_objects"][0]["selection"]["evidence_gaps"] == [
+        "low_confidence",
+        "low_support_count",
+    ]
+    assert selection["object_selection_summary"]["tentative_object_count"] == 1
+
+
+def test_row_object_selection_reports_similar_cross_class_neighbors_as_ambiguous() -> None:
+    selection = select_row_objects_with_policy(
+        [
+            _hypothesis("hyp_wrench", "内六角扳手", 0.84, 3, (0.30, 0.30, 0.03)),
+            _hypothesis("hyp_drill", "钻头", 0.82, 3, (0.34, 0.31, 0.03)),
+            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.72, 0.72, 0.03)),
+        ],
+        workspace=_unit_workspace(),
+        cross_class_conflict_radius_m=0.08,
+        cross_class_ambiguity_score_ratio=0.80,
+    )
+
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔"]
+    assert len(selection["ambiguous_objects"]) == 1
+    assert {
+        candidate["class_name"] for candidate in selection["ambiguous_objects"][0]["class_candidates"]
+    } == {"内六角扳手", "钻头"}
+    assert selection["object_selection_summary"]["ambiguous_object_count"] == 1
+
+
+def test_row_object_selection_reports_close_class_votes_as_ambiguous() -> None:
+    ambiguous_hypothesis = _hypothesis("hyp_shape_confused", "内六角扳手", 0.91, 5, (0.30, 0.30, 0.03))
+    ambiguous_hypothesis["class_votes"] = {"内六角扳手": 3.0, "钻头": 2.8}
+    selection = select_row_objects_with_policy(
+        [
+            ambiguous_hypothesis,
+            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.72, 0.72, 0.03)),
+        ],
+        workspace=_unit_workspace(),
+        class_vote_ambiguity_top_to_second_ratio=1.35,
+        class_vote_ambiguity_min_secondary_vote=0.50,
+    )
+
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔"]
+    assert len(selection["ambiguous_objects"]) == 1
+    assert {
+        candidate["class_name"] for candidate in selection["ambiguous_objects"][0]["class_candidates"]
+    } == {"内六角扳手", "钻头"}
+    assert selection["object_selection_summary"]["class_vote_ambiguous_count"] == 1
+
+
 def _write_layout(tmp_path: Path) -> Path:
     payload = {
         "schema_version": "target_object_pose_layout_v1",
@@ -309,6 +486,88 @@ def _write_layout(tmp_path: Path) -> Path:
     return path
 
 
+def _write_survey_report(tmp_path: Path, layout_path: Path) -> Path:
+    run_dir = tmp_path / "task1" / "20260705T000000Z_seed12"
+    survey_dir = run_dir / "survey"
+    report_path = survey_dir / "survey_report.json"
+    payload = {
+        "schema_version": "task1_survey_report_v1",
+        "stage": "survey",
+        "status": "success",
+        "created_utc": "2026-07-05T00:00:00+00:00",
+        "message": "test survey report",
+        "layout_source_path": str(layout_path),
+        "layout_snapshot_path": str(layout_path),
+        "task1_run_dir": str(run_dir),
+        "survey_dir": str(survey_dir),
+        "source_schema_version": "target_object_pose_layout_v1",
+        "scene_model_path": "examples/mujoco/gen3_with_tank.xml",
+        "plan_path": str(survey_dir / "survey_plan.json"),
+        "report_path": str(report_path),
+        "camera_name": "wrist",
+        "workspace": {
+            "x_min": 0.15,
+            "x_max": 0.85,
+            "y_min": 0.15,
+            "y_max": 0.85,
+            "bottom_z_m": 0.03,
+            "tank_opening_z_m": 0.50,
+            "opening_clearance_m": 0.035,
+        },
+        "grid_size": 4,
+        "image_size": [1920, 1080],
+        "run_yolo": True,
+        "yolo_profile_path": "configs/yolo/stage3_default.yaml",
+        "selected_objects": [],
+        "views": [
+            {
+                "view_id": "survey_0000",
+                "grid_row": 0,
+                "grid_col": 0,
+                "desired_camera_position_world": [0.24, 0.76, 0.38],
+                "actual_camera_position_world": [0.25, 0.75, 0.38],
+                "look_at_world": [0.30, 0.35, 0.03],
+            },
+            {
+                "view_id": "survey_0015",
+                "grid_row": 3,
+                "grid_col": 3,
+                "desired_camera_position_world": [0.76, 0.24, 0.38],
+                "actual_camera_position_world": [0.75, 0.25, 0.38],
+                "look_at_world": [0.70, 0.65, 0.03],
+            },
+        ],
+        "observations": [],
+        "candidates": [
+            {
+                "candidate_id": "candidate_001",
+                "rough_position_world": [0.30, 0.35, 0.03],
+                "support_count": 2,
+                "supporting_views": ["survey_0000"],
+                "confidence": 0.82,
+                "class_votes": {"本子": 1.4},
+                "best_view": "survey_0000",
+                "best_image_path": str(survey_dir / "images" / "survey_0000_rgb.png"),
+                "best_bbox_xyxy": [100.0, 120.0, 300.0, 320.0],
+            },
+            {
+                "candidate_id": "candidate_002",
+                "rough_position_world": [0.70, 0.65, 0.03],
+                "support_count": 2,
+                "supporting_views": ["survey_0015"],
+                "confidence": 0.80,
+                "class_votes": {"记号笔": 1.2},
+                "best_view": "survey_0015",
+                "best_image_path": str(survey_dir / "images" / "survey_0015_rgb.png"),
+                "best_bbox_xyxy": [500.0, 200.0, 720.0, 420.0],
+            },
+        ],
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    return report_path
+
+
 def _observation(
     view_id: str,
     class_name: str,
@@ -326,3 +585,77 @@ def _observation(
         class_name=class_name,
         rough_position_world=rough_position_world,
     )
+
+
+def _row_observation(
+    candidate_id: str,
+    row_view_id: str,
+    class_name: str,
+    confidence: float,
+    position_world: tuple[float, float, float],
+    *,
+    yaw: float | None,
+) -> RowObservation:
+    yaw_for_transform = yaw if yaw is not None else 0.0
+    return RowObservation(
+        observation_id=f"{row_view_id}_obs",
+        candidate_id=candidate_id,
+        row_view_id=row_view_id,
+        image_path=f"outputs/{row_view_id}.png",
+        depth_path=f"outputs/{row_view_id}.npy",
+        yolo_raw_path=f"outputs/{row_view_id}.json",
+        bbox_xyxy=(10.0, 10.0, 120.0, 120.0),
+        confidence=confidence,
+        class_id=None,
+        class_name=class_name,
+        position_world=position_world,
+        yaw_rad=yaw,
+        yaw_confidence=0.8 if yaw is not None else 0.0,
+        extent_xy_m=(0.10, 0.03) if yaw is not None else None,
+        T_world_object=(
+            (math.cos(yaw_for_transform), -math.sin(yaw_for_transform), 0.0, position_world[0]),
+            (math.sin(yaw_for_transform), math.cos(yaw_for_transform), 0.0, position_world[1]),
+            (0.0, 0.0, 1.0, position_world[2]),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+    )
+
+
+def _hypothesis(
+    hypothesis_id: str,
+    class_name: str,
+    confidence: float,
+    support_count: int,
+    position_world: tuple[float, float, float],
+) -> dict[str, object]:
+    return {
+        "hypothesis_id": hypothesis_id,
+        "source_candidate_ids": ["candidate_001"],
+        "supporting_row_views": [f"row_{index:02d}" for index in range(support_count)],
+        "support_count": support_count,
+        "class_name": class_name,
+        "class_votes": {class_name: confidence},
+        "confidence": confidence,
+        "position_world": list(position_world),
+        "yaw_rad": 0.1,
+        "T_world_object": [
+            [1.0, 0.0, 0.0, position_world[0]],
+            [0.0, 1.0, 0.0, position_world[1]],
+            [0.0, 0.0, 1.0, position_world[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        "best_image_path": "outputs/example.png",
+        "best_bbox_xyxy": [10.0, 10.0, 50.0, 50.0],
+        "pose_quality": {"position_source": "test"},
+    }
+
+
+def _unit_workspace() -> dict[str, float]:
+    return {
+        "x_min": 0.15,
+        "x_max": 0.85,
+        "y_min": 0.15,
+        "y_max": 0.85,
+        "bottom_z_m": 0.03,
+        "tank_opening_z_m": 0.50,
+    }

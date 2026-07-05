@@ -42,21 +42,65 @@ from robot_arm_pipeline.task1.survey import (  # noqa: E402
     find_latest_stage0_layout,
     run_task1_survey,
 )
+from robot_arm_pipeline.task1.row import (  # noqa: E402
+    DEFAULT_ROW_CAMERA_Z_M,
+    DEFAULT_ROW_CLUSTER_RADIUS_M,
+    DEFAULT_ROW_ENTRY_SIDE,
+    DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M,
+    DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M,
+    DEFAULT_ROW_STANDOFF_M,
+    DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD,
+    DEFAULT_ROW_VIEWS_PER_CANDIDATE,
+    DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
+    DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
+    DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
+    DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
+    DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
+    DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
+    DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M,
+    DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO,
+    DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO,
+    DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE,
+    RowConfig,
+    find_latest_survey_report,
+    run_task1_row,
+)
+
+
+def _build_yolo_detector(config):
+    if not config.run_yolo or config.plan_only:
+        return None
+    from robot_arm_pipeline.perception.yolo_local_inference import YoloLocalInferenceRunner
+
+    return YoloLocalInferenceRunner(
+        profile_path=config.yolo_profile_path,
+        confidence_threshold=config.yolo_confidence,
+        iou_threshold=config.yolo_iou,
+        image_size=config.yolo_image_size,
+        device=config.yolo_device,
+        max_detections=config.yolo_max_detections,
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint. Currently implements survey.")
+    parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
         "--step",
-        choices=("survey",),
+        choices=("survey", "row"),
         default="survey",
-        help="Recognition stage to run. Later row/final/zoom stages should be added here.",
+        help="Recognition stage to run. Later final/zoom stages should be added here.",
     )
     parser.add_argument(
         "--layout",
         type=Path,
         default=None,
         help="Target object pose layout JSON. Defaults to the latest outputs/object_poses/*_target_object_poses.json.",
+    )
+    parser.add_argument(
+        "--survey-report",
+        type=Path,
+        default=None,
+        help="Step1 survey_report.json for --step row. Defaults to the latest outputs/task1/*/survey/survey_report.json.",
     )
     parser.add_argument("--scene-model", type=Path, default=DEFAULT_SCENE_MODEL, help="MuJoCo scene MJCF/XML path.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Task1 run output root directory.")
@@ -199,16 +243,16 @@ def main() -> None:
         help="Maximum bbox pixel area for elongated weak multi-view fallback candidates.",
     )
     parser.add_argument("--yolo-config", type=Path, default=DEFAULT_YOLO_PROFILE, help="YOLO Stage3 profile YAML/JSON.")
-    parser.add_argument("--yolo-conf", type=float, default=0.15, help="Survey YOLO confidence threshold.")
+    parser.add_argument("--yolo-conf", type=float, default=0.15, help="YOLO confidence threshold for the active stage.")
     parser.add_argument("--yolo-iou", type=float, default=None, help="Optional YOLO IoU threshold.")
     parser.add_argument("--yolo-imgsz", type=int, default=None, help="Optional YOLO inference image size.")
     parser.add_argument("--yolo-device", default=None, help="Optional YOLO device, e.g. cpu or 0.")
-    parser.add_argument("--yolo-max-det", type=int, default=30, help="Maximum detections per survey image.")
+    parser.add_argument("--yolo-max-det", type=int, default=30, help="Maximum detections per captured image.")
     parser.add_argument(
         "--yolo-tile-grid",
         type=int,
         default=DEFAULT_YOLO_TILE_GRID_SIZE,
-        help="Tile grid size for survey YOLO. Use 1 to disable tile-based detection.",
+        help="Tile grid size for YOLO. Use 1 to disable tile-based detection.",
     )
     parser.add_argument(
         "--yolo-tile-overlap",
@@ -223,9 +267,9 @@ def main() -> None:
         help="IoU threshold for merging full-frame and tile YOLO detections.",
     )
     parser.add_argument("--skip-yolo", action="store_true", help="Capture images/depth but skip YOLO inference.")
-    parser.add_argument("--strict-yolo", action="store_true", help="Fail the survey if YOLO inference fails.")
-    parser.add_argument("--plan-only", action="store_true", help="Only write the survey plan; do not load MuJoCo or YOLO.")
-    parser.add_argument("--max-ik-iterations", type=int, default=200, help="Maximum IK iterations per survey view.")
+    parser.add_argument("--strict-yolo", action="store_true", help="Fail the active stage if YOLO inference fails.")
+    parser.add_argument("--plan-only", action="store_true", help="Only write the active stage plan; do not load MuJoCo or YOLO.")
+    parser.add_argument("--max-ik-iterations", type=int, default=200, help="Maximum IK iterations per capture view.")
     parser.add_argument("--ik-position-tolerance", type=float, default=0.05, help="IK camera position tolerance in meters.")
     parser.add_argument(
         "--ik-orientation-tolerance",
@@ -233,75 +277,209 @@ def main() -> None:
         default=0.35,
         help="IK camera orientation tolerance in radians.",
     )
+    parser.add_argument("--row-camera-z", type=float, default=DEFAULT_ROW_CAMERA_Z_M, help="Desired row-stage wrist camera world z inside the tank.")
+    parser.add_argument("--row-standoff", type=float, default=DEFAULT_ROW_STANDOFF_M, help="Row-stage lateral standoff from candidate rough position.")
+    parser.add_argument(
+        "--row-views-per-candidate",
+        type=int,
+        default=DEFAULT_ROW_VIEWS_PER_CANDIDATE,
+        help="Number of close-inspection views to plan for each survey candidate.",
+    )
+    parser.add_argument(
+        "--row-view-angle-spread-deg",
+        type=float,
+        default=DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD * 180.0 / 3.141592653589793,
+        help="Angular spread between row close-inspection views.",
+    )
+    parser.add_argument(
+        "--row-min-oblique-distance",
+        type=float,
+        default=DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M,
+        help="Minimum row-stage horizontal camera offset from the candidate, preventing pure top-down shots.",
+    )
+    parser.add_argument(
+        "--row-look-at-height-offset",
+        type=float,
+        default=DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M,
+        help="Height above the tank bottom/object base plane used as the row view look-at target.",
+    )
+    parser.add_argument(
+        "--row-entry-side",
+        choices=("y-max", "y-min", "x-min", "x-max", "center", "survey-best"),
+        default=DEFAULT_ROW_ENTRY_SIDE,
+        help="Preferred tank-side reference for row camera placement. survey-best uses the old survey-image direction.",
+    )
+    parser.add_argument(
+        "--row-cluster-radius",
+        type=float,
+        default=DEFAULT_ROW_CLUSTER_RADIUS_M,
+        help="World XY radius for fusing close RGB-D row observations into object hypotheses.",
+    )
+    parser.add_argument(
+        "--stable-object-min-confidence",
+        type=float,
+        default=DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
+        help="Minimum fused confidence for a row hypothesis to enter stable_objects.",
+    )
+    parser.add_argument(
+        "--stable-object-min-support-count",
+        type=int,
+        default=DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
+        help="Minimum close-view observation support count for a row hypothesis to enter stable_objects.",
+    )
+    parser.add_argument(
+        "--stable-object-same-class-nms-radius",
+        type=float,
+        default=DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
+        help="World XY same-class suppression radius for stable row objects.",
+    )
+    parser.add_argument(
+        "--tentative-object-min-confidence",
+        type=float,
+        default=DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
+        help="Minimum fused confidence for a low-evidence small row hypothesis to enter tentative_objects.",
+    )
+    parser.add_argument(
+        "--tentative-object-min-support-count",
+        type=int,
+        default=DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
+        help="Minimum close-view support count for a low-evidence small row hypothesis to enter tentative_objects.",
+    )
+    parser.add_argument(
+        "--tentative-object-small-bbox-area",
+        type=float,
+        default=DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
+        help="Maximum best bbox pixel area for class-agnostic small-object tentative recovery.",
+    )
+    parser.add_argument(
+        "--cross-class-conflict-radius",
+        type=float,
+        default=DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M,
+        help="World XY radius for treating nearby different-class row hypotheses as a conflict.",
+    )
+    parser.add_argument(
+        "--cross-class-ambiguity-score-ratio",
+        type=float,
+        default=DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO,
+        help="Minimum weaker/stronger score ratio that reports a cross-class conflict as ambiguous.",
+    )
+    parser.add_argument(
+        "--class-vote-ambiguity-top-to-second-ratio",
+        type=float,
+        default=DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO,
+        help="Maximum top/second class-vote ratio that reports one row hypothesis as ambiguous.",
+    )
+    parser.add_argument(
+        "--class-vote-ambiguity-min-secondary-vote",
+        type=float,
+        default=DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE,
+        help="Minimum secondary class-vote evidence before top-two class votes can mark a row hypothesis ambiguous.",
+    )
     args = parser.parse_args()
 
-    if args.step != "survey":
-        raise SystemExit(f"unsupported task1 recognition step: {args.step}")
-
-    try:
-        layout_path = args.layout or find_latest_stage0_layout()
-    except FileNotFoundError as exc:
-        raise SystemExit(str(exc)) from exc
-    config = SurveyConfig(
-        scene_model_path=args.scene_model,
-        yolo_profile_path=args.yolo_config,
-        output_dir=args.output_dir,
-        camera_name=args.camera_name,
-        grid_size=args.grid_size,
-        image_width=args.image_width,
-        image_height=args.image_height,
-        camera_z_m=args.camera_z,
-        tank_opening_z_m=args.tank_opening_z,
-        opening_clearance_m=args.opening_clearance,
-        oblique_offset_m=args.oblique_offset,
-        cluster_radius_m=args.cluster_radius,
-        cross_class_merge_radius_m=args.cross_class_merge_radius,
-        cluster_split_distance_m=args.cluster_split_distance,
-        cluster_split_min_vote=args.cluster_split_min_vote,
-        weak_candidate_merge_radius_m=args.weak_candidate_merge_radius,
-        weak_candidate_vote_threshold=args.weak_candidate_vote,
-        tiny_candidate_bbox_area_px=args.tiny_candidate_bbox_area,
-        weak_tiny_candidate_max_spread_m=args.weak_tiny_candidate_max_spread,
-        single_view_fallback_confidence=args.single_view_fallback_conf,
-        single_view_fallback_min_distance_m=args.single_view_fallback_min_distance,
-        min_candidate_support_views=args.min_candidate_support_views,
-        large_same_class_merge_radius_m=args.large_same_class_merge_radius,
-        large_same_class_bbox_area_px=args.large_same_class_bbox_area,
-        mixed_class_split_min_vote=args.mixed_class_split_min_vote,
-        mixed_class_split_distance_m=args.mixed_class_split_distance,
-        weak_multiview_fallback_vote=args.weak_multiview_fallback_vote,
-        weak_multiview_fallback_min_distance_m=args.weak_multiview_fallback_min_distance,
-        weak_multiview_fallback_max_bbox_area_px=args.weak_multiview_fallback_max_bbox_area,
-        weak_multiview_fallback_elongated_aspect_ratio=args.weak_multiview_fallback_elongated_aspect,
-        weak_multiview_fallback_elongated_max_bbox_area_px=args.weak_multiview_fallback_elongated_max_bbox_area,
-        yolo_confidence=args.yolo_conf,
-        yolo_iou=args.yolo_iou,
-        yolo_image_size=args.yolo_imgsz,
-        yolo_device=args.yolo_device,
-        yolo_max_detections=args.yolo_max_det,
-        yolo_tile_grid_size=args.yolo_tile_grid,
-        yolo_tile_overlap=args.yolo_tile_overlap,
-        yolo_tile_nms_iou=args.yolo_tile_nms_iou,
-        run_yolo=not args.skip_yolo,
-        plan_only=args.plan_only,
-        strict_yolo=args.strict_yolo,
-        max_ik_iterations=args.max_ik_iterations,
-        ik_position_tolerance_m=args.ik_position_tolerance,
-        ik_orientation_tolerance_rad=args.ik_orientation_tolerance,
-    )
-    detector = None
-    if config.run_yolo and not config.plan_only:
-        from robot_arm_pipeline.perception.yolo_local_inference import YoloLocalInferenceRunner
-
-        detector = YoloLocalInferenceRunner(
-            profile_path=config.yolo_profile_path,
-            confidence_threshold=config.yolo_confidence,
-            iou_threshold=config.yolo_iou,
-            image_size=config.yolo_image_size,
-            device=config.yolo_device,
-            max_detections=config.yolo_max_detections,
+    if args.step == "survey":
+        try:
+            layout_path = args.layout or find_latest_stage0_layout()
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+        config = SurveyConfig(
+            scene_model_path=args.scene_model,
+            yolo_profile_path=args.yolo_config,
+            output_dir=args.output_dir,
+            camera_name=args.camera_name,
+            grid_size=args.grid_size,
+            image_width=args.image_width,
+            image_height=args.image_height,
+            camera_z_m=args.camera_z,
+            tank_opening_z_m=args.tank_opening_z,
+            opening_clearance_m=args.opening_clearance,
+            oblique_offset_m=args.oblique_offset,
+            cluster_radius_m=args.cluster_radius,
+            cross_class_merge_radius_m=args.cross_class_merge_radius,
+            cluster_split_distance_m=args.cluster_split_distance,
+            cluster_split_min_vote=args.cluster_split_min_vote,
+            weak_candidate_merge_radius_m=args.weak_candidate_merge_radius,
+            weak_candidate_vote_threshold=args.weak_candidate_vote,
+            tiny_candidate_bbox_area_px=args.tiny_candidate_bbox_area,
+            weak_tiny_candidate_max_spread_m=args.weak_tiny_candidate_max_spread,
+            single_view_fallback_confidence=args.single_view_fallback_conf,
+            single_view_fallback_min_distance_m=args.single_view_fallback_min_distance,
+            min_candidate_support_views=args.min_candidate_support_views,
+            large_same_class_merge_radius_m=args.large_same_class_merge_radius,
+            large_same_class_bbox_area_px=args.large_same_class_bbox_area,
+            mixed_class_split_min_vote=args.mixed_class_split_min_vote,
+            mixed_class_split_distance_m=args.mixed_class_split_distance,
+            weak_multiview_fallback_vote=args.weak_multiview_fallback_vote,
+            weak_multiview_fallback_min_distance_m=args.weak_multiview_fallback_min_distance,
+            weak_multiview_fallback_max_bbox_area_px=args.weak_multiview_fallback_max_bbox_area,
+            weak_multiview_fallback_elongated_aspect_ratio=args.weak_multiview_fallback_elongated_aspect,
+            weak_multiview_fallback_elongated_max_bbox_area_px=args.weak_multiview_fallback_elongated_max_bbox_area,
+            yolo_confidence=args.yolo_conf,
+            yolo_iou=args.yolo_iou,
+            yolo_image_size=args.yolo_imgsz,
+            yolo_device=args.yolo_device,
+            yolo_max_detections=args.yolo_max_det,
+            yolo_tile_grid_size=args.yolo_tile_grid,
+            yolo_tile_overlap=args.yolo_tile_overlap,
+            yolo_tile_nms_iou=args.yolo_tile_nms_iou,
+            run_yolo=not args.skip_yolo,
+            plan_only=args.plan_only,
+            strict_yolo=args.strict_yolo,
+            max_ik_iterations=args.max_ik_iterations,
+            ik_position_tolerance_m=args.ik_position_tolerance,
+            ik_orientation_tolerance_rad=args.ik_orientation_tolerance,
         )
-    report = run_task1_survey(layout_path, config, detector=detector)
+        detector = _build_yolo_detector(config)
+        report = run_task1_survey(layout_path, config, detector=detector)
+    else:
+        try:
+            survey_report_path = args.survey_report or find_latest_survey_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+        config = RowConfig(
+            scene_model_path=args.scene_model,
+            yolo_profile_path=args.yolo_config,
+            output_dir=args.output_dir,
+            camera_name=args.camera_name,
+            image_width=args.image_width,
+            image_height=args.image_height,
+            camera_z_m=args.row_camera_z,
+            tank_opening_z_m=args.tank_opening_z,
+            opening_clearance_m=args.opening_clearance,
+            row_standoff_m=args.row_standoff,
+            row_views_per_candidate=args.row_views_per_candidate,
+            row_view_angle_spread_rad=args.row_view_angle_spread_deg * 3.141592653589793 / 180.0,
+            row_min_oblique_distance_m=args.row_min_oblique_distance,
+            look_at_height_offset_m=args.row_look_at_height_offset,
+            entry_side=args.row_entry_side,
+            row_cluster_radius_m=args.row_cluster_radius,
+            stable_object_min_confidence=args.stable_object_min_confidence,
+            stable_object_min_support_count=args.stable_object_min_support_count,
+            stable_object_same_class_nms_radius_m=args.stable_object_same_class_nms_radius,
+            tentative_object_min_confidence=args.tentative_object_min_confidence,
+            tentative_object_min_support_count=args.tentative_object_min_support_count,
+            tentative_object_small_bbox_area_px=args.tentative_object_small_bbox_area,
+            cross_class_conflict_radius_m=args.cross_class_conflict_radius,
+            cross_class_ambiguity_score_ratio=args.cross_class_ambiguity_score_ratio,
+            class_vote_ambiguity_top_to_second_ratio=args.class_vote_ambiguity_top_to_second_ratio,
+            class_vote_ambiguity_min_secondary_vote=args.class_vote_ambiguity_min_secondary_vote,
+            yolo_confidence=args.yolo_conf,
+            yolo_iou=args.yolo_iou,
+            yolo_image_size=args.yolo_imgsz,
+            yolo_device=args.yolo_device,
+            yolo_max_detections=args.yolo_max_det,
+            yolo_tile_grid_size=args.yolo_tile_grid,
+            yolo_tile_overlap=args.yolo_tile_overlap,
+            yolo_tile_nms_iou=args.yolo_tile_nms_iou,
+            run_yolo=not args.skip_yolo,
+            plan_only=args.plan_only,
+            strict_yolo=args.strict_yolo,
+            max_ik_iterations=args.max_ik_iterations,
+            ik_position_tolerance_m=args.ik_position_tolerance,
+            ik_orientation_tolerance_rad=args.ik_orientation_tolerance,
+        )
+        detector = _build_yolo_detector(config)
+        report = run_task1_row(survey_report_path, config, detector=detector)
     print(json.dumps({"status": report["status"], "message": report["message"]}, ensure_ascii=False))
     print(f"report={report['report_path']}")
 
