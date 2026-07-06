@@ -88,6 +88,16 @@ from robot_arm_pipeline.task1.final import (  # noqa: E402
     find_latest_row_report,
     run_task1_final,
 )
+from robot_arm_pipeline.task1.zoom import (  # noqa: E402
+    DEFAULT_ZOOM_CANDIDATE_AREA_RATIOS,
+    DEFAULT_ZOOM_PADDING_RATIO,
+    DEFAULT_ZOOM_RATIO_TOLERANCE,
+    DEFAULT_ZOOM_SELECTION_BORDER_MARGIN_PX,
+    DEFAULT_ZOOM_TARGET_AREA_RATIO,
+    ZoomConfig,
+    find_latest_final_report,
+    run_task1_zoom,
+)
 
 
 def _build_yolo_detector(config):
@@ -153,7 +163,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
         "--stage",
-        choices=("survey", "row", "final"),
+        choices=("survey", "row", "final", "zoom"),
         default="survey",
         help="Recognition stage to run.",
     )
@@ -203,6 +213,12 @@ def main() -> None:
         type=Path,
         default=None,
         help="Row report JSON for --stage final. Defaults to the latest outputs/task1/*/row/row_report.json.",
+    )
+    parser.add_argument(
+        "--final-report",
+        type=Path,
+        default=None,
+        help="Final report JSON for --stage zoom. Defaults to the latest outputs/task1/*/final/final_report.json.",
     )
     parser.add_argument("--scene-model", type=Path, default=DEFAULT_SCENE_MODEL, help="MuJoCo scene MJCF/XML path.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Task1 run output root directory.")
@@ -547,6 +563,48 @@ def main() -> None:
         default=DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
         help="Comma-separated standoff multipliers for final-view candidates, tried in policy order.",
     )
+    parser.add_argument(
+        "--zoom-target-area-ratio",
+        type=float,
+        default=DEFAULT_ZOOM_TARGET_AREA_RATIO,
+        help="Desired object bbox area ratio in each zoomed image.",
+    )
+    parser.add_argument(
+        "--zoom-ratio-tolerance",
+        type=float,
+        default=DEFAULT_ZOOM_RATIO_TOLERANCE,
+        help="Allowed absolute error around --zoom-target-area-ratio before a zoom result is marked limited.",
+    )
+    parser.add_argument(
+        "--zoom-candidate-area-ratios",
+        type=_parse_float_tuple,
+        default=DEFAULT_ZOOM_CANDIDATE_AREA_RATIOS,
+        help="Comma-separated target area-ratio candidates generated before selecting one zoom output.",
+    )
+    parser.add_argument(
+        "--zoom-padding-ratio",
+        type=float,
+        default=DEFAULT_ZOOM_PADDING_RATIO,
+        help="Minimum per-side ROI padding fraction around the selected bbox before resize.",
+    )
+    parser.add_argument(
+        "--zoom-selection-border-margin",
+        type=float,
+        default=DEFAULT_ZOOM_SELECTION_BORDER_MARGIN_PX,
+        help="Minimum projected bbox border margin in pixels preferred by zoom candidate selection.",
+    )
+    parser.add_argument(
+        "--zoom-output-width",
+        type=int,
+        default=None,
+        help="Optional zoomed image width. Defaults to the final source image width.",
+    )
+    parser.add_argument(
+        "--zoom-output-height",
+        type=int,
+        default=None,
+        help="Optional zoomed image height. Defaults to the final source image height.",
+    )
     args = parser.parse_args()
 
     if args.stage == "survey":
@@ -668,7 +726,7 @@ def main() -> None:
         )
         detector = _build_yolo_detector(config)
         report = run_task1_row(survey_report_path, config, detector=detector)
-    else:
+    elif args.stage == "final":
         try:
             row_report_path = args.row_report or find_latest_row_report(args.output_dir)
         except FileNotFoundError as exc:
@@ -718,6 +776,23 @@ def main() -> None:
         )
         detector = _build_yolo_detector(config)
         report = run_task1_final(row_report_path, config, detector=detector)
+    else:
+        try:
+            final_report_path = args.final_report or find_latest_final_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+        config = ZoomConfig(
+            output_dir=args.output_dir,
+            target_area_ratio=args.zoom_target_area_ratio,
+            ratio_tolerance=args.zoom_ratio_tolerance,
+            candidate_area_ratios=args.zoom_candidate_area_ratios,
+            padding_ratio=args.zoom_padding_ratio,
+            selection_border_margin_px=args.zoom_selection_border_margin,
+            output_width=args.zoom_output_width,
+            output_height=args.zoom_output_height,
+            plan_only=args.plan_only,
+        )
+        report = run_task1_zoom(final_report_path, config)
     print(json.dumps({"status": report["status"], "message": report["message"]}, ensure_ascii=False))
     print(f"report={report['report_path']}")
 

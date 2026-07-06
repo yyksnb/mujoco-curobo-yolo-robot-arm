@@ -72,6 +72,21 @@ from robot_arm_pipeline.task1.final import (
     run_task1_final,
     select_stable_final_objects,
 )
+from robot_arm_pipeline.task1.zoom import (
+    DEFAULT_ZOOM_CANDIDATE_AREA_RATIOS,
+    DEFAULT_ZOOM_PADDING_RATIO,
+    DEFAULT_ZOOM_RATIO_TOLERANCE,
+    DEFAULT_ZOOM_SELECTION_BORDER_MARGIN_PX,
+    DEFAULT_ZOOM_TARGET_AREA_RATIO,
+    Task1FinalReport,
+    ZoomConfig,
+    ZoomCropPlan,
+    build_zoom_plan,
+    find_latest_final_report,
+    load_task1_final_report,
+    plan_zoom_crop,
+    run_task1_zoom,
+)
 
 __all__ = [
     "DEFAULT_CAMERA_NAME",
@@ -140,6 +155,19 @@ __all__ = [
     "load_task1_row_report",
     "run_task1_final",
     "select_stable_final_objects",
+    "DEFAULT_ZOOM_RATIO_TOLERANCE",
+    "DEFAULT_ZOOM_CANDIDATE_AREA_RATIOS",
+    "DEFAULT_ZOOM_PADDING_RATIO",
+    "DEFAULT_ZOOM_SELECTION_BORDER_MARGIN_PX",
+    "DEFAULT_ZOOM_TARGET_AREA_RATIO",
+    "Task1FinalReport",
+    "ZoomConfig",
+    "ZoomCropPlan",
+    "build_zoom_plan",
+    "find_latest_final_report",
+    "load_task1_final_report",
+    "plan_zoom_crop",
+    "run_task1_zoom",
     "run_task1_survey",
     "survey_scene_from_stage0_layout",
 ]

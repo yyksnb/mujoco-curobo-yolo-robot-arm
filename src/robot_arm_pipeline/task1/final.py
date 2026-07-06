@@ -47,6 +47,8 @@ DEFAULT_FINAL_YOLO_CONFIDENCE = 0.20
 DEFAULT_FINAL_YOLO_MAX_DETECTIONS = 12
 DEFAULT_FINAL_YOLO_TILE_GRID_SIZE = 1
 FINAL_STABLE_SELECTION_POLICY_VERSION = "final_stable_selection_policy_v1"
+DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO = 0.15
+DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX = 8.0
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,8 @@ class FinalConfig:
     depth_sample_stride_px: int = DEFAULT_DEPTH_SAMPLE_STRIDE_PX
     depth_component_min_pixels: int = DEFAULT_DEPTH_COMPONENT_MIN_PIXELS
     depth_component_split_distance_m: float = DEFAULT_DEPTH_COMPONENT_SPLIT_DISTANCE_M
+    bbox_fragment_min_overlap_ratio: float = DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO
+    selection_border_margin_px: float = DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX
     run_yolo: bool = True
     plan_only: bool = False
     strict_yolo: bool = False
@@ -165,6 +169,10 @@ class FinalConfig:
             raise ValueError("depth_component_min_pixels must be positive")
         if self.depth_component_split_distance_m <= 0.0:
             raise ValueError("depth_component_split_distance_m must be positive")
+        if not 0.0 <= self.bbox_fragment_min_overlap_ratio <= 1.0:
+            raise ValueError("bbox_fragment_min_overlap_ratio must be between 0 and 1")
+        if self.selection_border_margin_px < 0.0:
+            raise ValueError("selection_border_margin_px must be non-negative")
 
     def capture_config(self) -> SurveyConfig:
         return SurveyConfig(
@@ -1308,12 +1316,12 @@ def _matched_observations(
             continue
         payload = observation.to_dict()
         payload["target_xy_distance_m"] = _round(distance)
+        payload["observation_kind"] = "single_detection"
         matched.append(payload)
+    matched = _merge_same_class_observation_fragments(matched, config=config)
     matched.sort(
-        key=lambda item: (
-            float(item["target_xy_distance_m"]),
-            -float(item.get("confidence", 0.0)),
-        )
+        key=lambda item: _final_observation_selection_score(target, item, config=config),
+        reverse=True,
     )
     return matched
 
@@ -1354,6 +1362,137 @@ def _recognition_payload(
         "bbox_xyxy": best_observation.get("bbox_xyxy"),
         "target_match_radius_m": _round(config.target_match_radius_m),
     }
+
+
+def _merge_same_class_observation_fragments(
+    matched: list[dict[str, Any]],
+    *,
+    config: FinalConfig,
+) -> list[dict[str, Any]]:
+    merged = list(matched)
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in matched:
+        class_name = _optional_text(item.get("class_name"))
+        image_path = _optional_text(item.get("image_path"))
+        view_id = _optional_text(item.get("view_id"))
+        if class_name is None or image_path is None or view_id is None:
+            continue
+        groups.setdefault((view_id, image_path, class_name), []).append(item)
+
+    for (_, _, class_name), group in groups.items():
+        if len(group) < 2:
+            continue
+        for component in _overlapping_bbox_components(
+            group,
+            min_overlap_ratio=config.bbox_fragment_min_overlap_ratio,
+        ):
+            if len(component) < 2:
+                continue
+            merged.append(_merged_observation_payload(component, class_name=class_name))
+    return merged
+
+
+def _overlapping_bbox_components(
+    observations: list[dict[str, Any]],
+    *,
+    min_overlap_ratio: float,
+) -> list[list[dict[str, Any]]]:
+    components: list[list[dict[str, Any]]] = []
+    remaining = list(observations)
+    while remaining:
+        seed = remaining.pop(0)
+        component = [seed]
+        changed = True
+        while changed:
+            changed = False
+            for candidate in list(remaining):
+                if any(
+                    _bbox_overlap_ratio(_bbox_tuple(candidate.get("bbox_xyxy")), _bbox_tuple(item.get("bbox_xyxy")))
+                    >= min_overlap_ratio
+                    for item in component
+                ):
+                    component.append(candidate)
+                    remaining.remove(candidate)
+                    changed = True
+        components.append(component)
+    return components
+
+
+def _merged_observation_payload(component: list[dict[str, Any]], *, class_name: str) -> dict[str, Any]:
+    bboxes = [_bbox_tuple(item.get("bbox_xyxy")) for item in component]
+    union_bbox = (
+        min(bbox[0] for bbox in bboxes),
+        min(bbox[1] for bbox in bboxes),
+        max(bbox[2] for bbox in bboxes),
+        max(bbox[3] for bbox in bboxes),
+    )
+    closest = min(component, key=lambda item: float(item.get("target_xy_distance_m", float("inf"))))
+    highest_confidence = max(float(item.get("confidence", 0.0)) for item in component)
+    source_distances = [float(item.get("target_xy_distance_m", 0.0)) for item in component]
+    return {
+        "view_id": closest.get("view_id"),
+        "image_path": closest.get("image_path"),
+        "bbox_xyxy": [_round(value) for value in union_bbox],
+        "confidence": _round(highest_confidence),
+        "class_id": closest.get("class_id"),
+        "class_name": class_name,
+        "rough_position_world": closest.get("rough_position_world"),
+        "target_xy_distance_m": _round(min(source_distances)),
+        "observation_kind": "merged_same_class_bbox_fragments",
+        "source_observation_count": len(component),
+        "source_bboxes_xyxy": [item.get("bbox_xyxy") for item in component],
+        "source_confidences": [_round(float(item.get("confidence", 0.0))) for item in component],
+        "source_target_xy_distances_m": [_round(value) for value in source_distances],
+        "merge_policy": {
+            "policy_version": "final_same_class_bbox_fragment_merge_v1",
+            "reason": "same view, same class, overlapping bbox fragments matched the same target",
+        },
+    }
+
+
+def _final_observation_selection_score(
+    target: FinalTarget,
+    item: dict[str, Any],
+    *,
+    config: FinalConfig,
+) -> tuple[float, ...]:
+    class_name = _optional_text(item.get("class_name"))
+    candidate_classes = set(target.candidate_class_names)
+    class_match = (
+        class_name is not None
+        and (class_name == target.class_name or (target.class_name is None and class_name in candidate_classes))
+    )
+    bbox = _bbox_tuple(item.get("bbox_xyxy"))
+    bbox_area = _bbox_area_px(bbox)
+    margin = _bbox_border_margin_px(bbox, image_width=config.image_width, image_height=config.image_height)
+    border_safe = margin >= config.selection_border_margin_px
+    merged_count = int(item.get("source_observation_count", 1) or 1)
+    distance = float(item.get("target_xy_distance_m", float("inf")))
+    confidence = float(item.get("confidence", 0.0))
+    item["selection_score"] = {
+        "policy_version": "final_observation_selection_policy_v2",
+        "class_match": class_match,
+        "bbox_area_px": _round(bbox_area),
+        "bbox_min_border_margin_px": _round(margin),
+        "border_safe": border_safe,
+        "source_observation_count": merged_count,
+        "target_xy_distance_m": _round(distance),
+        "confidence": _round(confidence),
+        "rules": [
+            "Prefer detections whose class matches the final target.",
+            "Prefer bbox fragments merged from same-class overlapping detections when available.",
+            "Prefer detections with enough image-border margin.",
+            "Prefer larger bbox area before using target distance as a tie-breaker.",
+        ],
+    }
+    return (
+        1.0 if class_match else 0.0,
+        float(merged_count),
+        1.0 if border_safe else 0.0,
+        bbox_area,
+        -distance,
+        confidence,
+    )
 
 
 def _capture_status(
@@ -1787,6 +1926,44 @@ def _xy_distance(left: tuple[float, float, float], right: tuple[float, float, fl
 
 def _round_vector(vector: tuple[float, float, float]) -> tuple[float, float, float]:
     return (_round(vector[0]), _round(vector[1]), _round(vector[2]))
+
+
+def _bbox_tuple(value: Any) -> tuple[float, float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError("bbox_xyxy must be a list of four numbers")
+    x1, y1, x2, y2 = (float(item) for item in value)
+    return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+
+
+def _bbox_area_px(bbox_xyxy: tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = bbox_xyxy
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _bbox_overlap_ratio(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    left_area = _bbox_area_px(left)
+    right_area = _bbox_area_px(right)
+    if left_area <= 0.0 or right_area <= 0.0:
+        return 0.0
+    inter_left = max(left[0], right[0])
+    inter_top = max(left[1], right[1])
+    inter_right = min(left[2], right[2])
+    inter_bottom = min(left[3], right[3])
+    inter_area = _bbox_area_px((inter_left, inter_top, inter_right, inter_bottom))
+    return inter_area / min(left_area, right_area)
+
+
+def _bbox_border_margin_px(
+    bbox_xyxy: tuple[float, float, float, float],
+    *,
+    image_width: int,
+    image_height: int,
+) -> float:
+    x1, y1, x2, y2 = bbox_xyxy
+    return min(x1, y1, float(image_width) - x2, float(image_height) - y2)
 
 
 def _round(value: float | None) -> float:

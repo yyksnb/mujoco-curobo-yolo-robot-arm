@@ -31,7 +31,9 @@ from robot_arm_pipeline.task1.row import (
 from robot_arm_pipeline.task1.final import (
     DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
     DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
+    FinalTarget,
     FinalConfig,
+    _matched_observations,
     build_final_plan,
     load_task1_row_report,
     select_stable_final_objects,
@@ -651,6 +653,50 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
     assert selection["stable_object_selection"]["stable_object_count"] == 3
     assert selection["stable_object_selection"]["unstable_object_count"] == 1
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {"class_conflict": 1}
+
+
+def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
+    target = FinalTarget(
+        object_id="row_object_002",
+        target_role="primary",
+        source_status="stable",
+        position_world=(0.359, 0.687, 0.03),
+        class_name="钻头",
+        confidence=0.66,
+        T_world_object=None,
+        best_image_path=None,
+        best_bbox_xyxy=None,
+        supporting_views=(),
+        candidate_class_names=("钻头",),
+        source_payload={},
+    )
+    observations = [
+        SurveyObservation(
+            view_id="final_row_object_002",
+            image_path="final_row_object_002_rgb.png",
+            bbox_xyxy=(810.0, 340.0, 1018.0, 505.0),
+            confidence=0.33,
+            class_id=1,
+            class_name="钻头",
+            rough_position_world=(0.325, 0.692, 0.03),
+        ),
+        SurveyObservation(
+            view_id="final_row_object_002",
+            image_path="final_row_object_002_rgb.png",
+            bbox_xyxy=(902.0, 429.0, 1226.0, 505.0),
+            confidence=0.25,
+            class_id=1,
+            class_name="钻头",
+            rough_position_world=(0.363, 0.689, 0.03),
+        ),
+    ]
+
+    matched = _matched_observations(target, observations, config=FinalConfig(image_width=1920, image_height=1080))
+
+    assert matched[0]["observation_kind"] == "merged_same_class_bbox_fragments"
+    assert matched[0]["bbox_xyxy"] == [810.0, 340.0, 1226.0, 505.0]
+    assert matched[0]["source_observation_count"] == 2
+    assert matched[0]["selection_score"]["bbox_area_px"] > matched[1]["selection_score"]["bbox_area_px"]
 
 
 def _write_layout(tmp_path: Path) -> Path:
