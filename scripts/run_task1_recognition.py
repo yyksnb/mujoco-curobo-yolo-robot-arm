@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from _bootstrap import add_src_to_path
@@ -39,8 +40,14 @@ from robot_arm_pipeline.task1.survey import (  # noqa: E402
     DEFAULT_YOLO_TILE_OVERLAP,
     DEFAULT_YOLO_PROFILE,
     SurveyConfig,
-    find_latest_stage0_layout,
     run_task1_survey,
+)
+from robot_arm_pipeline.scene.target_object_layout import (  # noqa: E402
+    DEFAULT_BASE_HEIGHT_M,
+    DEFAULT_COLLISION_MARGIN_M,
+    DEFAULT_OBJECT_COUNT,
+    PlacementBounds,
+    make_random_target_object_pose_payload,
 )
 from robot_arm_pipeline.task1.row import (  # noqa: E402
     DEFAULT_ROW_CAMERA_Z_M,
@@ -65,6 +72,22 @@ from robot_arm_pipeline.task1.row import (  # noqa: E402
     find_latest_survey_report,
     run_task1_row,
 )
+from robot_arm_pipeline.task1.final import (  # noqa: E402
+    DEFAULT_FINAL_CAMERA_Z_M,
+    DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
+    DEFAULT_FINAL_ENTRY_SIDE,
+    DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES,
+    DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG,
+    DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
+    DEFAULT_FINAL_IK_POSITION_TOLERANCE_M,
+    DEFAULT_FINAL_LOOK_AT_HEIGHT_OFFSET_M,
+    DEFAULT_FINAL_MIN_OBLIQUE_DISTANCE_M,
+    DEFAULT_FINAL_STANDOFF_M,
+    DEFAULT_FINAL_TARGET_MATCH_RADIUS_M,
+    FinalConfig,
+    find_latest_row_report,
+    run_task1_final,
+)
 
 
 def _build_yolo_detector(config):
@@ -82,25 +105,104 @@ def _build_yolo_detector(config):
     )
 
 
+def _value_or_default(value, default):
+    return default if value is None else value
+
+
+def _parse_float_tuple(text: str) -> tuple[float, ...]:
+    values = tuple(float(item.strip()) for item in text.split(",") if item.strip())
+    if not values:
+        raise argparse.ArgumentTypeError("expected one or more comma-separated numbers")
+    return values
+
+
+def _task1_run_name(created_utc: str, seed: int) -> str:
+    timestamp = created_utc.replace("+00:00", "Z").replace("-", "").replace(":", "").replace(".", "")
+    return f"{timestamp}_seed{seed}"
+
+
+def _write_seeded_layout(args: argparse.Namespace, *, created_utc: str) -> tuple[Path, Path]:
+    if args.seed is None:
+        raise SystemExit("Provide either --layout or --seed for the survey stage.")
+    run_dir = args.output_dir / _task1_run_name(created_utc, args.seed)
+    layout_path = run_dir / "layout" / "target_object_poses.json"
+    if layout_path.exists():
+        raise SystemExit(f"Refusing to overwrite existing task1 layout: {layout_path}")
+
+    payload = make_random_target_object_pose_payload(
+        model_path=args.scene_model,
+        seed=args.seed,
+        created_utc=created_utc,
+        object_count=args.object_count,
+        base_height_m=args.base_height,
+        bounds=PlacementBounds(
+            x_min=args.x_min,
+            x_max=args.x_max,
+            y_min=args.y_min,
+            y_max=args.y_max,
+        ),
+        collision_margin_m=args.collision_margin,
+        max_attempts_per_object=args.max_attempts_per_object,
+    )
+    layout_path.parent.mkdir(parents=True, exist_ok=True)
+    layout_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return layout_path, run_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
-        "--step",
-        choices=("survey", "row"),
+        "--stage",
+        choices=("survey", "row", "final"),
         default="survey",
-        help="Recognition stage to run. Later final/zoom stages should be added here.",
+        help="Recognition stage to run.",
     )
     parser.add_argument(
         "--layout",
         type=Path,
         default=None,
-        help="Target object pose layout JSON. Defaults to the latest outputs/object_poses/*_target_object_poses.json.",
+        help="Explicit target object pose layout JSON. When omitted, --seed generates one under the task1 run directory.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed used to generate a task1 layout when --layout is omitted.",
+    )
+    parser.add_argument(
+        "--object-count",
+        type=int,
+        default=DEFAULT_OBJECT_COUNT,
+        help="Number of target objects to place for generated task1 layouts.",
+    )
+    parser.add_argument(
+        "--base-height",
+        type=float,
+        default=DEFAULT_BASE_HEIGHT_M,
+        help="Common z coordinate for generated object body poses, in meters.",
+    )
+    parser.add_argument("--x-min", type=float, default=PlacementBounds.x_min)
+    parser.add_argument("--x-max", type=float, default=PlacementBounds.x_max)
+    parser.add_argument("--y-min", type=float, default=PlacementBounds.y_min)
+    parser.add_argument("--y-max", type=float, default=PlacementBounds.y_max)
+    parser.add_argument(
+        "--collision-margin",
+        type=float,
+        default=DEFAULT_COLLISION_MARGIN_M,
+        help="Extra 2D footprint separation margin for generated task1 layouts, in meters.",
+    )
+    parser.add_argument("--max-attempts-per-object", type=int, default=6000)
     parser.add_argument(
         "--survey-report",
         type=Path,
         default=None,
-        help="Step1 survey_report.json for --step row. Defaults to the latest outputs/task1/*/survey/survey_report.json.",
+        help="Survey report JSON for --stage row. Defaults to the latest outputs/task1/*/survey/survey_report.json.",
+    )
+    parser.add_argument(
+        "--row-report",
+        type=Path,
+        default=None,
+        help="Row report JSON for --stage final. Defaults to the latest outputs/task1/*/row/row_report.json.",
     )
     parser.add_argument("--scene-model", type=Path, default=DEFAULT_SCENE_MODEL, help="MuJoCo scene MJCF/XML path.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Task1 run output root directory.")
@@ -269,13 +371,23 @@ def main() -> None:
     parser.add_argument("--skip-yolo", action="store_true", help="Capture images/depth but skip YOLO inference.")
     parser.add_argument("--strict-yolo", action="store_true", help="Fail the active stage if YOLO inference fails.")
     parser.add_argument("--plan-only", action="store_true", help="Only write the active stage plan; do not load MuJoCo or YOLO.")
-    parser.add_argument("--max-ik-iterations", type=int, default=200, help="Maximum IK iterations per capture view.")
-    parser.add_argument("--ik-position-tolerance", type=float, default=0.05, help="IK camera position tolerance in meters.")
+    parser.add_argument(
+        "--max-ik-iterations",
+        type=int,
+        default=None,
+        help="Maximum IK iterations per capture view. Defaults are stage-specific.",
+    )
+    parser.add_argument(
+        "--ik-position-tolerance",
+        type=float,
+        default=None,
+        help="IK camera position tolerance in meters. Defaults are stage-specific.",
+    )
     parser.add_argument(
         "--ik-orientation-tolerance",
         type=float,
-        default=0.35,
-        help="IK camera orientation tolerance in radians.",
+        default=None,
+        help="IK camera orientation tolerance in radians. Defaults are stage-specific.",
     )
     parser.add_argument("--row-camera-z", type=float, default=DEFAULT_ROW_CAMERA_Z_M, help="Desired row-stage wrist camera world z inside the tank.")
     parser.add_argument("--row-standoff", type=float, default=DEFAULT_ROW_STANDOFF_M, help="Row-stage lateral standoff from candidate rough position.")
@@ -375,17 +487,81 @@ def main() -> None:
         default=DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE,
         help="Minimum secondary class-vote evidence before top-two class votes can mark a row hypothesis ambiguous.",
     )
+    parser.add_argument(
+        "--final-camera-z",
+        type=float,
+        default=DEFAULT_FINAL_CAMERA_Z_M,
+        help="Desired final wrist camera world z inside the tank.",
+    )
+    parser.add_argument(
+        "--final-standoff",
+        type=float,
+        default=DEFAULT_FINAL_STANDOFF_M,
+        help="Horizontal standoff from each row target for final capture.",
+    )
+    parser.add_argument(
+        "--final-min-oblique-distance",
+        type=float,
+        default=DEFAULT_FINAL_MIN_OBLIQUE_DISTANCE_M,
+        help="Minimum horizontal camera offset from each target, preventing pure top-down final photos.",
+    )
+    parser.add_argument(
+        "--final-look-at-height-offset",
+        type=float,
+        default=DEFAULT_FINAL_LOOK_AT_HEIGHT_OFFSET_M,
+        help="Height above the object base plane used as the final look-at target.",
+    )
+    parser.add_argument(
+        "--final-entry-side",
+        choices=("y-max", "y-min", "x-min", "x-max", "center"),
+        default=DEFAULT_FINAL_ENTRY_SIDE,
+        help="Preferred tank-side reference when row report evidence does not provide a previous view direction.",
+    )
+    parser.add_argument(
+        "--final-target-match-radius",
+        type=float,
+        default=DEFAULT_FINAL_TARGET_MATCH_RADIUS_M,
+        help="World XY radius for associating close YOLO-depth observations with one planned target.",
+    )
+    parser.add_argument(
+        "--final-entry-validation-samples",
+        type=int,
+        default=DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES,
+        help="Number of top-opening entry pose samples to validate before each final photo.",
+    )
+    parser.add_argument(
+        "--final-entry-clearance-margin",
+        type=float,
+        default=DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
+        help="Additional vertical margin below the tank opening for final entry validation samples.",
+    )
+    parser.add_argument(
+        "--final-view-angle-offsets-deg",
+        type=_parse_float_tuple,
+        default=DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG,
+        help="Comma-separated final-view angle offsets around the row-evidence direction.",
+    )
+    parser.add_argument(
+        "--final-view-standoff-multipliers",
+        type=_parse_float_tuple,
+        default=DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
+        help="Comma-separated standoff multipliers for final-view candidates, tried in policy order.",
+    )
     args = parser.parse_args()
 
-    if args.step == "survey":
-        try:
-            layout_path = args.layout or find_latest_stage0_layout()
-        except FileNotFoundError as exc:
-            raise SystemExit(str(exc)) from exc
+    if args.stage == "survey":
+        created_utc = datetime.now(timezone.utc).isoformat()
+        if args.layout is None:
+            layout_path, run_dir = _write_seeded_layout(args, created_utc=created_utc)
+        else:
+            layout_path = args.layout
+            run_dir = None
         config = SurveyConfig(
             scene_model_path=args.scene_model,
             yolo_profile_path=args.yolo_config,
             output_dir=args.output_dir,
+            run_dir=run_dir,
+            created_utc=created_utc if run_dir is not None else None,
             camera_name=args.camera_name,
             grid_size=args.grid_size,
             image_width=args.image_width,
@@ -425,13 +601,19 @@ def main() -> None:
             run_yolo=not args.skip_yolo,
             plan_only=args.plan_only,
             strict_yolo=args.strict_yolo,
-            max_ik_iterations=args.max_ik_iterations,
-            ik_position_tolerance_m=args.ik_position_tolerance,
-            ik_orientation_tolerance_rad=args.ik_orientation_tolerance,
+            max_ik_iterations=_value_or_default(args.max_ik_iterations, SurveyConfig().max_ik_iterations),
+            ik_position_tolerance_m=_value_or_default(
+                args.ik_position_tolerance,
+                SurveyConfig().ik_position_tolerance_m,
+            ),
+            ik_orientation_tolerance_rad=_value_or_default(
+                args.ik_orientation_tolerance,
+                SurveyConfig().ik_orientation_tolerance_rad,
+            ),
         )
         detector = _build_yolo_detector(config)
         report = run_task1_survey(layout_path, config, detector=detector)
-    else:
+    elif args.stage == "row":
         try:
             survey_report_path = args.survey_report or find_latest_survey_report(args.output_dir)
         except FileNotFoundError as exc:
@@ -474,12 +656,68 @@ def main() -> None:
             run_yolo=not args.skip_yolo,
             plan_only=args.plan_only,
             strict_yolo=args.strict_yolo,
-            max_ik_iterations=args.max_ik_iterations,
-            ik_position_tolerance_m=args.ik_position_tolerance,
-            ik_orientation_tolerance_rad=args.ik_orientation_tolerance,
+            max_ik_iterations=_value_or_default(args.max_ik_iterations, RowConfig().max_ik_iterations),
+            ik_position_tolerance_m=_value_or_default(
+                args.ik_position_tolerance,
+                RowConfig().ik_position_tolerance_m,
+            ),
+            ik_orientation_tolerance_rad=_value_or_default(
+                args.ik_orientation_tolerance,
+                RowConfig().ik_orientation_tolerance_rad,
+            ),
         )
         detector = _build_yolo_detector(config)
         report = run_task1_row(survey_report_path, config, detector=detector)
+    else:
+        try:
+            row_report_path = args.row_report or find_latest_row_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+        config = FinalConfig(
+            scene_model_path=args.scene_model,
+            yolo_profile_path=args.yolo_config,
+            output_dir=args.output_dir,
+            camera_name=args.camera_name,
+            image_width=args.image_width,
+            image_height=args.image_height,
+            camera_z_m=args.final_camera_z,
+            tank_opening_z_m=args.tank_opening_z,
+            opening_clearance_m=args.opening_clearance,
+            standoff_m=args.final_standoff,
+            min_oblique_distance_m=args.final_min_oblique_distance,
+            look_at_height_offset_m=args.final_look_at_height_offset,
+            entry_side=args.final_entry_side,
+            target_match_radius_m=args.final_target_match_radius,
+            entry_validation_samples=args.final_entry_validation_samples,
+            entry_clearance_margin_m=args.final_entry_clearance_margin,
+            final_view_angle_offsets_deg=args.final_view_angle_offsets_deg,
+            final_view_standoff_multipliers=args.final_view_standoff_multipliers,
+            yolo_confidence=args.yolo_conf,
+            yolo_iou=args.yolo_iou,
+            yolo_image_size=args.yolo_imgsz,
+            yolo_device=args.yolo_device,
+            yolo_max_detections=args.yolo_max_det,
+            yolo_tile_grid_size=args.yolo_tile_grid,
+            yolo_tile_overlap=args.yolo_tile_overlap,
+            yolo_tile_nms_iou=args.yolo_tile_nms_iou,
+            run_yolo=not args.skip_yolo,
+            plan_only=args.plan_only,
+            strict_yolo=args.strict_yolo,
+            max_ik_iterations=_value_or_default(
+                args.max_ik_iterations,
+                FinalConfig().max_ik_iterations,
+            ),
+            ik_position_tolerance_m=_value_or_default(
+                args.ik_position_tolerance,
+                DEFAULT_FINAL_IK_POSITION_TOLERANCE_M,
+            ),
+            ik_orientation_tolerance_rad=_value_or_default(
+                args.ik_orientation_tolerance,
+                FinalConfig().ik_orientation_tolerance_rad,
+            ),
+        )
+        detector = _build_yolo_detector(config)
+        report = run_task1_final(row_report_path, config, detector=detector)
     print(json.dumps({"status": report["status"], "message": report["message"]}, ensure_ascii=False))
     print(f"report={report['report_path']}")
 

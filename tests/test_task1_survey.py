@@ -28,6 +28,14 @@ from robot_arm_pipeline.task1.row import (
     select_row_objects_with_policy,
     select_stable_row_objects,
 )
+from robot_arm_pipeline.task1.final import (
+    DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
+    DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
+    FinalConfig,
+    build_final_plan,
+    load_task1_row_report,
+    select_stable_final_objects,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -281,6 +289,45 @@ def test_task1_recognition_script_plan_only_writes_report(tmp_path: Path) -> Non
     assert report["camera_name"] == "wrist"
 
 
+def test_task1_recognition_script_seeded_layout_stays_under_task1_output(tmp_path: Path) -> None:
+    pytest.importorskip("mujoco")
+    output_dir = tmp_path / "task1"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
+            "--seed",
+            "21",
+            "--object-count",
+            "1",
+            "--output-dir",
+            str(output_dir),
+            "--plan-only",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert '"status": "plan_only"' in result.stdout
+    reports = sorted(output_dir.glob("*/survey/survey_report.json"))
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text(encoding="utf-8"))
+    run_dir = Path(report["task1_run_dir"])
+    layout_path = run_dir / "layout" / "target_object_poses.json"
+    layout = json.loads(layout_path.read_text(encoding="utf-8"))
+
+    assert run_dir.parent == output_dir
+    assert run_dir.name.endswith("_seed21")
+    assert report["layout_source_path"] == str(layout_path)
+    assert report["layout_snapshot_path"] == str(layout_path)
+    assert layout["seed"] == 21
+    assert len(layout["objects"]) == 1
+    assert not (tmp_path / "object_poses").exists()
+
+
 def test_row_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
@@ -311,7 +358,7 @@ def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) ->
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
-            "--step",
+            "--stage",
             "row",
             "--survey-report",
             str(survey_report_path),
@@ -448,6 +495,164 @@ def test_row_object_selection_reports_close_class_votes_as_ambiguous() -> None:
     assert selection["object_selection_summary"]["class_vote_ambiguous_count"] == 1
 
 
+def test_final_plan_consumes_layered_row_report(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    row_report_path = _write_row_report(tmp_path, layout_path)
+    row_report = load_task1_row_report(row_report_path)
+
+    workspace, planned = build_final_plan(
+        row_report,
+        FinalConfig(
+            plan_only=True,
+            camera_z_m=0.30,
+            standoff_m=0.12,
+            min_oblique_distance_m=0.06,
+            entry_validation_samples=3,
+            entry_clearance_margin_m=DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
+        ),
+    )
+
+    assert len(planned) == 3
+    assert [item.target.source_status for item in planned] == ["stable", "tentative", "ambiguous"]
+    assert [item.target.target_role for item in planned] == ["primary", "follow_up", "follow_up"]
+    assert planned[0].direction_source == "best_row_image_view"
+    for item in planned:
+        position = item.view.desired_camera_position_world
+        target = item.target.position_world
+        assert workspace.x_min <= position[0] <= workspace.x_max
+        assert workspace.y_min <= position[1] <= workspace.y_max
+        assert workspace.bottom_z_m < position[2] < workspace.tank_opening_z_m
+        assert math.hypot(position[0] - target[0], position[1] - target[1]) >= 0.06
+        assert len(item.entry_views) == 3
+        assert item.entry_views[0].desired_camera_position_world[2] == pytest.approx(
+            workspace.max_camera_z_m - DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M
+        )
+        assert item.entry_views[-1].desired_camera_position_world[2] > position[2]
+        assert len(item.view_candidates) >= 2
+        assert item.view_candidates[0].view.view_id == item.view.view_id
+        assert item.view_candidates[0].standoff_multiplier == pytest.approx(1.0)
+        assert any(
+            candidate.standoff_multiplier == pytest.approx(DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1])
+            for candidate in item.view_candidates
+        )
+        assert all(candidate.entry_views for candidate in item.view_candidates)
+
+
+def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    row_report_path = _write_row_report(tmp_path, layout_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
+            "--stage",
+            "final",
+            "--row-report",
+            str(row_report_path),
+            "--plan-only",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert '"status": "plan_only"' in result.stdout
+    capture_report_path = row_report_path.parent.parent / "final" / "final_report.json"
+    report = json.loads(capture_report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == "task1_final_report_v1"
+    assert report["stage"] == "final"
+    assert report["status"] == "plan_only"
+    assert report["source_row_report_path"] == str(row_report_path)
+    assert len(report["primary_objects"]) == 1
+    assert len(report["follow_up_targets"]) == 2
+    assert report["stable_objects"] == []
+    assert report["unstable_objects"] == []
+    assert report["stable_object_selection"]["status"] == "not_run"
+    assert [capture["status"] for capture in report["object_captures"]] == ["planned", "planned", "planned"]
+    assert report["quality"]["stable_object_count"] == 1
+    assert (
+        report["planned_captures"][0]["entry_views"][0]["desired_camera_position_world"][2]
+        < report["workspace"]["tank_opening_z_m"] - report["workspace"]["opening_clearance_m"]
+    )
+    assert len(report["planned_captures"][0]["view_candidates"]) >= 2
+    assert len(report["object_captures"][0]["view_candidates"]) >= 2
+    assert any(
+        candidate["standoff_multiplier"] == DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1]
+        for candidate in report["planned_captures"][0]["view_candidates"]
+    )
+
+
+def test_final_stable_selection_outputs_downstream_object_list() -> None:
+    source_transform = [
+        [0.0, -1.0, 0.0, 0.30],
+        [1.0, 0.0, 0.0, 0.35],
+        [0.0, 0.0, 1.0, 0.03],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    selection = select_stable_final_objects(
+        [
+            _final_payload(
+                object_id="row_object_001",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="notebook",
+                detected_class_name="notebook",
+                position_world=[0.31, 0.36, 0.03],
+                source_transform=source_transform,
+            ),
+            _final_payload(
+                object_id="row_tentative_001",
+                source_status="tentative",
+                target_role="follow_up",
+                capture_status="follow_up_observed",
+                source_class_name="standard_part",
+                detected_class_name="standard_part",
+                position_world=[0.70, 0.65, 0.03],
+                source_transform=source_transform,
+            ),
+            _final_payload(
+                object_id="row_ambiguous_001",
+                source_status="ambiguous",
+                target_role="follow_up",
+                capture_status="follow_up_observed",
+                source_class_name=None,
+                detected_class_name="drill",
+                position_world=[0.52, 0.45, 0.03],
+                candidate_class_names=["drill", "hex_key"],
+                source_transform=None,
+            ),
+            _final_payload(
+                object_id="row_object_002",
+                source_status="stable",
+                target_role="primary",
+                capture_status="class_conflict",
+                source_class_name="marker",
+                detected_class_name="drill",
+                position_world=[0.40, 0.40, 0.03],
+                source_transform=source_transform,
+            ),
+        ]
+    )
+
+    stable_objects = selection["stable_objects"]
+    assert [obj["object_id"] for obj in stable_objects] == [
+        "row_object_001",
+        "row_tentative_001",
+        "row_ambiguous_001",
+    ]
+    assert [obj["class_name"] for obj in stable_objects] == ["notebook", "standard_part", "drill"]
+    assert stable_objects[0]["bbox_xyxy"] == (100.0, 110.0, 220.0, 240.0)
+    assert stable_objects[0]["T_world_object"][0][3] == pytest.approx(0.31)
+    assert stable_objects[0]["T_world_object"][0][:3] == tuple(source_transform[0][:3])
+    assert stable_objects[2]["pose_quality"]["orientation_source"] == "identity_orientation_no_source_pose"
+    assert selection["stable_object_selection"]["stable_object_count"] == 3
+    assert selection["stable_object_selection"]["unstable_object_count"] == 1
+    assert selection["stable_object_selection"]["rejected_reason_counts"] == {"class_conflict": 1}
+
+
 def _write_layout(tmp_path: Path) -> Path:
     payload = {
         "schema_version": "target_object_pose_layout_v1",
@@ -566,6 +771,194 @@ def _write_survey_report(tmp_path: Path, layout_path: Path) -> Path:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(payload), encoding="utf-8")
     return report_path
+
+
+def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
+    run_dir = tmp_path / "task1" / "20260705T000100Z_seed12"
+    row_dir = run_dir / "row"
+    report_path = row_dir / "row_report.json"
+    row_image_1 = row_dir / "images" / "row_candidate_001_00_rgb.png"
+    row_image_2 = row_dir / "images" / "row_candidate_002_00_rgb.png"
+    row_image_3 = row_dir / "images" / "row_candidate_003_00_rgb.png"
+    payload = {
+        "schema_version": "task1_row_report_v1",
+        "stage": "row",
+        "status": "success",
+        "created_utc": "2026-07-05T00:01:00+00:00",
+        "message": "test row report",
+        "source_survey_report_path": str(run_dir / "survey" / "survey_report.json"),
+        "source_survey_status": "success",
+        "layout_snapshot_path": str(layout_path),
+        "task1_run_dir": str(run_dir),
+        "row_dir": str(row_dir),
+        "plan_path": str(row_dir / "row_plan.json"),
+        "report_path": str(report_path),
+        "scene_model_path": "examples/mujoco/gen3_with_tank.xml",
+        "camera_name": "wrist",
+        "workspace": {
+            "x_min": 0.15,
+            "x_max": 0.85,
+            "y_min": 0.15,
+            "y_max": 0.85,
+            "bottom_z_m": 0.03,
+            "tank_opening_z_m": 0.50,
+            "opening_clearance_m": 0.035,
+        },
+        "image_size": [1920, 1080],
+        "run_yolo": True,
+        "yolo_profile_path": "configs/yolo/stage3_default.yaml",
+        "views": [
+            {
+                "view_id": "row_candidate_001_00",
+                "status": "success",
+                "rgb_image_path": str(row_image_1),
+                "desired_camera_position_world": [0.30, 0.47, 0.34],
+                "actual_camera_position_world": [0.31, 0.46, 0.34],
+            },
+            {
+                "view_id": "row_candidate_002_00",
+                "status": "success",
+                "rgb_image_path": str(row_image_2),
+                "desired_camera_position_world": [0.70, 0.80, 0.34],
+                "actual_camera_position_world": [0.70, 0.79, 0.34],
+            },
+            {
+                "view_id": "row_candidate_003_00",
+                "status": "success",
+                "rgb_image_path": str(row_image_3),
+                "desired_camera_position_world": [0.52, 0.60, 0.34],
+                "actual_camera_position_world": [0.52, 0.59, 0.34],
+            },
+        ],
+        "stable_objects": [
+            {
+                "object_id": "row_object_001",
+                "source_hypothesis_id": "object_hypothesis_001",
+                "class_name": "notebook",
+                "confidence": 0.91,
+                "support_count": 3,
+                "supporting_row_views": ["row_candidate_001_00"],
+                "position_world": [0.30, 0.35, 0.03],
+                "yaw_rad": 0.1,
+                "T_world_object": [
+                    [1.0, 0.0, 0.0, 0.30],
+                    [0.0, 1.0, 0.0, 0.35],
+                    [0.0, 0.0, 1.0, 0.03],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                "best_image_path": str(row_image_1),
+                "best_bbox_xyxy": [100.0, 100.0, 420.0, 420.0],
+            }
+        ],
+        "tentative_objects": [
+            {
+                "object_id": "row_tentative_001",
+                "status": "tentative",
+                "class_name": "standard_part",
+                "confidence": 0.41,
+                "support_count": 1,
+                "supporting_row_views": ["row_candidate_002_00"],
+                "position_world": [0.70, 0.65, 0.03],
+                "T_world_object": [
+                    [1.0, 0.0, 0.0, 0.70],
+                    [0.0, 1.0, 0.0, 0.65],
+                    [0.0, 0.0, 1.0, 0.03],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                "best_image_path": str(row_image_2),
+                "best_bbox_xyxy": [60.0, 60.0, 120.0, 120.0],
+            }
+        ],
+        "ambiguous_objects": [
+            {
+                "object_id": "row_ambiguous_001",
+                "status": "ambiguous",
+                "position_world": [0.52, 0.45, 0.03],
+                "class_candidates": [
+                    {
+                        "class_name": "drill",
+                        "confidence": 0.78,
+                        "evidence_score": 1.2,
+                        "supporting_row_views": ["row_candidate_003_00"],
+                        "position_world": [0.52, 0.45, 0.03],
+                        "best_image_path": str(row_image_3),
+                        "best_bbox_xyxy": [200.0, 200.0, 360.0, 360.0],
+                    },
+                    {
+                        "class_name": "hex_key",
+                        "confidence": 0.76,
+                        "evidence_score": 1.1,
+                        "supporting_row_views": ["row_candidate_003_00"],
+                        "position_world": [0.53, 0.45, 0.03],
+                        "best_image_path": str(row_image_3),
+                        "best_bbox_xyxy": [210.0, 205.0, 350.0, 350.0],
+                    },
+                ],
+            }
+        ],
+        "object_selection_summary": {
+            "status": "success",
+            "policy_version": "row_object_selection_policy_v2",
+            "stable_object_count": 1,
+            "tentative_object_count": 1,
+            "ambiguous_object_count": 1,
+        },
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    return report_path
+
+
+def _final_payload(
+    *,
+    object_id: str,
+    source_status: str,
+    target_role: str,
+    capture_status: str,
+    source_class_name: str | None,
+    detected_class_name: str,
+    position_world: list[float],
+    source_transform: list[list[float]] | None,
+    candidate_class_names: list[str] | None = None,
+) -> dict[str, object]:
+    target = {
+        "object_id": object_id,
+        "source_status": source_status,
+        "target_role": target_role,
+        "position_world": position_world,
+        "class_name": source_class_name,
+        "candidate_class_names": candidate_class_names or ([source_class_name] if source_class_name else []),
+        "T_world_object": source_transform,
+    }
+    return {
+        "target": target,
+        "status": capture_status,
+        "source_status": source_status,
+        "target_role": target_role,
+        "recognition": {
+            "status": "observed",
+            "source_class_name": source_class_name,
+            "detected_class_name": detected_class_name,
+            "class_match": source_class_name == detected_class_name if source_class_name else None,
+            "candidate_class_names": candidate_class_names or ([source_class_name] if source_class_name else []),
+            "confidence": 0.82,
+            "position_world": position_world,
+            "target_xy_distance_m": 0.01,
+            "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
+            "target_match_radius_m": 0.07,
+        },
+        "best_observation": {
+            "class_name": detected_class_name,
+            "confidence": 0.82,
+            "rough_position_world": position_world,
+            "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
+        },
+        "final_image_path": "outputs/single.png",
+        "depth_path": "outputs/single.npy",
+        "annotated_image_path": "outputs/single_annotated.png",
+        "yolo_raw_path": "outputs/single.json",
+        "view": {"status": "success"},
+    }
 
 
 def _observation(

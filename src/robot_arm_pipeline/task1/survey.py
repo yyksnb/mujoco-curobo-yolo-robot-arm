@@ -11,7 +11,6 @@ from typing import Any, Protocol
 DEFAULT_SCENE_MODEL = Path("examples/mujoco/gen3_with_tank.xml")
 DEFAULT_YOLO_PROFILE = Path("configs/yolo/stage3_default.yaml")
 DEFAULT_OUTPUT_DIR = Path("outputs/task1")
-DEFAULT_STAGE0_OUTPUT_DIR = Path("outputs/object_poses")
 DEFAULT_CAMERA_NAME = "wrist"
 DEFAULT_GRID_SIZE = 4
 DEFAULT_IMAGE_WIDTH = 1920
@@ -242,6 +241,8 @@ class SurveyConfig:
     scene_model_path: Path = DEFAULT_SCENE_MODEL
     yolo_profile_path: Path = DEFAULT_YOLO_PROFILE
     output_dir: Path = DEFAULT_OUTPUT_DIR
+    run_dir: Path | None = None
+    created_utc: str | None = None
     camera_name: str = DEFAULT_CAMERA_NAME
     grid_size: int = DEFAULT_GRID_SIZE
     image_width: int = DEFAULT_IMAGE_WIDTH
@@ -386,14 +387,6 @@ def load_stage0_layout(path: Path | str) -> Stage0Layout:
     )
 
 
-def find_latest_stage0_layout(output_dir: Path | str = DEFAULT_STAGE0_OUTPUT_DIR) -> Path:
-    root = Path(output_dir)
-    candidates = sorted(root.glob("*_target_object_poses.json"), key=lambda path: path.stat().st_mtime)
-    if not candidates:
-        raise FileNotFoundError(f"no stage0 target object pose JSON files found under {root}")
-    return candidates[-1]
-
-
 def build_workspace(
     layout: Stage0Layout,
     *,
@@ -518,8 +511,8 @@ def run_task1_survey(
         opening_clearance_m=config.opening_clearance_m,
     )
     workspace, views = build_grid_survey_plan(scene, config)
-    created_utc = datetime.now(timezone.utc).isoformat()
-    run_dir = config.output_dir / _run_id(created_utc, scene)
+    created_utc = config.created_utc or datetime.now(timezone.utc).isoformat()
+    run_dir = config.run_dir or config.output_dir / _run_id(created_utc, scene)
     layout_dir = run_dir / "layout"
     survey_dir = run_dir / "survey"
     layout_snapshot_path = layout_dir / "target_object_poses.json"
@@ -916,16 +909,7 @@ class MujocoSurveyBackend:
     def apply_stage0_layout(self) -> None:
         self.apply_scene_objects()
 
-    def capture_view(
-        self,
-        view: SurveyView,
-        *,
-        images_dir: Path,
-        depth_dir: Path,
-        yolo_dir: Path,
-        annotated_dir: Path,
-        tiles_dir: Path,
-    ) -> tuple[dict[str, Any], list[SurveyObservation]]:
+    def validate_view_pose(self, view: SurveyView) -> dict[str, Any]:
         result = _planned_view_result(view)
         try:
             ik = self._solve_ik_for_view(view)
@@ -940,11 +924,34 @@ class MujocoSurveyBackend:
             result["collision"] = collision
             if not ik["success"]:
                 result["status"] = "failed"
-                result["message"] = "IK did not reach the requested wrist-camera survey pose."
-                return result, []
+                result["message"] = "IK did not reach the requested wrist-camera pose."
+                return result
             if not collision["collision_free"]:
                 result["status"] = "failed"
                 result["message"] = "IK pose was rejected by robot collision check."
+                return result
+            result["status"] = "success"
+            result["message"] = "Validated the requested wrist-camera pose with IK and collision checks."
+            return result
+        except Exception as exc:
+            result["status"] = "failed"
+            result["message"] = str(exc)
+            return result
+
+    def capture_view(
+        self,
+        view: SurveyView,
+        *,
+        images_dir: Path,
+        depth_dir: Path,
+        yolo_dir: Path,
+        annotated_dir: Path,
+        tiles_dir: Path,
+    ) -> tuple[dict[str, Any], list[SurveyObservation]]:
+        result = _planned_view_result(view)
+        try:
+            result = self.validate_view_pose(view)
+            if result.get("status") != "success":
                 return result, []
 
             images_dir.mkdir(parents=True, exist_ok=True)
