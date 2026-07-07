@@ -10,6 +10,7 @@ from robot_arm_pipeline.task1.survey import (
     DEFAULT_GRID_SIZE,
     SurveyConfig,
     SurveyObservation,
+    SurveyWorkspace,
     _image_tile_rects,
     _merge_yolo_detections,
     _offset_bbox_xyxy,
@@ -58,7 +59,9 @@ def test_target_layout_loads_and_grid_survey_plan_stays_inside_tank(tmp_path: Pa
     assert DEFAULT_GRID_SIZE == 4
     assert len(views) == 16
     assert workspace.max_camera_z_m == pytest.approx(0.465)
-    assert all(view.desired_camera_position_world[2] < workspace.tank_opening_z_m for view in views)
+    assert sum(1 for view in views if view.scan_layer == "opening_zone") == 9
+    assert sum(1 for view in views if view.scan_layer == "below_opening") == 7
+    assert all(view.fixed_qpos is not None for view in views)
     assert all(workspace.x_min <= view.desired_camera_position_world[0] <= workspace.x_max for view in views)
     assert all(workspace.y_min <= view.desired_camera_position_world[1] <= workspace.y_max for view in views)
 
@@ -69,7 +72,12 @@ def test_grid_survey_rejects_camera_above_tank_opening(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="below the tank upper opening"):
         build_grid_survey_plan(
             layout,
-            SurveyConfig(camera_z_m=0.52, tank_opening_z_m=0.50, opening_clearance_m=0.0),
+            SurveyConfig(
+                camera_z_m=0.52,
+                tank_opening_z_m=0.50,
+                opening_clearance_m=0.0,
+                survey_camera_z_mode="below_opening",
+            ),
         )
 
 
@@ -160,6 +168,79 @@ def test_survey_fusion_keeps_isolated_high_confidence_single_view_fallback() -> 
     assert "single-view fallback" in candidates[1]["notes"][0]
 
 
+def test_survey_fusion_rejects_clipped_weak_multiview_candidate() -> None:
+    candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "notebook", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "notebook", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0008", "marker", 0.50, (0.72, 0.70, 0.03), bbox=(1700.0, 900.0, 1919.0, 1079.0)),
+            _observation("survey_0009", "marker", 0.51, (0.73, 0.70, 0.03), bbox=(1688.0, 902.0, 1919.0, 1079.0)),
+        ],
+        cluster_radius_m=0.06,
+        image_width=1920,
+        image_height=1080,
+        min_unclipped_candidate_vote=0.15,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["class_votes"]["notebook"] == pytest.approx(1.66)
+
+
+def test_survey_single_view_fallback_rejects_existing_class_duplicate() -> None:
+    candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "standard", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "standard", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0008", "standard", 0.70, (0.70, 0.70, 0.03), bbox=(500.0, 400.0, 560.0, 460.0)),
+        ],
+        cluster_radius_m=0.06,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["support_count"] == 2
+
+
+def test_survey_fusion_suppresses_weak_candidate_near_strong_candidate() -> None:
+    candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "marker", 0.90, (0.50, 0.50, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "marker", 0.88, (0.51, 0.50, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0003", "tape", 0.44, (0.61, 0.53, 0.03), bbox=(500.0, 400.0, 620.0, 520.0)),
+            _observation("survey_0004", "hex", 0.43, (0.62, 0.53, 0.03), bbox=(502.0, 402.0, 622.0, 522.0)),
+        ],
+        cluster_radius_m=0.06,
+        weak_near_strong_suppression_radius_m=0.15,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["class_votes"]["marker"] == pytest.approx(1.78)
+
+
+def test_survey_fusion_rejects_candidate_center_outside_workspace() -> None:
+    workspace = SurveyWorkspace(
+        x_min=0.15,
+        x_max=0.85,
+        y_min=0.15,
+        y_max=0.85,
+        bottom_z_m=0.03,
+        tank_opening_z_m=0.50,
+        opening_clearance_m=0.035,
+    )
+    candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "notebook", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "notebook", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0008", "tape", 0.70, (1.00, 0.30, 0.03), bbox=(500.0, 400.0, 560.0, 460.0)),
+        ],
+        cluster_radius_m=0.06,
+        candidate_workspace=workspace,
+        candidate_workspace_margin_m=0.03,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["class_votes"]["notebook"] == pytest.approx(1.66)
+
+
 def test_survey_fusion_splits_mixed_class_cluster_with_strong_secondary_evidence() -> None:
     observations = [
         _observation("survey_0001", "标准件", 0.90, (0.53, 0.31, 0.03), bbox=(10.0, 10.0, 120.0, 120.0)),
@@ -207,6 +288,21 @@ def test_survey_fusion_weak_fallback_uses_shape_not_class_name() -> None:
 
     assert len(candidates) == 2
     assert candidates[1]["class_votes"]["细长工具"] == pytest.approx(0.71)
+
+
+def test_survey_weak_fallback_can_use_secondary_new_class_evidence() -> None:
+    observations = [
+        _observation("survey_0001", "内六角扳手", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+        _observation("survey_0002", "内六角扳手", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+        _observation("survey_0008", "内六角扳手", 0.46, (0.72, 0.70, 0.03), bbox=(500.0, 300.0, 610.0, 410.0)),
+        _observation("survey_0009", "钻头", 0.47, (0.73, 0.70, 0.03), bbox=(502.0, 302.0, 612.0, 412.0)),
+    ]
+
+    candidates = fuse_survey_observations(observations, cluster_radius_m=0.06)
+
+    assert len(candidates) == 2
+    assert candidates[1]["class_votes"]["钻头"] == pytest.approx(0.47)
+    assert "weak but spatially distinct multi-view" in candidates[1]["notes"][0]
 
 
 def test_annotated_image_writes_bbox_overlay(tmp_path: Path) -> None:

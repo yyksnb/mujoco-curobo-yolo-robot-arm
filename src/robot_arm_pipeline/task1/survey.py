@@ -25,20 +25,25 @@ DEFAULT_CLUSTER_SPLIT_DISTANCE_M = 0.075
 DEFAULT_CLUSTER_SPLIT_MIN_VOTE = 0.8
 DEFAULT_WEAK_CANDIDATE_MERGE_RADIUS_M = 0.08
 DEFAULT_WEAK_CANDIDATE_VOTE_THRESHOLD = 1.05
+DEFAULT_WEAK_NEAR_STRONG_SUPPRESSION_RADIUS_M = 0.15
 DEFAULT_TINY_CANDIDATE_BBOX_AREA_PX = 30_000.0
 DEFAULT_WEAK_TINY_CANDIDATE_MAX_SPREAD_M = 0.045
 DEFAULT_SINGLE_VIEW_FALLBACK_CONFIDENCE = 0.15
 DEFAULT_SINGLE_VIEW_FALLBACK_MIN_DISTANCE_M = 0.10
+DEFAULT_SINGLE_VIEW_FALLBACK_REQUIRES_NEW_CLASS = True
 DEFAULT_MIN_CANDIDATE_SUPPORT_VIEWS = 2
 DEFAULT_LARGE_SAME_CLASS_MERGE_RADIUS_M = 0.17
 DEFAULT_LARGE_SAME_CLASS_BBOX_AREA_PX = 120_000.0
 DEFAULT_MIXED_CLASS_SPLIT_MIN_VOTE = 1.5
-DEFAULT_MIXED_CLASS_SPLIT_DISTANCE_M = 0.055
-DEFAULT_WEAK_MULTIVIEW_FALLBACK_VOTE = 0.65
+DEFAULT_MIXED_CLASS_SPLIT_DISTANCE_M = 0.015
+DEFAULT_WEAK_MULTIVIEW_FALLBACK_VOTE = 0.45
 DEFAULT_WEAK_MULTIVIEW_FALLBACK_MIN_DISTANCE_M = 0.11
-DEFAULT_WEAK_MULTIVIEW_FALLBACK_MAX_BBOX_AREA_PX = 6_000.0
+DEFAULT_WEAK_MULTIVIEW_FALLBACK_MAX_BBOX_AREA_PX = 30_000.0
 DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_ASPECT_RATIO = 3.0
 DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX = 35_000.0
+DEFAULT_BBOX_CLIP_MARGIN_PX = 2.0
+DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE = 0.35
+DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M = 0.03
 DEFAULT_YOLO_TILE_GRID_SIZE = 2
 DEFAULT_YOLO_TILE_OVERLAP = 0.12
 DEFAULT_YOLO_TILE_NMS_IOU = 0.45
@@ -48,6 +53,39 @@ DEFAULT_DEPTH_COMPONENT_SPLIT_DISTANCE_M = 0.07
 DEFAULT_DEPTH_MODE_BAND_M = 0.025
 DEFAULT_DEPTH_FOREGROUND_PERCENTILE = 45.0
 DEFAULT_DEPTH_FOREGROUND_MARGIN_M = 0.025
+DEFAULT_SURVEY_REACHABLE_POSE_SAMPLES = 180_000
+DEFAULT_SURVEY_OPENING_REACHABLE_POSE_SAMPLES = 720_000
+DEFAULT_SURVEY_REACHABLE_MIN_CAMERA_Z_M = 0.08
+DEFAULT_SURVEY_POSE_SELECTION_POLICY = "higher_camera_z_then_cell_center"
+DEFAULT_SURVEY_CAMERA_Z_MODE = "fixed_mixed_4x4"
+DEFAULT_SURVEY_ABOVE_OPENING_MARGIN_M = 0.12
+DEFAULT_SURVEY_OPENING_VISIBILITY_MIN_FRACTION = 0.45
+DEFAULT_SURVEY_OPENING_VISIBILITY_GRID_SIZE = 3
+DEFAULT_SURVEY_OPENING_GRID_SIZE = 3
+HALTON_BASES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29)
+
+FIXED_MIXED_4X4_POSE_SOURCE = "fixed_mixed_4x4_v1"
+FIXED_MIXED_4X4_SURVEY_POSES: tuple[
+    tuple[tuple[int, int], str, tuple[float, ...], tuple[float, float, float], tuple[float, float, float]],
+    ...,
+] = (
+    ((0, 0), "below_opening", (-0.005596633, 1.356216626, -0.051769426, 1.925339721, 0.895545632, 0.267303262, 2.060196234), (0.340892439, 0.637368662, 0.419615596), (0.273134607, 0.759510847, 0.030000000)),
+    ((0, 1), "below_opening", (-0.671440169, 1.546462843, -2.257981769, -2.248609180, 1.234496113, 0.866316548, 1.567297081), (0.449849753, 0.667683038, 0.454534118), (0.380808442, 0.715897602, 0.030000000)),
+    ((0, 2), "below_opening", (-2.179642889, -1.677859857, 2.111045711, 2.169937271, 1.810174252, 0.860079641, 1.503565005), (0.385204579, 0.663446182, 0.444301846), (0.545548262, 0.682967450, 0.030000000)),
+    ((0, 3), "below_opening", (0.016765931, 1.309152436, -2.696743938, -2.068990071, 1.901788913, 1.036154928, -0.912691392), (0.372334887, 0.647330862, 0.449943005), (0.716072180, 0.817051497, 0.030000000)),
+    ((1, 0), "below_opening", (-0.299186175, 1.247369623, -2.881897848, -2.109452585, 2.844979062, -0.149476636, 1.874761646), (0.401587917, 0.669417778, 0.463288850), (0.269505009, 0.669176565, 0.030000000)),
+    ((1, 1), "opening_zone", (0.751602649, 1.989682241, -1.830009388, 2.389263694, 1.649321025, 1.988183052, 2.300764687), (0.411892684, 0.641921562, 0.578211690), (0.443475210, 0.662479292, 0.030000000)),
+    ((1, 2), "opening_zone", (2.609738744, -1.302911493, 1.184330366, -2.236619594, 1.494408512, 1.505994434, -2.244834281), (0.398413824, 0.653948870, 0.573383257), (0.625097220, 0.600131725, 0.030000000)),
+    ((1, 3), "opening_zone", (0.880744657, 1.192651075, 2.205062269, -2.180510077, -2.307129965, 0.314755543, 2.142784190), (0.404983157, 0.639771094, 0.579176704), (0.817523140, 0.627461954, 0.030000000)),
+    ((2, 0), "below_opening", (1.948856678, -1.957982968, 1.088013659, -2.350686060, -2.632879650, -0.898839915, -0.457769512), (0.427170685, 0.690003062, 0.448063887), (0.160654176, 0.399762757, 0.030000000)),
+    ((2, 1), "opening_zone", (-2.351406792, -1.418038779, 2.146792914, 2.201051171, 2.285147553, 1.094314391, -0.720375581), (0.420557000, 0.589805000, 0.502579000), (0.379281000, 0.378791000, 0.030000000)),
+    ((2, 2), "opening_zone", (2.547468712, -1.143687346, -2.558316821, 2.433889172, -2.379177513, 0.886176447, 0.136077851), (0.473068133, 0.600584211, 0.565127917), (0.562532712, 0.453798385, 0.030000000)),
+    ((2, 3), "opening_zone", (0.646998342, 1.634052422, -0.986668796, 2.095928524, -0.773213052, -0.990962897, -0.015786987), (0.476579000, 0.515253000, 0.475684000), (0.547020000, 0.350629000, 0.030000000)),
+    ((3, 0), "below_opening", (-2.647315282, -1.706083196, -0.617284252, -2.311009953, 2.933298844, -1.777929479, 2.957888329), (0.408504754, 0.631637097, 0.442431764), (0.239504948, 0.151026521, 0.030000000)),
+    ((3, 1), "opening_zone", (-2.924222782, -1.007951739, -0.548183288, -2.182338785, 2.394485045, -0.675280304, 2.969252304), (0.482294610, 0.568194534, 0.566397887), (0.484946615, 0.274796815, 0.030000000)),
+    ((3, 2), "opening_zone", (-1.902609554, -1.368336027, -0.730663878, -2.418635372, -2.949517877, -0.468324446, -3.112226867), (0.329069503, 0.665200143, 0.523981308), (0.650130568, 0.262729965, 0.030000000)),
+    ((3, 3), "opening_zone", (0.088185919, 1.409951685, 0.085438452, 2.063766081, -2.332708724, 1.034658486, 1.487125297), (0.457022000, 0.529584000, 0.474270000), (0.775006000, 0.254234000, 0.030000000)),
+)
 
 
 class SurveyDetector(Protocol):
@@ -176,10 +214,12 @@ class SurveyFusionPolicy:
     cluster_split_min_vote: float = DEFAULT_CLUSTER_SPLIT_MIN_VOTE
     weak_candidate_merge_radius_m: float = DEFAULT_WEAK_CANDIDATE_MERGE_RADIUS_M
     weak_candidate_vote_threshold: float = DEFAULT_WEAK_CANDIDATE_VOTE_THRESHOLD
+    weak_near_strong_suppression_radius_m: float = DEFAULT_WEAK_NEAR_STRONG_SUPPRESSION_RADIUS_M
     tiny_candidate_bbox_area_px: float = DEFAULT_TINY_CANDIDATE_BBOX_AREA_PX
     weak_tiny_candidate_max_spread_m: float = DEFAULT_WEAK_TINY_CANDIDATE_MAX_SPREAD_M
     single_view_fallback_confidence: float = DEFAULT_SINGLE_VIEW_FALLBACK_CONFIDENCE
     single_view_fallback_min_distance_m: float = DEFAULT_SINGLE_VIEW_FALLBACK_MIN_DISTANCE_M
+    single_view_fallback_requires_new_class: bool = DEFAULT_SINGLE_VIEW_FALLBACK_REQUIRES_NEW_CLASS
     min_candidate_support_views: int = DEFAULT_MIN_CANDIDATE_SUPPORT_VIEWS
     duplicate_large_same_class_merge_radius_m: float = DEFAULT_LARGE_SAME_CLASS_MERGE_RADIUS_M
     duplicate_large_same_class_bbox_area_px: float = DEFAULT_LARGE_SAME_CLASS_BBOX_AREA_PX
@@ -192,6 +232,11 @@ class SurveyFusionPolicy:
     weak_multiview_fallback_elongated_max_bbox_area_px: float = (
         DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX
     )
+    image_width: int = DEFAULT_IMAGE_WIDTH
+    image_height: int = DEFAULT_IMAGE_HEIGHT
+    bbox_clip_margin_px: float = DEFAULT_BBOX_CLIP_MARGIN_PX
+    min_unclipped_candidate_vote: float = DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE
+    candidate_workspace_margin_m: float = DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M
 
     def validate(self) -> None:
         if self.cluster_radius_m <= 0:
@@ -206,6 +251,8 @@ class SurveyFusionPolicy:
             raise ValueError("weak_candidate_merge_radius_m must be positive")
         if self.weak_candidate_vote_threshold < 0:
             raise ValueError("weak_candidate_vote_threshold must be non-negative")
+        if self.weak_near_strong_suppression_radius_m < 0:
+            raise ValueError("weak_near_strong_suppression_radius_m must be non-negative")
         if self.tiny_candidate_bbox_area_px < 0:
             raise ValueError("tiny_candidate_bbox_area_px must be non-negative")
         if self.weak_tiny_candidate_max_spread_m < 0:
@@ -234,6 +281,14 @@ class SurveyFusionPolicy:
             raise ValueError("weak_multiview_fallback_elongated_aspect_ratio must be at least 1")
         if self.weak_multiview_fallback_elongated_max_bbox_area_px < 0:
             raise ValueError("weak_multiview_fallback_elongated_max_bbox_area_px must be non-negative")
+        if self.image_width <= 0 or self.image_height <= 0:
+            raise ValueError("image dimensions must be positive")
+        if self.bbox_clip_margin_px < 0:
+            raise ValueError("bbox_clip_margin_px must be non-negative")
+        if self.min_unclipped_candidate_vote < 0:
+            raise ValueError("min_unclipped_candidate_vote must be non-negative")
+        if self.candidate_workspace_margin_m < 0:
+            raise ValueError("candidate_workspace_margin_m must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -257,10 +312,12 @@ class SurveyConfig:
     cluster_split_min_vote: float = DEFAULT_CLUSTER_SPLIT_MIN_VOTE
     weak_candidate_merge_radius_m: float = DEFAULT_WEAK_CANDIDATE_MERGE_RADIUS_M
     weak_candidate_vote_threshold: float = DEFAULT_WEAK_CANDIDATE_VOTE_THRESHOLD
+    weak_near_strong_suppression_radius_m: float = DEFAULT_WEAK_NEAR_STRONG_SUPPRESSION_RADIUS_M
     tiny_candidate_bbox_area_px: float = DEFAULT_TINY_CANDIDATE_BBOX_AREA_PX
     weak_tiny_candidate_max_spread_m: float = DEFAULT_WEAK_TINY_CANDIDATE_MAX_SPREAD_M
     single_view_fallback_confidence: float = DEFAULT_SINGLE_VIEW_FALLBACK_CONFIDENCE
     single_view_fallback_min_distance_m: float = DEFAULT_SINGLE_VIEW_FALLBACK_MIN_DISTANCE_M
+    single_view_fallback_requires_new_class: bool = DEFAULT_SINGLE_VIEW_FALLBACK_REQUIRES_NEW_CLASS
     min_candidate_support_views: int = DEFAULT_MIN_CANDIDATE_SUPPORT_VIEWS
     large_same_class_merge_radius_m: float = DEFAULT_LARGE_SAME_CLASS_MERGE_RADIUS_M
     large_same_class_bbox_area_px: float = DEFAULT_LARGE_SAME_CLASS_BBOX_AREA_PX
@@ -273,6 +330,9 @@ class SurveyConfig:
     weak_multiview_fallback_elongated_max_bbox_area_px: float = (
         DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX
     )
+    bbox_clip_margin_px: float = DEFAULT_BBOX_CLIP_MARGIN_PX
+    min_unclipped_candidate_vote: float = DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE
+    candidate_workspace_margin_m: float = DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M
     yolo_confidence: float = 0.15
     yolo_iou: float | None = None
     yolo_image_size: int | None = None
@@ -291,6 +351,16 @@ class SurveyConfig:
     ik_position_tolerance_m: float = 0.05
     ik_orientation_tolerance_rad: float = 0.35
     ik_damping: float = 1e-3
+    survey_reachable_pose_search: bool = True
+    survey_reachable_pose_samples: int = DEFAULT_SURVEY_REACHABLE_POSE_SAMPLES
+    survey_opening_reachable_pose_samples: int = DEFAULT_SURVEY_OPENING_REACHABLE_POSE_SAMPLES
+    survey_reachable_min_camera_z_m: float = DEFAULT_SURVEY_REACHABLE_MIN_CAMERA_Z_M
+    survey_pose_selection_policy: str = DEFAULT_SURVEY_POSE_SELECTION_POLICY
+    survey_camera_z_mode: str = DEFAULT_SURVEY_CAMERA_Z_MODE
+    survey_above_opening_margin_m: float = DEFAULT_SURVEY_ABOVE_OPENING_MARGIN_M
+    survey_opening_visibility_min_fraction: float = DEFAULT_SURVEY_OPENING_VISIBILITY_MIN_FRACTION
+    survey_opening_visibility_grid_size: int = DEFAULT_SURVEY_OPENING_VISIBILITY_GRID_SIZE
+    survey_opening_grid_size: int = DEFAULT_SURVEY_OPENING_GRID_SIZE
 
     def fusion_policy(self) -> SurveyFusionPolicy:
         return SurveyFusionPolicy(
@@ -300,10 +370,12 @@ class SurveyConfig:
             cluster_split_min_vote=self.cluster_split_min_vote,
             weak_candidate_merge_radius_m=self.weak_candidate_merge_radius_m,
             weak_candidate_vote_threshold=self.weak_candidate_vote_threshold,
+            weak_near_strong_suppression_radius_m=self.weak_near_strong_suppression_radius_m,
             tiny_candidate_bbox_area_px=self.tiny_candidate_bbox_area_px,
             weak_tiny_candidate_max_spread_m=self.weak_tiny_candidate_max_spread_m,
             single_view_fallback_confidence=self.single_view_fallback_confidence,
             single_view_fallback_min_distance_m=self.single_view_fallback_min_distance_m,
+            single_view_fallback_requires_new_class=self.single_view_fallback_requires_new_class,
             min_candidate_support_views=self.min_candidate_support_views,
             duplicate_large_same_class_merge_radius_m=self.large_same_class_merge_radius_m,
             duplicate_large_same_class_bbox_area_px=self.large_same_class_bbox_area_px,
@@ -316,6 +388,11 @@ class SurveyConfig:
             weak_multiview_fallback_elongated_max_bbox_area_px=(
                 self.weak_multiview_fallback_elongated_max_bbox_area_px
             ),
+            image_width=self.image_width,
+            image_height=self.image_height,
+            bbox_clip_margin_px=self.bbox_clip_margin_px,
+            min_unclipped_candidate_vote=self.min_unclipped_candidate_vote,
+            candidate_workspace_margin_m=self.candidate_workspace_margin_m,
         )
 
 
@@ -328,17 +405,27 @@ class SurveyView:
     desired_camera_position_world: tuple[float, float, float]
     look_at_world: tuple[float, float, float]
     T_world_camera: tuple[tuple[float, float, float, float], ...]
+    scan_layer: str = "below_opening"
+    scan_grid_size: int = DEFAULT_GRID_SIZE
+    fixed_pose_source: str | None = None
+    fixed_qpos: tuple[float, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "view_id": self.view_id,
             "grid_row": self.grid_row,
             "grid_col": self.grid_col,
+            "scan_layer": self.scan_layer,
+            "scan_grid_size": self.scan_grid_size,
+            "fixed_pose_source": self.fixed_pose_source,
             "camera_name": self.camera_name,
             "desired_camera_position_world": list(self.desired_camera_position_world),
             "look_at_world": list(self.look_at_world),
             "T_world_camera": [list(row) for row in self.T_world_camera],
         }
+        if self.fixed_qpos is not None:
+            payload["fixed_qpos"] = list(self.fixed_qpos)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -454,19 +541,95 @@ def build_grid_survey_plan(
 ) -> tuple[SurveyWorkspace, tuple[SurveyView, ...]]:
     if config.grid_size <= 0:
         raise ValueError("grid_size must be positive")
+    if config.survey_opening_grid_size <= 0:
+        raise ValueError("survey_opening_grid_size must be positive")
     if config.image_width <= 0 or config.image_height <= 0:
         raise ValueError("image dimensions must be positive")
 
     scene = _survey_scene_input(scene_or_layout, config=config)
     workspace = scene.workspace
+    views: list[SurveyView] = []
+    if config.survey_camera_z_mode == "fixed_mixed_4x4":
+        return workspace, _fixed_mixed_4x4_survey_views(config)
+
+    if config.survey_camera_z_mode == "opening_zone_then_below_opening":
+        _append_grid_survey_views(
+            views,
+            workspace=workspace,
+            config=config,
+            grid_size=config.survey_opening_grid_size,
+            scan_layer="opening_zone",
+            view_id_prefix="survey_opening",
+            camera_z_m=workspace.tank_opening_z_m + config.survey_above_opening_margin_m,
+        )
+        _append_grid_survey_views(
+            views,
+            workspace=workspace,
+            config=config,
+            grid_size=config.grid_size,
+            scan_layer="below_opening",
+            view_id_prefix="survey_inside",
+            camera_z_m=config.camera_z_m,
+        )
+        return workspace, tuple(views)
+
+    _append_grid_survey_views(
+        views,
+        workspace=workspace,
+        config=config,
+        grid_size=config.grid_size,
+        scan_layer=config.survey_camera_z_mode,
+        view_id_prefix="survey",
+        camera_z_m=(
+            workspace.tank_opening_z_m + config.survey_above_opening_margin_m
+            if config.survey_camera_z_mode == "opening_zone"
+            else config.camera_z_m
+        ),
+    )
+    return workspace, tuple(views)
+
+
+def _fixed_mixed_4x4_survey_views(config: SurveyConfig) -> tuple[SurveyView, ...]:
+    if config.grid_size != 4:
+        raise ValueError("fixed_mixed_4x4 survey requires grid_size=4")
+    views: list[SurveyView] = []
+    for (row, col), scan_layer, qpos, camera_position, ground_hit in FIXED_MIXED_4X4_SURVEY_POSES:
+        view_index = row * 4 + col
+        views.append(
+            SurveyView(
+                view_id=f"survey_{view_index:04d}",
+                grid_row=row,
+                grid_col=col,
+                camera_name=config.camera_name,
+                desired_camera_position_world=_round_vector(camera_position),
+                look_at_world=_round_vector(ground_hit),
+                T_world_camera=_make_look_at_transform(camera_position, ground_hit),
+                scan_layer=scan_layer,
+                scan_grid_size=4,
+                fixed_pose_source=FIXED_MIXED_4X4_POSE_SOURCE,
+                fixed_qpos=tuple(float(value) for value in qpos),
+            )
+        )
+    return tuple(sorted(views, key=lambda view: (view.grid_row, view.grid_col)))
+
+
+def _append_grid_survey_views(
+    views: list[SurveyView],
+    *,
+    workspace: SurveyWorkspace,
+    config: SurveyConfig,
+    grid_size: int,
+    scan_layer: str,
+    view_id_prefix: str,
+    camera_z_m: float,
+) -> None:
     center_x = (workspace.x_min + workspace.x_max) / 2.0
     center_y = (workspace.y_min + workspace.y_max) / 2.0
-    step_x = (workspace.x_max - workspace.x_min) / config.grid_size
-    step_y = (workspace.y_max - workspace.y_min) / config.grid_size
+    step_x = (workspace.x_max - workspace.x_min) / grid_size
+    step_y = (workspace.y_max - workspace.y_min) / grid_size
 
-    views: list[SurveyView] = []
-    for row in range(config.grid_size):
-        for col in range(config.grid_size):
+    for row in range(grid_size):
+        for col in range(grid_size):
             target_x = workspace.x_min + (col + 0.5) * step_x
             target_y = workspace.y_max - (row + 0.5) * step_y
             offset_x, offset_y = _oblique_offset(
@@ -479,23 +642,25 @@ def build_grid_survey_plan(
             camera_position = (
                 _clamp(target_x + offset_x, workspace.x_min, workspace.x_max),
                 _clamp(target_y + offset_y, workspace.y_min, workspace.y_max),
-                config.camera_z_m,
+                camera_z_m,
             )
-            workspace.validate_camera_position(camera_position)
+            if scan_layer == "below_opening":
+                workspace.validate_camera_position(camera_position)
             look_at = (target_x, target_y, workspace.bottom_z_m)
-            view_index = row * config.grid_size + col
+            view_index = row * grid_size + col
             views.append(
                 SurveyView(
-                    view_id=f"survey_{view_index:04d}",
+                    view_id=f"{view_id_prefix}_{view_index:04d}",
                     grid_row=row,
                     grid_col=col,
                     camera_name=config.camera_name,
                     desired_camera_position_world=_round_vector(camera_position),
                     look_at_world=_round_vector(look_at),
                     T_world_camera=_make_look_at_transform(camera_position, look_at),
+                    scan_layer=scan_layer,
+                    scan_grid_size=grid_size,
                 )
             )
-    return workspace, tuple(views)
 
 
 def run_task1_survey(
@@ -582,7 +747,9 @@ def run_task1_survey(
         _write_layout_snapshot(layout_snapshot_path, layout)
         backend.load()
         backend.apply_scene_objects()
-        for view in views:
+        capture_views = backend.survey_capture_order(views)
+        plan_payload["views"] = [view.to_dict() for view in capture_views]
+        for view in capture_views:
             view_result, view_observations = backend.capture_view(
                 view,
                 images_dir=images_dir,
@@ -591,6 +758,7 @@ def run_task1_survey(
                 annotated_dir=annotated_dir,
                 tiles_dir=tiles_dir,
             )
+            view_result["capture_order_index"] = len(view_results)
             view_results.append(view_result)
             observations.extend(view_observations)
     except Exception as exc:
@@ -620,6 +788,7 @@ def run_task1_survey(
     candidates = fuse_survey_observations(
         observations,
         policy=fusion_policy,
+        candidate_workspace=scene.workspace,
     )
     success_count = sum(1 for view in view_results if view.get("status") == "success")
     if success_count == len(view_results):
@@ -658,10 +827,12 @@ def fuse_survey_observations(
     cluster_split_min_vote: float = DEFAULT_CLUSTER_SPLIT_MIN_VOTE,
     weak_candidate_merge_radius_m: float = DEFAULT_WEAK_CANDIDATE_MERGE_RADIUS_M,
     weak_candidate_vote_threshold: float = DEFAULT_WEAK_CANDIDATE_VOTE_THRESHOLD,
+    weak_near_strong_suppression_radius_m: float = DEFAULT_WEAK_NEAR_STRONG_SUPPRESSION_RADIUS_M,
     tiny_candidate_bbox_area_px: float = DEFAULT_TINY_CANDIDATE_BBOX_AREA_PX,
     weak_tiny_candidate_max_spread_m: float = DEFAULT_WEAK_TINY_CANDIDATE_MAX_SPREAD_M,
     single_view_fallback_confidence: float = DEFAULT_SINGLE_VIEW_FALLBACK_CONFIDENCE,
     single_view_fallback_min_distance_m: float = DEFAULT_SINGLE_VIEW_FALLBACK_MIN_DISTANCE_M,
+    single_view_fallback_requires_new_class: bool = DEFAULT_SINGLE_VIEW_FALLBACK_REQUIRES_NEW_CLASS,
     min_candidate_support_views: int = DEFAULT_MIN_CANDIDATE_SUPPORT_VIEWS,
     large_same_class_merge_radius_m: float = DEFAULT_LARGE_SAME_CLASS_MERGE_RADIUS_M,
     large_same_class_bbox_area_px: float = DEFAULT_LARGE_SAME_CLASS_BBOX_AREA_PX,
@@ -674,6 +845,12 @@ def fuse_survey_observations(
     weak_multiview_fallback_elongated_max_bbox_area_px: float = (
         DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX
     ),
+    image_width: int = DEFAULT_IMAGE_WIDTH,
+    image_height: int = DEFAULT_IMAGE_HEIGHT,
+    bbox_clip_margin_px: float = DEFAULT_BBOX_CLIP_MARGIN_PX,
+    min_unclipped_candidate_vote: float = DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE,
+    candidate_workspace: SurveyWorkspace | None = None,
+    candidate_workspace_margin_m: float = DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M,
     policy: SurveyFusionPolicy | None = None,
 ) -> list[dict[str, Any]]:
     if policy is None:
@@ -684,10 +861,12 @@ def fuse_survey_observations(
             cluster_split_min_vote=cluster_split_min_vote,
             weak_candidate_merge_radius_m=weak_candidate_merge_radius_m,
             weak_candidate_vote_threshold=weak_candidate_vote_threshold,
+            weak_near_strong_suppression_radius_m=weak_near_strong_suppression_radius_m,
             tiny_candidate_bbox_area_px=tiny_candidate_bbox_area_px,
             weak_tiny_candidate_max_spread_m=weak_tiny_candidate_max_spread_m,
             single_view_fallback_confidence=single_view_fallback_confidence,
             single_view_fallback_min_distance_m=single_view_fallback_min_distance_m,
+            single_view_fallback_requires_new_class=single_view_fallback_requires_new_class,
             min_candidate_support_views=min_candidate_support_views,
             duplicate_large_same_class_merge_radius_m=large_same_class_merge_radius_m,
             duplicate_large_same_class_bbox_area_px=large_same_class_bbox_area_px,
@@ -700,6 +879,11 @@ def fuse_survey_observations(
             weak_multiview_fallback_elongated_max_bbox_area_px=(
                 weak_multiview_fallback_elongated_max_bbox_area_px
             ),
+            image_width=image_width,
+            image_height=image_height,
+            bbox_clip_margin_px=bbox_clip_margin_px,
+            min_unclipped_candidate_vote=min_unclipped_candidate_vote,
+            candidate_workspace_margin_m=candidate_workspace_margin_m,
         )
     policy.validate()
 
@@ -769,7 +953,6 @@ def fuse_survey_observations(
         large_bbox_area_px=policy.duplicate_large_same_class_bbox_area_px,
     )
 
-    candidates: list[dict[str, Any]] = []
     kept_clusters: list[list[SurveyObservation]] = []
     rejected_clusters: list[list[SurveyObservation]] = []
     for cluster in clusters:
@@ -779,11 +962,27 @@ def fuse_survey_observations(
             weak_vote_threshold=policy.weak_candidate_vote_threshold,
             tiny_bbox_area_px=policy.tiny_candidate_bbox_area_px,
             weak_tiny_max_spread_m=policy.weak_tiny_candidate_max_spread_m,
+            image_width=policy.image_width,
+            image_height=policy.image_height,
+            bbox_clip_margin_px=policy.bbox_clip_margin_px,
+            min_unclipped_vote=policy.min_unclipped_candidate_vote,
+            candidate_workspace=candidate_workspace,
+            candidate_workspace_margin_m=policy.candidate_workspace_margin_m,
         ):
             rejected_clusters.append(cluster)
             continue
         kept_clusters.append(cluster)
-        candidates.append(_candidate_payload(len(candidates), cluster, single_view_fallback=False))
+
+    kept_clusters, _weak_neighbor_suppressed_clusters = _suppress_weak_neighbor_candidate_clusters(
+        kept_clusters,
+        weak_vote_threshold=policy.weak_candidate_vote_threshold,
+        suppression_radius_m=policy.weak_near_strong_suppression_radius_m,
+    )
+
+    candidates = [
+        _candidate_payload(index, cluster, single_view_fallback=False)
+        for index, cluster in enumerate(kept_clusters)
+    ]
 
     weak_multiview_fallbacks = _select_weak_multiview_fallback_clusters(
         rejected_clusters,
@@ -794,6 +993,12 @@ def fuse_survey_observations(
         max_bbox_area_px=policy.weak_multiview_fallback_max_bbox_area_px,
         elongated_aspect_ratio=policy.weak_multiview_fallback_elongated_aspect_ratio,
         elongated_max_bbox_area_px=policy.weak_multiview_fallback_elongated_max_bbox_area_px,
+        image_width=policy.image_width,
+        image_height=policy.image_height,
+        bbox_clip_margin_px=policy.bbox_clip_margin_px,
+        min_unclipped_vote=policy.min_unclipped_candidate_vote,
+        candidate_workspace=candidate_workspace,
+        candidate_workspace_margin_m=policy.candidate_workspace_margin_m,
     )
     weak_multiview_ids = {id(cluster) for cluster in weak_multiview_fallbacks}
     for cluster in weak_multiview_fallbacks:
@@ -815,6 +1020,12 @@ def fuse_survey_observations(
             accepted_clusters=kept_clusters,
             confidence_threshold=policy.single_view_fallback_confidence,
             min_distance_m=policy.single_view_fallback_min_distance_m,
+            requires_new_class=policy.single_view_fallback_requires_new_class,
+            image_width=policy.image_width,
+            image_height=policy.image_height,
+            bbox_clip_margin_px=policy.bbox_clip_margin_px,
+            candidate_workspace=candidate_workspace,
+            candidate_workspace_margin_m=policy.candidate_workspace_margin_m,
         ):
             continue
         kept_clusters.append(cluster)
@@ -846,6 +1057,8 @@ class MujocoSurveyBackend:
         self.renderer: Any | None = None
         self.camera_id: int | None = None
         self.resolved_camera_name: str | None = None
+        self._reachable_survey_pose_map: dict[tuple[str, int, int, int], dict[str, Any]] | None = None
+        self._reachable_survey_pose_built_specs: set[tuple[str, int, int]] = set()
 
     def load(self) -> None:
         try:
@@ -910,6 +1123,11 @@ class MujocoSurveyBackend:
         self.apply_scene_objects()
 
     def validate_view_pose(self, view: SurveyView) -> dict[str, Any]:
+        if view.fixed_qpos is not None:
+            return self._validate_fixed_survey_view_pose(view)
+        if self._use_reachable_survey_pose_search(view):
+            return self._validate_reachable_survey_view_pose(view)
+
         result = _planned_view_result(view)
         try:
             ik = self._solve_ik_for_view(view)
@@ -918,6 +1136,7 @@ class MujocoSurveyBackend:
             actual_position = self._camera_position()
             result["actual_camera_position_world"] = [_round(value) for value in actual_position]
             result["actual_T_world_camera"] = [list(row) for row in self._camera_transform()]
+            result["actual_qpos"] = [_round(float(value)) for value in self._data().qpos]
             result["camera_fovy_rad"] = _round(self._camera_fovy_rad())
             self.workspace.validate_camera_position(actual_position)
             collision = self._collision_report()
@@ -984,6 +1203,509 @@ class MujocoSurveyBackend:
             result["status"] = "failed"
             result["message"] = str(exc)
             return result, []
+
+    def _validate_fixed_survey_view_pose(self, view: SurveyView) -> dict[str, Any]:
+        result = _planned_view_result(view)
+        if view.fixed_qpos is None:
+            result["status"] = "failed"
+            result["message"] = "Fixed survey view is missing fixed_qpos."
+            return result
+
+        data = self._data()
+        mujoco = self._mujoco()
+        model = self._model()
+        qpos_count = min(len(view.fixed_qpos), int(model.nq))
+        try:
+            data.qpos[:qpos_count] = view.fixed_qpos[:qpos_count]
+            mujoco.mj_forward(model, data)
+            actual_position = self._camera_position()
+            camera_z_mode = self._survey_pose_search_mode(view)
+            self._validate_survey_camera_position(actual_position, mode=camera_z_mode)
+
+            ground_hit = self._camera_bottom_hit()
+            optical_axis_cell = (
+                self._survey_cell_for_ground_hit(ground_hit, grid_size=view.scan_grid_size)
+                if ground_hit is not None
+                else None
+            )
+            cell_visibility = self._survey_cell_visibility(
+                (view.grid_row, view.grid_col),
+                grid_size=view.scan_grid_size,
+            )
+            collision = self._collision_report()
+
+            result["resolved_camera_name"] = self.resolved_camera_name
+            result["actual_camera_position_world"] = [_round(value) for value in actual_position]
+            result["actual_T_world_camera"] = [list(row) for row in self._camera_transform()]
+            result["actual_qpos"] = [_round(float(value)) for value in data.qpos]
+            result["camera_fovy_rad"] = _round(self._camera_fovy_rad())
+            result["optical_axis_ground_hit_world"] = (
+                [_round(value) for value in ground_hit] if ground_hit is not None else None
+            )
+            result["pose_search"] = {
+                "strategy": "fixed_qpos_table",
+                "source": view.fixed_pose_source,
+                "cell": [view.grid_row, view.grid_col],
+                "camera_z_mode": camera_z_mode,
+                "optical_axis_cell": list(optical_axis_cell) if optical_axis_cell is not None else None,
+                "cell_visibility": cell_visibility,
+                "found": True,
+            }
+            result["ik"] = {
+                "success": True,
+                "source": "offline_fixed_qpos",
+            }
+            result["collision"] = collision
+            if not collision["collision_free"]:
+                result["status"] = "failed"
+                result["message"] = "Fixed survey pose was rejected by robot collision check."
+                return result
+            if cell_visibility["visible_fraction"] < self.config.survey_opening_visibility_min_fraction:
+                result["status"] = "failed"
+                result["message"] = "Fixed survey pose does not meet the configured cell visibility threshold."
+                return result
+            result["status"] = "success"
+            result["message"] = "Validated fixed collision-free survey pose for this grid cell."
+            return result
+        except Exception as exc:
+            result["status"] = "failed"
+            result["message"] = str(exc)
+            return result
+
+    def _use_reachable_survey_pose_search(self, view: SurveyView) -> bool:
+        return (
+            self.config.survey_reachable_pose_search
+            and view.view_id.startswith("survey_")
+            and view.grid_row >= 0
+            and view.grid_col >= 0
+        )
+
+    def _validate_reachable_survey_view_pose(self, view: SurveyView) -> dict[str, Any]:
+        result = _planned_view_result(view)
+        pose = self._reachable_survey_pose_map_for_view(view).get(self._survey_pose_key(view))
+        if pose is None:
+            result["status"] = "failed"
+            result["message"] = (
+                "No collision-free reachable survey pose was found for this grid cell; "
+                "survey capture is not rendered for this view."
+            )
+            result["pose_search"] = {
+                "strategy": "reachable_joint_halton",
+                "samples": self._reachable_survey_pose_samples_for_mode(self._survey_pose_search_mode(view)),
+                "found": False,
+            }
+            return result
+
+        data = self._data()
+        mujoco = self._mujoco()
+        data.qpos[:] = pose["qpos"]
+        mujoco.mj_forward(self._model(), data)
+        selected_position = self._camera_position()
+        selected_transform = self._camera_transform()
+        selected_view = SurveyView(
+            view_id=view.view_id,
+            grid_row=view.grid_row,
+            grid_col=view.grid_col,
+            camera_name=view.camera_name,
+            desired_camera_position_world=selected_position,
+            look_at_world=pose["ground_hit_world"],
+            T_world_camera=selected_transform,
+            scan_layer=view.scan_layer,
+            scan_grid_size=view.scan_grid_size,
+        )
+        ik = self._solve_ik_for_view(selected_view)
+        ik["source"] = "selected_reachable_pose"
+        actual_position = self._camera_position()
+        result["resolved_camera_name"] = self.resolved_camera_name
+        result["actual_camera_position_world"] = [_round(value) for value in actual_position]
+        result["actual_T_world_camera"] = [list(row) for row in self._camera_transform()]
+        result["actual_qpos"] = [_round(float(value)) for value in data.qpos]
+        result["camera_fovy_rad"] = _round(self._camera_fovy_rad())
+        result["optical_axis_ground_hit_world"] = [_round(value) for value in pose["ground_hit_world"]]
+        result["pose_search"] = {
+            "strategy": "reachable_joint_halton",
+            "samples": pose["sample_count"],
+            "sample_index": pose["sample_index"],
+            "cell": [view.grid_row, view.grid_col],
+            "cell_center_error_m": _round(pose["cell_center_error_m"]),
+            "camera_height_m": _round(pose["camera_height_m"]),
+            "selection_policy": self.config.survey_pose_selection_policy,
+            "camera_z_mode": pose["camera_z_mode"],
+            "opening_visibility": pose.get("opening_visibility"),
+            "found": True,
+        }
+        result["ik"] = ik
+        self._validate_survey_camera_position(actual_position, mode=str(pose["camera_z_mode"]))
+        collision = self._collision_report()
+        result["collision"] = collision
+        if not ik["success"]:
+            result["status"] = "failed"
+            result["message"] = "IK did not validate the selected reachable survey pose."
+            return result
+        if not collision["collision_free"]:
+            result["status"] = "failed"
+            result["message"] = "Reachable survey pose was rejected by robot collision check."
+            return result
+        result["status"] = "success"
+        result["message"] = "Validated a collision-free reachable survey pose for this grid cell."
+        return result
+
+    def survey_capture_order(self, views: tuple[SurveyView, ...]) -> tuple[SurveyView, ...]:
+        if self.config.survey_camera_z_mode != "opening_zone_then_below_opening":
+            return views
+        opening_views: list[SurveyView] = []
+        inside_views: list[SurveyView] = []
+        for view in views:
+            if self._survey_pose_search_mode(view) == "opening_zone":
+                pose_map = self._reachable_survey_pose_map_for_view(view)
+                if self._survey_pose_key(view) in pose_map:
+                    opening_views.append(view)
+            else:
+                inside_views.append(view)
+
+        return tuple(
+            sorted(opening_views, key=lambda view: (view.grid_row, view.grid_col))
+            + sorted(inside_views, key=lambda view: (view.grid_row, view.grid_col))
+        )
+
+    def _reachable_survey_pose_map_for_view(self, view: SurveyView) -> dict[tuple[str, int, int, int], dict[str, Any]]:
+        if self._reachable_survey_pose_map is None:
+            self._reachable_survey_pose_map = {}
+        mode = self._survey_pose_search_mode(view)
+        sample_count = self._reachable_survey_pose_samples_for_mode(mode)
+        spec = (mode, view.scan_grid_size, sample_count)
+        if spec not in self._reachable_survey_pose_built_specs:
+            built = self._build_reachable_survey_pose_maps(
+                (mode,),
+                grid_size=view.scan_grid_size,
+                sample_count=sample_count,
+            )[mode]
+            for (row, col), pose in built.items():
+                self._reachable_survey_pose_map[(mode, view.scan_grid_size, row, col)] = pose
+            self._reachable_survey_pose_built_specs.add(spec)
+        return self._reachable_survey_pose_map
+
+    def _survey_pose_key(self, view: SurveyView) -> tuple[str, int, int, int]:
+        return (self._survey_pose_search_mode(view), view.scan_grid_size, view.grid_row, view.grid_col)
+
+    def _survey_pose_search_mode(self, view: SurveyView) -> str:
+        if view.scan_layer in ("opening_zone", "below_opening"):
+            return view.scan_layer
+        if self.config.survey_camera_z_mode == "opening_zone_then_below_opening":
+            return "below_opening"
+        return self.config.survey_camera_z_mode
+
+    def _reachable_survey_pose_samples_for_mode(self, mode: str) -> int:
+        if mode == "opening_zone":
+            return int(self.config.survey_opening_reachable_pose_samples)
+        return int(self.config.survey_reachable_pose_samples)
+
+    def _build_reachable_survey_pose_maps(
+        self,
+        modes: tuple[str, ...],
+        *,
+        grid_size: int,
+        sample_count: int,
+    ) -> dict[str, dict[tuple[int, int], dict[str, Any]]]:
+        if sample_count <= 0:
+            return {mode: {} for mode in modes}
+
+        np = _import_numpy()
+        mujoco = self._mujoco()
+        model = self._model()
+        data = self._data()
+        original_qpos = np.array(data.qpos, dtype=float).copy()
+        joint_specs = self._robot_joint_sample_specs()
+        best_by_mode: dict[str, dict[tuple[int, int], dict[str, Any]]] = {mode: {} for mode in modes}
+
+        try:
+            for sample_index in range(1, sample_count + 1):
+                qpos = original_qpos.copy()
+                for dimension, (qpos_address, lower, upper) in enumerate(joint_specs):
+                    unit_value = _halton(sample_index, HALTON_BASES[dimension % len(HALTON_BASES)])
+                    qpos[qpos_address] = lower + (upper - lower) * unit_value
+
+                data.qpos[:] = qpos
+                mujoco.mj_forward(model, data)
+                camera_position = self._camera_position()
+                if camera_position[2] < self.workspace.bottom_z_m + self.config.survey_reachable_min_camera_z_m:
+                    continue
+
+                collision = self._collision_report()
+                if not collision["collision_free"]:
+                    continue
+
+                ground_hit = self._camera_bottom_hit()
+                if ground_hit is None:
+                    continue
+                cell = self._survey_cell_for_ground_hit(ground_hit, grid_size=grid_size)
+                if cell is None:
+                    continue
+
+                cell_center = self._survey_cell_center(*cell, grid_size=grid_size)
+                cell_center_error = _xy_distance(ground_hit, cell_center)
+                camera_height = float(camera_position[2])
+                for mode in modes:
+                    try:
+                        self._validate_survey_camera_position(camera_position, mode=mode)
+                    except ValueError:
+                        continue
+
+                    opening_visibility = None
+                    if mode == "opening_zone":
+                        opening_visibility = self._survey_cell_visibility(cell, grid_size=grid_size)
+                        if opening_visibility["visible_fraction"] < self.config.survey_opening_visibility_min_fraction:
+                            continue
+
+                    previous = best_by_mode[mode].get(cell)
+                    if previous is None or self._survey_pose_candidate_is_better(
+                        camera_height_m=camera_height,
+                        cell_center_error_m=cell_center_error,
+                        opening_visible_fraction=(
+                            float(opening_visibility["visible_fraction"]) if opening_visibility is not None else None
+                        ),
+                        previous=previous,
+                        mode=mode,
+                    ):
+                        best_by_mode[mode][cell] = {
+                            "qpos": np.array(qpos, dtype=float).copy(),
+                            "sample_count": sample_count,
+                            "sample_index": sample_index,
+                            "camera_position_world": tuple(float(value) for value in camera_position),
+                            "ground_hit_world": tuple(float(value) for value in ground_hit),
+                            "camera_height_m": camera_height,
+                            "cell_center_error_m": float(cell_center_error),
+                            "camera_z_mode": mode,
+                            "opening_visibility": opening_visibility,
+                        }
+        finally:
+            data.qpos[:] = original_qpos
+            mujoco.mj_forward(model, data)
+
+        return best_by_mode
+
+    def _survey_pose_candidate_is_better(
+        self,
+        *,
+        camera_height_m: float,
+        cell_center_error_m: float,
+        opening_visible_fraction: float | None,
+        previous: dict[str, Any],
+        mode: str,
+    ) -> bool:
+        if mode == "opening_zone":
+            previous_visibility = previous.get("opening_visibility") or {}
+            previous_fraction = float(previous_visibility.get("visible_fraction", 0.0))
+            return (
+                -(opening_visible_fraction or 0.0),
+                -camera_height_m,
+                cell_center_error_m,
+            ) < (
+                -previous_fraction,
+                -float(previous["camera_height_m"]),
+                float(previous["cell_center_error_m"]),
+            )
+
+        policy = self.config.survey_pose_selection_policy
+        previous_height = float(previous["camera_height_m"])
+        previous_error = float(previous["cell_center_error_m"])
+        if policy == "cell_center_then_higher_camera_z":
+            return (cell_center_error_m, -camera_height_m) < (previous_error, -previous_height)
+        if policy == "higher_camera_z_then_cell_center":
+            return (-camera_height_m, cell_center_error_m) < (-previous_height, previous_error)
+        raise ValueError(f"unsupported survey_pose_selection_policy: {policy}")
+
+    def _validate_survey_camera_position(self, position: tuple[float, float, float], *, mode: str | None = None) -> None:
+        camera_z_mode = mode or self.config.survey_camera_z_mode
+        if camera_z_mode == "below_opening":
+            self.workspace.validate_camera_position(position)
+            return
+
+        if camera_z_mode != "opening_zone":
+            raise ValueError(f"unsupported survey_camera_z_mode: {camera_z_mode}")
+        if self.config.survey_above_opening_margin_m < 0.0:
+            raise ValueError("survey_above_opening_margin_m must be non-negative")
+
+        x, y, z = position
+        if not (self.workspace.x_min <= x <= self.workspace.x_max and self.workspace.y_min <= y <= self.workspace.y_max):
+            raise ValueError(f"survey camera xy must stay over the tank workspace, got {position}")
+        if z <= self.workspace.bottom_z_m:
+            raise ValueError(f"survey wrist camera z must be above the tank bottom/object base plane, got {position}")
+        min_z = self.workspace.tank_opening_z_m - self.workspace.opening_clearance_m
+        if z < min_z:
+            raise ValueError(
+                "survey opening-zone wrist camera z must stay near or above the tank opening: "
+                f"camera_z={z:.4f}, min_camera_z={min_z:.4f}"
+            )
+        max_z = self.workspace.tank_opening_z_m + self.config.survey_above_opening_margin_m
+        if z > max_z:
+            raise ValueError(
+                "survey opening-zone wrist camera z must stay near the tank opening: "
+                f"camera_z={z:.4f}, max_camera_z={max_z:.4f}"
+            )
+
+    def _survey_cell_visibility(self, cell: tuple[int, int], *, grid_size: int) -> dict[str, Any]:
+        if self.config.survey_opening_visibility_grid_size <= 0:
+            raise ValueError("survey_opening_visibility_grid_size must be positive")
+
+        samples = self._survey_cell_sample_points(
+            *cell,
+            scan_grid_size=grid_size,
+            sample_grid_size=self.config.survey_opening_visibility_grid_size,
+        )
+        visible = 0
+        blocked: dict[str, int] = {}
+        for point in samples:
+            visible_sample, blocker = self._bottom_point_visible_from_camera(point)
+            if visible_sample:
+                visible += 1
+            elif blocker:
+                blocked[blocker] = blocked.get(blocker, 0) + 1
+        total = len(samples)
+        return {
+            "visible_fraction": visible / total if total else 0.0,
+            "visible_samples": visible,
+            "total_samples": total,
+            "blocked_by": {key: value for key, value in sorted(blocked.items())},
+        }
+
+    def _opening_zone_visibility(self, cell: tuple[int, int], *, grid_size: int) -> dict[str, Any]:
+        return self._survey_cell_visibility(cell, grid_size=grid_size)
+
+    def _survey_cell_sample_points(
+        self,
+        row: int,
+        col: int,
+        *,
+        scan_grid_size: int,
+        sample_grid_size: int,
+    ) -> tuple[tuple[float, float, float], ...]:
+        step_x = (self.workspace.x_max - self.workspace.x_min) / scan_grid_size
+        step_y = (self.workspace.y_max - self.workspace.y_min) / scan_grid_size
+        left = self.workspace.x_min + col * step_x
+        right = left + step_x
+        top = self.workspace.y_max - row * step_y
+        bottom = top - step_y
+        points: list[tuple[float, float, float]] = []
+        for sample_row in range(sample_grid_size):
+            y_alpha = (sample_row + 0.5) / sample_grid_size
+            y = top + (bottom - top) * y_alpha
+            for sample_col in range(sample_grid_size):
+                x_alpha = (sample_col + 0.5) / sample_grid_size
+                x = left + (right - left) * x_alpha
+                points.append((float(x), float(y), float(self.workspace.bottom_z_m)))
+        return tuple(points)
+
+    def _bottom_point_visible_from_camera(self, point: tuple[float, float, float]) -> tuple[bool, str | None]:
+        np = _import_numpy()
+        mujoco = self._mujoco()
+        model = self._model()
+        data = self._data()
+        camera_position = np.asarray(self._camera_position(), dtype=float)
+        target = np.asarray(point, dtype=float)
+        direction = target - camera_position
+        target_distance = float(np.linalg.norm(direction))
+        if target_distance <= 1e-9:
+            return (False, "zero_length_ray")
+        direction /= target_distance
+        ray_start = camera_position.copy()
+        traveled = 0.0
+        geom_id = np.asarray([-1], dtype=np.int32)
+        for _ in range(12):
+            distance = float(mujoco.mj_ray(model, data, ray_start, direction, None, True, -1, geom_id))
+            if distance < 0.0:
+                return (True, None)
+            total_distance = traveled + distance
+            hit_position = ray_start + distance * direction
+            if total_distance >= target_distance - 0.01:
+                return (True, None)
+
+            hit_geom_id = int(geom_id[0])
+            if hit_geom_id >= 0 and self._is_robot_body(self._geom_body_id(hit_geom_id)):
+                step = max(distance, 0.0) + 0.005
+                traveled += step
+                if traveled >= target_distance:
+                    return (True, None)
+                ray_start = camera_position + traveled * direction
+                geom_id[0] = -1
+                continue
+
+            if self._is_visible_interior_hit(hit_geom_id, tuple(float(value) for value in hit_position)):
+                return (True, None)
+            return (False, self._geom_name(hit_geom_id) if hit_geom_id >= 0 else "unknown")
+        return (False, "ray_robot_skip_limit")
+
+    def _is_visible_interior_hit(self, geom_id: int, hit_position: tuple[float, float, float]) -> bool:
+        if geom_id < 0:
+            return True
+        body_name = self._body_name(self._geom_body_id(geom_id))
+        if body_name.startswith("target_"):
+            return True
+        return hit_position[2] < self.workspace.tank_opening_z_m - 0.04
+
+    def _robot_joint_sample_specs(self) -> tuple[tuple[int, float, float], ...]:
+        mujoco = self._mujoco()
+        model = self._model()
+        specs: list[tuple[int, float, float]] = []
+        for joint_id in range(int(model.njnt)):
+            body_id = int(model.jnt_bodyid[joint_id])
+            if not self._is_robot_body(body_id):
+                continue
+            joint_type = int(model.jnt_type[joint_id])
+            if joint_type not in (int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)):
+                continue
+            qpos_address = int(model.jnt_qposadr[joint_id])
+            if int(model.jnt_limited[joint_id]):
+                lower = float(model.jnt_range[joint_id][0])
+                upper = float(model.jnt_range[joint_id][1])
+            elif joint_type == int(mujoco.mjtJoint.mjJNT_HINGE):
+                lower, upper = -math.pi, math.pi
+            else:
+                continue
+            if upper <= lower:
+                continue
+            specs.append((qpos_address, lower, upper))
+        if not specs:
+            raise RuntimeError("No Gen3 robot joints were found for reachable survey pose search.")
+        return tuple(specs)
+
+    def _camera_bottom_hit(self) -> tuple[float, float, float] | None:
+        np = _import_numpy()
+        transform = self._camera_transform()
+        rotation = np.asarray([row[:3] for row in transform[:3]], dtype=float)
+        position = np.asarray((transform[0][3], transform[1][3], transform[2][3]), dtype=float)
+        optical_axis = rotation @ np.asarray((0.0, 0.0, -1.0), dtype=float)
+        optical_axis /= np.linalg.norm(optical_axis)
+        if abs(float(optical_axis[2])) <= 1e-9:
+            return None
+        t = (float(self.workspace.bottom_z_m) - float(position[2])) / float(optical_axis[2])
+        if t <= 0.0:
+            return None
+        point = position + t * optical_axis
+        return (float(point[0]), float(point[1]), float(self.workspace.bottom_z_m))
+
+    def _survey_cell_for_ground_hit(self, ground_hit: tuple[float, float, float], *, grid_size: int) -> tuple[int, int] | None:
+        x, y, _ = ground_hit
+        if not (self.workspace.x_min <= x <= self.workspace.x_max):
+            return None
+        if not (self.workspace.y_min <= y <= self.workspace.y_max):
+            return None
+        step_x = (self.workspace.x_max - self.workspace.x_min) / grid_size
+        step_y = (self.workspace.y_max - self.workspace.y_min) / grid_size
+        if step_x <= 0.0 or step_y <= 0.0:
+            return None
+        col = min(grid_size - 1, max(0, int((x - self.workspace.x_min) / step_x)))
+        row = min(grid_size - 1, max(0, int((self.workspace.y_max - y) / step_y)))
+        return (row, col)
+
+    def _survey_cell_center(self, row: int, col: int, *, grid_size: int) -> tuple[float, float, float]:
+        step_x = (self.workspace.x_max - self.workspace.x_min) / grid_size
+        step_y = (self.workspace.y_max - self.workspace.y_min) / grid_size
+        return (
+            self.workspace.x_min + (col + 0.5) * step_x,
+            self.workspace.y_max - (row + 0.5) * step_y,
+            self.workspace.bottom_z_m,
+        )
 
     def _solve_ik_for_view(self, view: SurveyView) -> dict[str, Any]:
         mujoco = self._mujoco()
@@ -1201,22 +1923,37 @@ class MujocoSurveyBackend:
         model = self._model()
         data = self._data()
         mujoco.mj_forward(model, data)
-        robot_scene_contacts: list[dict[str, str]] = []
-        robot_self_contacts: list[dict[str, str]] = []
+        robot_scene_contacts: list[dict[str, Any]] = []
+        robot_self_contacts: list[dict[str, Any]] = []
         for index in range(int(data.ncon)):
             contact = data.contact[index]
-            name1 = self._geom_name(int(contact.geom1))
-            name2 = self._geom_name(int(contact.geom2))
-            is_robot1 = name1.startswith("gen3_")
-            is_robot2 = name2.startswith("gen3_")
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+            body1 = self._geom_body_id(geom1)
+            body2 = self._geom_body_id(geom2)
+            is_robot1 = self._is_robot_body(body1)
+            is_robot2 = self._is_robot_body(body2)
+            item = {
+                "geom1": self._geom_name(geom1),
+                "geom2": self._geom_name(geom2),
+                "body1": self._body_name(body1),
+                "body2": self._body_name(body2),
+                "distance_m": _round(float(contact.dist)),
+            }
             if is_robot1 and is_robot2:
-                robot_self_contacts.append({"geom1": name1, "geom2": name2})
+                robot_self_contacts.append(item)
             elif is_robot1 or is_robot2:
-                robot_scene_contacts.append({"geom1": name1, "geom2": name2})
+                robot_scene_contacts.append(item)
         return {
             "collision_free": not robot_scene_contacts and not robot_self_contacts,
             "robot_scene_contact_count": len(robot_scene_contacts),
             "robot_self_contact_count": len(robot_self_contacts),
+            "min_robot_scene_distance_m": (
+                _round(min(contact["distance_m"] for contact in robot_scene_contacts)) if robot_scene_contacts else None
+            ),
+            "min_robot_self_distance_m": (
+                _round(min(contact["distance_m"] for contact in robot_self_contacts)) if robot_self_contacts else None
+            ),
             "robot_scene_contacts": robot_scene_contacts[:10],
             "robot_self_contacts": robot_self_contacts[:10],
         }
@@ -1296,6 +2033,25 @@ class MujocoSurveyBackend:
     def _geom_name(self, geom_id: int) -> str:
         mujoco = self._mujoco()
         return mujoco.mj_id2name(self._model(), mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"geom_{geom_id}"
+
+    def _geom_body_id(self, geom_id: int) -> int:
+        return int(self._model().geom_bodyid[geom_id])
+
+    def _body_name(self, body_id: int) -> str:
+        mujoco = self._mujoco()
+        return mujoco.mj_id2name(self._model(), mujoco.mjtObj.mjOBJ_BODY, body_id) or f"body_{body_id}"
+
+    def _is_robot_body(self, body_id: int) -> bool:
+        model = self._model()
+        current = int(body_id)
+        while current >= 0:
+            if self._body_name(current).startswith("gen3_"):
+                return True
+            parent = int(model.body_parentid[current])
+            if parent == current:
+                return False
+            current = parent
+        return False
 
     def _mujoco(self) -> Any:
         if self.mujoco is None:
@@ -1628,10 +2384,34 @@ def _plan_payload(
             "real_camera_note": "Real hardware is expected to use a 1080P depth camera.",
         },
         "constraints": {
-            "camera_must_be_inside_tank": True,
-            "camera_z_must_be_below_tank_opening": True,
+            "camera_must_be_inside_tank": config.survey_camera_z_mode == "below_opening",
+            "camera_xy_must_stay_over_tank_workspace": True,
+            "camera_z_must_be_below_tank_opening": config.survey_camera_z_mode == "below_opening",
             "arm_entry": "from top square opening",
-            "pose_validation": "MuJoCo IK plus robot collision check before rendering.",
+            "pose_validation": (
+                "Survey fixed-pose views replay a validated qpos table and run camera, cell visibility, and collision checks; "
+                "dynamic survey views use reachable joint-space pose search, IK validation, and collision checks before rendering."
+            ),
+            "survey_pose_strategy": (
+                "fixed_qpos_table"
+                if config.survey_camera_z_mode == "fixed_mixed_4x4"
+                else ("reachable_joint_halton" if config.survey_reachable_pose_search else "wrist_camera_ik")
+            ),
+            "fixed_pose_source": (
+                FIXED_MIXED_4X4_POSE_SOURCE if config.survey_camera_z_mode == "fixed_mixed_4x4" else None
+            ),
+            "fixed_mixed_4x4_layers": {
+                "opening_zone_cells": [[row, col] for row in range(1, 4) for col in range(1, 4)],
+                "below_opening_cells": [[0, col] for col in range(4)] + [[row, 0] for row in range(1, 4)],
+            },
+            "survey_pose_selection_policy": config.survey_pose_selection_policy,
+            "survey_reachable_pose_samples": config.survey_reachable_pose_samples,
+            "survey_opening_reachable_pose_samples": config.survey_opening_reachable_pose_samples,
+            "survey_camera_z_mode": config.survey_camera_z_mode,
+            "survey_above_opening_margin_m": config.survey_above_opening_margin_m,
+            "survey_opening_grid_size": config.survey_opening_grid_size,
+            "survey_opening_visibility_min_fraction": config.survey_opening_visibility_min_fraction,
+            "survey_opening_visibility_grid_size": config.survey_opening_visibility_grid_size,
         },
         "workspace": scene.workspace.to_dict(),
         "selected_object_ids": list(scene.selected_object_ids),
@@ -1675,6 +2455,7 @@ def _report_payload(
         "image_size": [config.image_width, config.image_height],
         "run_yolo": config.run_yolo,
         "yolo_profile_path": str(config.yolo_profile_path),
+        "fusion_policy": asdict(config.fusion_policy()),
         "selected_objects": [obj.to_dict() for obj in scene.objects],
         "views": views,
         "observations": observations,
@@ -1692,6 +2473,10 @@ def _planned_view_result(view: SurveyView) -> dict[str, Any]:
         "view_id": view.view_id,
         "grid_row": view.grid_row,
         "grid_col": view.grid_col,
+        "scan_layer": view.scan_layer,
+        "scan_grid_size": view.scan_grid_size,
+        "fixed_pose_source": view.fixed_pose_source,
+        "fixed_qpos": list(view.fixed_qpos) if view.fixed_qpos is not None else None,
         "desired_camera_position_world": list(view.desired_camera_position_world),
         "look_at_world": list(view.look_at_world),
         "status": "planned",
@@ -2170,6 +2955,12 @@ def _select_weak_multiview_fallback_clusters(
     max_bbox_area_px: float,
     elongated_aspect_ratio: float,
     elongated_max_bbox_area_px: float,
+    image_width: int,
+    image_height: int,
+    bbox_clip_margin_px: float,
+    min_unclipped_vote: float,
+    candidate_workspace: SurveyWorkspace | None,
+    candidate_workspace_margin_m: float,
 ) -> list[list[SurveyObservation]]:
     accepted_classes = {
         class_name
@@ -2178,10 +2969,23 @@ def _select_weak_multiview_fallback_clusters(
     }
     best_by_class: dict[str, tuple[float, list[SurveyObservation]]] = {}
     for cluster in rejected_clusters:
-        class_name, vote = _cluster_dominant_vote(cluster)
-        if not class_name or class_name in accepted_classes:
+        class_name, vote = _cluster_best_new_class_vote(cluster, accepted_classes)
+        if not class_name:
             continue
         if vote < min_vote or len(_cluster_supporting_views(cluster)) < min_support_views:
+            continue
+        if not _cluster_passes_workspace_gate(
+            cluster,
+            workspace=candidate_workspace,
+            margin_m=candidate_workspace_margin_m,
+        ):
+            continue
+        if _cluster_unclipped_vote(
+            cluster,
+            image_width=image_width,
+            image_height=image_height,
+            margin_px=bbox_clip_margin_px,
+        ) < min_unclipped_vote:
             continue
         if not _weak_multiview_fallback_passes_bbox_gate(
             cluster,
@@ -2200,6 +3004,22 @@ def _select_weak_multiview_fallback_clusters(
     return [cluster for _, cluster in sorted(best_by_class.values(), key=lambda item: _cluster_sort_key(item[1]))]
 
 
+def _cluster_best_new_class_vote(
+    cluster: list[SurveyObservation],
+    accepted_classes: set[str],
+) -> tuple[str | None, float]:
+    class_votes = _cluster_class_votes(cluster)
+    best_class: str | None = None
+    best_vote = 0.0
+    for class_name, vote in class_votes.items():
+        if class_name in accepted_classes:
+            continue
+        if vote > best_vote:
+            best_class = class_name
+            best_vote = vote
+    return best_class, best_vote
+
+
 def _weak_multiview_fallback_passes_bbox_gate(
     cluster: list[SurveyObservation],
     *,
@@ -2215,6 +3035,94 @@ def _weak_multiview_fallback_passes_bbox_gate(
     return _cluster_max_bbox_aspect_ratio(cluster) >= elongated_aspect_ratio
 
 
+def _cluster_passes_workspace_gate(
+    cluster: list[SurveyObservation],
+    *,
+    workspace: SurveyWorkspace | None,
+    margin_m: float,
+) -> bool:
+    if workspace is None:
+        return True
+    center = _cluster_center(cluster)
+    x, y = center[:2]
+    return (
+        workspace.x_min - margin_m <= x <= workspace.x_max + margin_m
+        and workspace.y_min - margin_m <= y <= workspace.y_max + margin_m
+    )
+
+
+def _suppress_weak_neighbor_candidate_clusters(
+    clusters: list[list[SurveyObservation]],
+    *,
+    weak_vote_threshold: float,
+    suppression_radius_m: float,
+) -> tuple[list[list[SurveyObservation]], list[list[SurveyObservation]]]:
+    if suppression_radius_m <= 0.0:
+        return clusters, []
+    strong_vote_threshold = weak_vote_threshold * 1.5
+    strong_clusters = [
+        cluster for cluster in clusters if _cluster_dominant_vote(cluster)[1] >= strong_vote_threshold
+    ]
+    if not strong_clusters:
+        return clusters, []
+
+    kept: list[list[SurveyObservation]] = []
+    suppressed: list[list[SurveyObservation]] = []
+    for cluster in clusters:
+        if _cluster_dominant_vote(cluster)[1] >= strong_vote_threshold:
+            kept.append(cluster)
+            continue
+        center = _cluster_center(cluster)
+        near_strong = any(
+            other is not cluster and _xy_distance(center, _cluster_center(other)) <= suppression_radius_m
+            for other in strong_clusters
+        )
+        if near_strong:
+            suppressed.append(cluster)
+        else:
+            kept.append(cluster)
+    return kept, suppressed
+
+
+def _cluster_unclipped_vote(
+    cluster: list[SurveyObservation],
+    *,
+    image_width: int,
+    image_height: int,
+    margin_px: float,
+) -> float:
+    return sum(
+        observation.confidence
+        for observation in cluster
+        if not _bbox_is_clipped(
+            observation.bbox_xyxy,
+            image_width=image_width,
+            image_height=image_height,
+            margin_px=margin_px,
+        )
+    )
+
+
+def _bbox_is_clipped(
+    bbox_xyxy: tuple[float, float, float, float],
+    *,
+    image_width: int,
+    image_height: int,
+    margin_px: float,
+) -> bool:
+    x1, y1, x2, y2 = bbox_xyxy
+    left = min(x1, x2)
+    right = max(x1, x2)
+    top = min(y1, y2)
+    bottom = max(y1, y2)
+    return (
+        left <= margin_px
+        or top <= margin_px
+        or right >= float(image_width - 1) - margin_px
+        or bottom >= float(image_height - 1) - margin_px
+    )
+
+
 def _keep_candidate_cluster(
     cluster: list[SurveyObservation],
     *,
@@ -2222,11 +3130,32 @@ def _keep_candidate_cluster(
     weak_vote_threshold: float,
     tiny_bbox_area_px: float,
     weak_tiny_max_spread_m: float,
+    image_width: int,
+    image_height: int,
+    bbox_clip_margin_px: float,
+    min_unclipped_vote: float,
+    candidate_workspace: SurveyWorkspace | None,
+    candidate_workspace_margin_m: float,
 ) -> bool:
     if len(_cluster_supporting_views(cluster)) < min_support_views:
         return False
+    if not _cluster_passes_workspace_gate(
+        cluster,
+        workspace=candidate_workspace,
+        margin_m=candidate_workspace_margin_m,
+    ):
+        return False
     _, dominant_vote = _cluster_dominant_vote(cluster)
     max_bbox_area = _cluster_max_bbox_area(cluster)
+    if dominant_vote < weak_vote_threshold * 1.5:
+        unclipped_vote = _cluster_unclipped_vote(
+            cluster,
+            image_width=image_width,
+            image_height=image_height,
+            margin_px=bbox_clip_margin_px,
+        )
+        if unclipped_vote < min_unclipped_vote:
+            return False
     if dominant_vote < weak_vote_threshold and max_bbox_area < tiny_bbox_area_px:
         return False
     if (
@@ -2244,12 +3173,39 @@ def _keep_single_view_fallback_cluster(
     accepted_clusters: list[list[SurveyObservation]],
     confidence_threshold: float,
     min_distance_m: float,
+    requires_new_class: bool,
+    image_width: int,
+    image_height: int,
+    bbox_clip_margin_px: float,
+    candidate_workspace: SurveyWorkspace | None,
+    candidate_workspace_margin_m: float,
 ) -> bool:
     if len(cluster) != 1 or len(_cluster_supporting_views(cluster)) != 1:
         return False
     observation = cluster[0]
     if observation.rough_position_world is None or observation.confidence < confidence_threshold:
         return False
+    if not _cluster_passes_workspace_gate(
+        cluster,
+        workspace=candidate_workspace,
+        margin_m=candidate_workspace_margin_m,
+    ):
+        return False
+    if _bbox_is_clipped(
+        observation.bbox_xyxy,
+        image_width=image_width,
+        image_height=image_height,
+        margin_px=bbox_clip_margin_px,
+    ):
+        return False
+    if requires_new_class and observation.class_name:
+        accepted_classes = {
+            class_name
+            for class_name, _ in (_cluster_dominant_vote(other) for other in accepted_clusters)
+            if class_name
+        }
+        if observation.class_name in accepted_classes:
+            return False
     if any(_xy_distance(observation.rough_position_world, _cluster_center(other)) <= min_distance_m for other in accepted_clusters):
         return False
     return True
@@ -2457,6 +3413,21 @@ def _round(value: float) -> float:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return min(max(float(value), lower), upper)
+
+
+def _halton(index: int, base: int) -> float:
+    if index <= 0:
+        raise ValueError("Halton index must be positive")
+    if base <= 1:
+        raise ValueError("Halton base must be greater than 1")
+    result = 0.0
+    factor = 1.0 / float(base)
+    current = int(index)
+    while current > 0:
+        result += factor * (current % base)
+        current //= base
+        factor /= float(base)
+    return result
 
 
 def _import_numpy() -> Any:

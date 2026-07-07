@@ -10,7 +10,9 @@ from _bootstrap import add_src_to_path
 add_src_to_path()
 
 from robot_arm_pipeline.task1.survey import (  # noqa: E402
+    DEFAULT_BBOX_CLIP_MARGIN_PX,
     DEFAULT_CAMERA_NAME,
+    DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M,
     DEFAULT_CLUSTER_RADIUS_M,
     DEFAULT_CLUSTER_SPLIT_DISTANCE_M,
     DEFAULT_CLUSTER_SPLIT_MIN_VOTE,
@@ -26,15 +28,26 @@ from robot_arm_pipeline.task1.survey import (  # noqa: E402
     DEFAULT_SCENE_MODEL,
     DEFAULT_SINGLE_VIEW_FALLBACK_CONFIDENCE,
     DEFAULT_SINGLE_VIEW_FALLBACK_MIN_DISTANCE_M,
+    DEFAULT_SINGLE_VIEW_FALLBACK_REQUIRES_NEW_CLASS,
+    DEFAULT_SURVEY_ABOVE_OPENING_MARGIN_M,
+    DEFAULT_SURVEY_CAMERA_Z_MODE,
+    DEFAULT_SURVEY_OPENING_GRID_SIZE,
+    DEFAULT_SURVEY_OPENING_REACHABLE_POSE_SAMPLES,
+    DEFAULT_SURVEY_OPENING_VISIBILITY_GRID_SIZE,
+    DEFAULT_SURVEY_OPENING_VISIBILITY_MIN_FRACTION,
+    DEFAULT_SURVEY_POSE_SELECTION_POLICY,
+    DEFAULT_SURVEY_REACHABLE_MIN_CAMERA_Z_M,
     DEFAULT_TINY_CANDIDATE_BBOX_AREA_PX,
     DEFAULT_WEAK_CANDIDATE_MERGE_RADIUS_M,
     DEFAULT_WEAK_CANDIDATE_VOTE_THRESHOLD,
+    DEFAULT_WEAK_NEAR_STRONG_SUPPRESSION_RADIUS_M,
     DEFAULT_WEAK_MULTIVIEW_FALLBACK_MIN_DISTANCE_M,
     DEFAULT_WEAK_MULTIVIEW_FALLBACK_MAX_BBOX_AREA_PX,
     DEFAULT_WEAK_MULTIVIEW_FALLBACK_VOTE,
     DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_ASPECT_RATIO,
     DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX,
     DEFAULT_WEAK_TINY_CANDIDATE_MAX_SPREAD_M,
+    DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE,
     DEFAULT_YOLO_TILE_GRID_SIZE,
     DEFAULT_YOLO_TILE_NMS_IOU,
     DEFAULT_YOLO_TILE_OVERLAP,
@@ -235,6 +248,54 @@ def main() -> None:
     parser.add_argument("--tank-opening-z", type=float, default=0.50, help="Tank upper opening world z.")
     parser.add_argument("--opening-clearance", type=float, default=0.035, help="Required clearance below tank upper opening.")
     parser.add_argument(
+        "--survey-reachable-min-camera-z",
+        type=float,
+        default=DEFAULT_SURVEY_REACHABLE_MIN_CAMERA_Z_M,
+        help="Minimum accepted survey wrist-camera height above the tank bottom during reachable pose search.",
+    )
+    parser.add_argument(
+        "--survey-pose-selection-policy",
+        choices=("higher_camera_z_then_cell_center", "cell_center_then_higher_camera_z"),
+        default=DEFAULT_SURVEY_POSE_SELECTION_POLICY,
+        help="Policy for choosing one collision-free reachable survey pose per grid cell.",
+    )
+    parser.add_argument(
+        "--survey-camera-z-mode",
+        choices=("fixed_mixed_4x4", "below_opening", "opening_zone", "opening_zone_then_below_opening"),
+        default=DEFAULT_SURVEY_CAMERA_Z_MODE,
+        help="Survey wrist-camera z constraint. fixed_mixed_4x4 replays the fixed 16-view mixed opening/inside table.",
+    )
+    parser.add_argument(
+        "--survey-above-opening-margin",
+        type=float,
+        default=DEFAULT_SURVEY_ABOVE_OPENING_MARGIN_M,
+        help="Allowed survey wrist-camera height above the tank opening for opening-zone survey modes.",
+    )
+    parser.add_argument(
+        "--survey-opening-grid-size",
+        type=int,
+        default=DEFAULT_SURVEY_OPENING_GRID_SIZE,
+        help="Opening-zone survey scan grid size used before inside-tank fallback views.",
+    )
+    parser.add_argument(
+        "--survey-opening-reachable-pose-samples",
+        type=int,
+        default=DEFAULT_SURVEY_OPENING_REACHABLE_POSE_SAMPLES,
+        help="Joint-space samples used for opening-zone reachable pose search.",
+    )
+    parser.add_argument(
+        "--survey-opening-visibility-min-fraction",
+        type=float,
+        default=DEFAULT_SURVEY_OPENING_VISIBILITY_MIN_FRACTION,
+        help="Minimum sampled bottom-cell visibility fraction required for opening-zone survey poses.",
+    )
+    parser.add_argument(
+        "--survey-opening-visibility-grid-size",
+        type=int,
+        default=DEFAULT_SURVEY_OPENING_VISIBILITY_GRID_SIZE,
+        help="Per-cell ray sample grid size used to validate opening-zone visibility.",
+    )
+    parser.add_argument(
         "--oblique-offset",
         type=float,
         default=DEFAULT_OBLIQUE_OFFSET_M,
@@ -277,6 +338,12 @@ def main() -> None:
         help="Dominant class-vote threshold below which a candidate is considered weak.",
     )
     parser.add_argument(
+        "--weak-near-strong-suppression-radius",
+        type=float,
+        default=DEFAULT_WEAK_NEAR_STRONG_SUPPRESSION_RADIUS_M,
+        help="Suppress weak survey candidates within this world XY distance from strong candidates. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--tiny-candidate-bbox-area",
         type=float,
         default=DEFAULT_TINY_CANDIDATE_BBOX_AREA_PX,
@@ -299,6 +366,12 @@ def main() -> None:
         type=float,
         default=DEFAULT_SINGLE_VIEW_FALLBACK_MIN_DISTANCE_M,
         help="Minimum world XY distance from accepted candidates for single-view fallback.",
+    )
+    parser.add_argument(
+        "--allow-single-view-fallback-existing-class",
+        action="store_true",
+        default=not DEFAULT_SINGLE_VIEW_FALLBACK_REQUIRES_NEW_CLASS,
+        help="Allow isolated single-view fallback even when the advisory class already has an accepted candidate.",
     )
     parser.add_argument(
         "--min-candidate-support-views",
@@ -359,6 +432,24 @@ def main() -> None:
         type=float,
         default=DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX,
         help="Maximum bbox pixel area for elongated weak multi-view fallback candidates.",
+    )
+    parser.add_argument(
+        "--bbox-clip-margin-px",
+        type=float,
+        default=DEFAULT_BBOX_CLIP_MARGIN_PX,
+        help="Pixel margin used to treat a bbox touching the image border as clipped.",
+    )
+    parser.add_argument(
+        "--min-unclipped-candidate-vote",
+        type=float,
+        default=DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE,
+        help="Minimum non-clipped detection confidence sum required for weak survey candidates.",
+    )
+    parser.add_argument(
+        "--candidate-workspace-margin",
+        type=float,
+        default=DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M,
+        help="World XY margin around the Stage0 workspace accepted for survey candidate centers.",
     )
     parser.add_argument("--yolo-config", type=Path, default=DEFAULT_YOLO_PROFILE, help="YOLO Stage3 profile YAML/JSON.")
     parser.add_argument("--yolo-conf", type=float, default=0.15, help="YOLO confidence threshold for the active stage.")
@@ -634,10 +725,12 @@ def main() -> None:
             cluster_split_min_vote=args.cluster_split_min_vote,
             weak_candidate_merge_radius_m=args.weak_candidate_merge_radius,
             weak_candidate_vote_threshold=args.weak_candidate_vote,
+            weak_near_strong_suppression_radius_m=args.weak_near_strong_suppression_radius,
             tiny_candidate_bbox_area_px=args.tiny_candidate_bbox_area,
             weak_tiny_candidate_max_spread_m=args.weak_tiny_candidate_max_spread,
             single_view_fallback_confidence=args.single_view_fallback_conf,
             single_view_fallback_min_distance_m=args.single_view_fallback_min_distance,
+            single_view_fallback_requires_new_class=not args.allow_single_view_fallback_existing_class,
             min_candidate_support_views=args.min_candidate_support_views,
             large_same_class_merge_radius_m=args.large_same_class_merge_radius,
             large_same_class_bbox_area_px=args.large_same_class_bbox_area,
@@ -648,6 +741,9 @@ def main() -> None:
             weak_multiview_fallback_max_bbox_area_px=args.weak_multiview_fallback_max_bbox_area,
             weak_multiview_fallback_elongated_aspect_ratio=args.weak_multiview_fallback_elongated_aspect,
             weak_multiview_fallback_elongated_max_bbox_area_px=args.weak_multiview_fallback_elongated_max_bbox_area,
+            bbox_clip_margin_px=args.bbox_clip_margin_px,
+            min_unclipped_candidate_vote=args.min_unclipped_candidate_vote,
+            candidate_workspace_margin_m=args.candidate_workspace_margin,
             yolo_confidence=args.yolo_conf,
             yolo_iou=args.yolo_iou,
             yolo_image_size=args.yolo_imgsz,
@@ -660,6 +756,14 @@ def main() -> None:
             plan_only=args.plan_only,
             strict_yolo=args.strict_yolo,
             max_ik_iterations=_value_or_default(args.max_ik_iterations, SurveyConfig().max_ik_iterations),
+            survey_reachable_min_camera_z_m=args.survey_reachable_min_camera_z,
+            survey_pose_selection_policy=args.survey_pose_selection_policy,
+            survey_camera_z_mode=args.survey_camera_z_mode,
+            survey_above_opening_margin_m=args.survey_above_opening_margin,
+            survey_opening_grid_size=args.survey_opening_grid_size,
+            survey_opening_reachable_pose_samples=args.survey_opening_reachable_pose_samples,
+            survey_opening_visibility_min_fraction=args.survey_opening_visibility_min_fraction,
+            survey_opening_visibility_grid_size=args.survey_opening_visibility_grid_size,
             ik_position_tolerance_m=_value_or_default(
                 args.ik_position_tolerance,
                 SurveyConfig().ik_position_tolerance_m,
