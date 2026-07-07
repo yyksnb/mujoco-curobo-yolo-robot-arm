@@ -28,6 +28,9 @@ from robot_arm_pipeline.task1.row import (
     load_task1_survey_report,
     select_row_objects_with_policy,
     select_stable_row_objects,
+    _row_view_selection_summary,
+    _select_reachable_row_capture_plan,
+    _select_row_capture_view,
 )
 from robot_arm_pipeline.task1.final import (
     DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
@@ -445,7 +448,11 @@ def test_row_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: 
         assert workspace.y_min <= position[1] <= workspace.y_max
         assert position[2] < workspace.tank_opening_z_m
         assert ((position[0] - target[0]) ** 2 + (position[1] - target[1]) ** 2) ** 0.5 >= 0.08
-        assert position[1] >= target[1] - 1e-6
+    first_by_candidate = {planned.candidate_id: planned for planned in planned_views[::3]}
+    candidate_001 = first_by_candidate["candidate_001"]
+    candidate_002 = first_by_candidate["candidate_002"]
+    assert candidate_001.view.desired_camera_position_world[1] > candidate_001.candidate_rough_position_world[1]
+    assert candidate_002.view.desired_camera_position_world[1] < candidate_002.candidate_rough_position_world[1]
 
 
 def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) -> None:
@@ -481,8 +488,296 @@ def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) ->
     assert report["tentative_objects"] == []
     assert report["ambiguous_objects"] == []
     assert report["rejected_hypotheses"] == []
+    assert report["row_view_selection_summary"]["enabled"] is False
     assert report["object_selection_summary"]["status"] == "not_run"
     assert report["stable_object_selection"]["status"] == "not_run"
+
+
+def test_row_view_collision_search_selects_later_safe_candidate(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    workspace, planned_views = build_row_inspection_plan(
+        survey_report,
+        RowConfig(
+            plan_only=True,
+            row_views_per_candidate=1,
+            camera_z_m=0.34,
+            row_standoff_m=0.16,
+            row_view_candidate_angle_offsets_rad=(0.0,),
+            row_view_candidate_roll_offsets_rad=(0.0,),
+            row_view_candidate_standoff_multipliers=(1.0,),
+            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+        ),
+    )
+    backend = _FakeRowValidationBackend(("collision", "success"))
+
+    selected_view, selection = _select_row_capture_view(
+        backend=backend,
+        planned=planned_views[0],
+        workspace=workspace,
+        config=RowConfig(
+            plan_only=True,
+            row_views_per_candidate=1,
+            camera_z_m=0.34,
+            row_standoff_m=0.16,
+            row_view_candidate_angle_offsets_rad=(0.0,),
+            row_view_candidate_roll_offsets_rad=(0.0,),
+            row_view_candidate_standoff_multipliers=(1.0,),
+            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+        ),
+    )
+
+    assert selected_view is not None
+    assert selected_view.desired_camera_position_world[2] == pytest.approx(0.38)
+    assert selection["status"] == "selected"
+    assert selection["selected_candidate_index"] == 1
+    assert selection["rejected_counts"]["collision"] == 1
+    summary = _row_view_selection_summary([{"row_view_selection": selection}])
+    assert summary["selected_count"] == 1
+    assert summary["selected_alternative_count"] == 1
+    assert summary["collision_rejection_count"] == 1
+
+
+def test_reachable_row_capture_plan_only_returns_validated_views(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    config = RowConfig(
+        plan_only=True,
+        row_views_per_candidate=2,
+        camera_z_m=0.34,
+        row_standoff_m=0.16,
+        row_view_candidate_angle_offsets_rad=(0.0,),
+        row_view_candidate_roll_offsets_rad=(0.0,),
+        row_view_candidate_standoff_multipliers=(1.0,),
+        row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+    )
+    workspace, planned_views = build_row_inspection_plan(survey_report, config)
+
+    selected_views, selections, summary = _select_reachable_row_capture_plan(
+        backend=_FakeRowValidationBackend(("collision", "success", "success", "success", "success")),
+        planned_views=planned_views,
+        workspace=workspace,
+        config=config,
+    )
+
+    assert len(planned_views) == 4
+    assert len(selected_views) == 4
+    assert summary["requested_view_count"] == 4
+    assert summary["selected_view_count"] == 4
+    assert summary["insufficient_candidate_count"] == 0
+    assert all(selections[planned.view.view_id]["status"] == "selected" for planned in selected_views)
+    assert all(planned.view.fixed_pose_source == "row_reachable_capture_plan_v1" for planned in selected_views)
+    assert all(planned.view.fixed_qpos is not None for planned in selected_views)
+    assert selected_views[0].view.view_id == "row_candidate_001_00"
+    assert selections[selected_views[0].view.view_id]["selected_candidate"]["camera_z_offset_m"] == pytest.approx(0.04)
+
+
+def test_reachable_row_capture_plan_rejects_validation_without_qpos(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    config = RowConfig(
+        plan_only=True,
+        row_views_per_candidate=1,
+        camera_z_m=0.34,
+        row_standoff_m=0.16,
+        row_view_candidate_angle_offsets_rad=(0.0,),
+        row_view_candidate_roll_offsets_rad=(0.0,),
+        row_view_candidate_standoff_multipliers=(1.0,),
+        row_view_candidate_camera_z_offsets_m=(0.0,),
+    )
+    workspace, planned_views = build_row_inspection_plan(survey_report, config)
+
+    selected_views, selections, summary = _select_reachable_row_capture_plan(
+        backend=_FakeRowValidationBackend(("success_no_qpos",)),
+        planned_views=(planned_views[0],),
+        workspace=workspace,
+        config=config,
+    )
+
+    assert selected_views == ()
+    assert selections == {}
+    assert summary["requested_view_count"] == 1
+    assert summary["selected_view_count"] == 0
+    assert summary["insufficient_candidate_count"] == 1
+    assert summary["candidate_summaries"][0]["rejected_counts"]["missing_validated_qpos"] == 1
+
+
+def test_row_view_collision_search_can_select_alternate_camera_roll(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    workspace, planned_views = build_row_inspection_plan(
+        survey_report,
+        RowConfig(
+            plan_only=True,
+            row_views_per_candidate=1,
+            camera_z_m=0.34,
+            row_standoff_m=0.16,
+            row_view_candidate_angle_offsets_rad=(0.0,),
+            row_view_candidate_roll_offsets_rad=(0.0, math.pi / 2.0),
+            row_view_candidate_standoff_multipliers=(1.0,),
+            row_view_candidate_camera_z_offsets_m=(0.0,),
+        ),
+    )
+    config = RowConfig(
+        plan_only=True,
+        row_views_per_candidate=1,
+        camera_z_m=0.34,
+        row_standoff_m=0.16,
+        row_view_candidate_angle_offsets_rad=(0.0,),
+        row_view_candidate_roll_offsets_rad=(0.0, math.pi / 2.0),
+        row_view_candidate_standoff_multipliers=(1.0,),
+        row_view_candidate_camera_z_offsets_m=(0.0,),
+    )
+
+    selected_view, selection = _select_row_capture_view(
+        backend=_FakeRowValidationBackend(("collision", "success")),
+        planned=planned_views[0],
+        workspace=workspace,
+        config=config,
+    )
+
+    assert selected_view is not None
+    assert selection["status"] == "selected"
+    assert selection["selected_candidate_index"] == 1
+    assert selection["selected_candidate"]["roll_offset_rad"] == pytest.approx(math.pi / 2.0)
+    assert selection["rejected_counts"]["collision"] == 1
+    summary = _row_view_selection_summary([{"row_view_selection": selection}])
+    assert summary["selected_alternative_count"] == 1
+
+
+def test_row_view_collision_search_can_select_lower_camera_z(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    workspace, planned_views = build_row_inspection_plan(
+        survey_report,
+        RowConfig(
+            plan_only=True,
+            row_views_per_candidate=1,
+            camera_z_m=0.34,
+            row_standoff_m=0.16,
+            row_view_candidate_angle_offsets_rad=(0.0,),
+            row_view_candidate_roll_offsets_rad=(0.0,),
+            row_view_candidate_standoff_multipliers=(1.0,),
+            row_view_candidate_camera_z_offsets_m=(0.0, -0.04),
+        ),
+    )
+    config = RowConfig(
+        plan_only=True,
+        row_views_per_candidate=1,
+        camera_z_m=0.34,
+        row_standoff_m=0.16,
+        row_view_candidate_angle_offsets_rad=(0.0,),
+        row_view_candidate_roll_offsets_rad=(0.0,),
+        row_view_candidate_standoff_multipliers=(1.0,),
+        row_view_candidate_camera_z_offsets_m=(0.0, -0.04),
+    )
+
+    selected_view, selection = _select_row_capture_view(
+        backend=_FakeRowValidationBackend(("collision", "success")),
+        planned=planned_views[0],
+        workspace=workspace,
+        config=config,
+    )
+
+    assert selected_view is not None
+    assert selected_view.desired_camera_position_world[2] == pytest.approx(0.30)
+    assert selection["status"] == "selected"
+    assert selection["selected_candidate"]["camera_z_offset_m"] == pytest.approx(-0.04)
+    assert selection["rejected_counts"]["collision"] == 1
+
+
+def test_row_view_collision_search_fails_when_no_candidate_is_safe(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    workspace, planned_views = build_row_inspection_plan(
+        survey_report,
+        RowConfig(
+            plan_only=True,
+            row_views_per_candidate=1,
+            camera_z_m=0.34,
+            row_standoff_m=0.16,
+            row_view_candidate_angle_offsets_rad=(0.0,),
+            row_view_candidate_roll_offsets_rad=(0.0,),
+            row_view_candidate_standoff_multipliers=(1.0,),
+            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+        ),
+    )
+    config = RowConfig(
+        plan_only=True,
+        row_views_per_candidate=1,
+        camera_z_m=0.34,
+        row_standoff_m=0.16,
+        row_view_candidate_angle_offsets_rad=(0.0,),
+        row_view_candidate_roll_offsets_rad=(0.0,),
+        row_view_candidate_standoff_multipliers=(1.0,),
+        row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+    )
+
+    selected_view, selection = _select_row_capture_view(
+        backend=_FakeRowValidationBackend(("collision", "ik_failed")),
+        planned=planned_views[0],
+        workspace=workspace,
+        config=config,
+    )
+
+    assert selected_view is None
+    assert selection["status"] == "failed_no_collision_free_candidate"
+    assert selection["attempt_count"] == 2
+    assert selection["rejected_counts"]["collision"] == 1
+    assert selection["rejected_counts"]["ik_failed"] == 1
+    summary = _row_view_selection_summary([{"row_view_selection": selection}])
+    assert summary["failed_no_safe_candidate_count"] == 1
+
+
+def test_row_view_collision_search_reports_explicit_candidate_limit(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    survey_report_path = _write_survey_report(tmp_path, layout_path)
+    survey_report = load_task1_survey_report(survey_report_path)
+    workspace, planned_views = build_row_inspection_plan(
+        survey_report,
+        RowConfig(
+            plan_only=True,
+            row_views_per_candidate=1,
+            camera_z_m=0.34,
+            row_standoff_m=0.16,
+            row_view_candidate_angle_offsets_rad=(0.0,),
+            row_view_candidate_roll_offsets_rad=(0.0,),
+            row_view_candidate_standoff_multipliers=(1.0,),
+            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+            row_view_candidate_max_attempts=1,
+        ),
+    )
+    config = RowConfig(
+        plan_only=True,
+        row_views_per_candidate=1,
+        camera_z_m=0.34,
+        row_standoff_m=0.16,
+        row_view_candidate_angle_offsets_rad=(0.0,),
+        row_view_candidate_roll_offsets_rad=(0.0,),
+        row_view_candidate_standoff_multipliers=(1.0,),
+        row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+        row_view_candidate_max_attempts=1,
+    )
+
+    selected_view, selection = _select_row_capture_view(
+        backend=_FakeRowValidationBackend(("collision",)),
+        planned=planned_views[0],
+        workspace=workspace,
+        config=config,
+    )
+
+    assert selected_view is None
+    assert selection["status"] == "failed_no_collision_free_candidate"
+    assert selection["candidate_limit_reached"] is True
+    assert selection["attempt_count"] == 1
+    summary = _row_view_selection_summary([{"row_view_selection": selection}])
+    assert summary["candidate_limit_reached_count"] == 1
 
 
 def test_row_fusion_merges_duplicate_candidates_but_keeps_separate_nearby_objects() -> None:
@@ -552,6 +847,20 @@ def test_row_object_selection_keeps_small_low_evidence_as_tentative() -> None:
     assert selection["object_selection_summary"]["tentative_object_count"] == 1
 
 
+def test_row_object_selection_allows_high_multiview_evidence_below_confidence_gate() -> None:
+    selection = select_row_objects_with_policy(
+        [
+            _hypothesis("hyp_supported_drill", "钻头", 0.49, 12, (0.30, 0.30, 0.03)),
+            _hypothesis("hyp_low_evidence", "纸胶带", 0.31, 3, (0.70, 0.70, 0.03)),
+        ],
+        workspace=_unit_workspace(),
+    )
+
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["钻头"]
+    assert selection["object_selection_summary"]["thresholds"]["min_evidence_score"] == 1.25
+    assert selection["object_selection_summary"]["rejected_counts"]["low_confidence"] == 1
+
+
 def test_row_object_selection_reports_similar_cross_class_neighbors_as_ambiguous() -> None:
     selection = select_row_objects_with_policy(
         [
@@ -570,6 +879,44 @@ def test_row_object_selection_reports_similar_cross_class_neighbors_as_ambiguous
         candidate["class_name"] for candidate in selection["ambiguous_objects"][0]["class_candidates"]
     } == {"内六角扳手", "钻头"}
     assert selection["object_selection_summary"]["ambiguous_object_count"] == 1
+
+
+def test_row_object_selection_keeps_separated_cross_class_neighbors() -> None:
+    selection = select_row_objects_with_policy(
+        [
+            _hypothesis("hyp_standard", "标准件", 0.84, 5, (0.30, 0.30, 0.03)),
+            _hypothesis("hyp_drill", "钻头", 0.86, 5, (0.355, 0.30, 0.03)),
+            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.72, 0.72, 0.03)),
+        ],
+        workspace=_unit_workspace(),
+    )
+
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["标准件", "钻头", "记号笔"]
+    assert selection["ambiguous_objects"] == []
+    assert selection["object_selection_summary"]["rejected_counts"]["cross_class_conflict_weaker"] == 0
+
+
+def test_row_object_selection_accepts_configured_workspace_margin() -> None:
+    selection = select_row_objects_with_policy(
+        [
+            _hypothesis("hyp_edge", "钻头", 0.90, 4, (0.86, 0.50, 0.03)),
+            _hypothesis("hyp_outside", "手套", 0.90, 4, (0.88, 0.50, 0.03)),
+        ],
+        workspace=_unit_workspace(),
+        workspace_margin_m=0.02,
+    )
+
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["钻头"]
+    assert selection["stable_objects"][0]["selection"]["workspace_filter"] == {
+        "within_nominal_workspace": False,
+        "workspace_margin_m": 0.02,
+    }
+    assert (
+        selection["stable_objects"][0]["pose_quality"]["workspace_bounds_status"]
+        == "within_configured_selection_margin"
+    )
+    assert selection["object_selection_summary"]["rejected_counts"]["outside_workspace"] == 1
+    assert selection["object_selection_summary"]["thresholds"]["workspace_margin_m"] == 0.02
 
 
 def test_row_object_selection_reports_close_class_votes_as_ambiguous() -> None:
@@ -1194,3 +1541,90 @@ def _unit_workspace() -> dict[str, float]:
         "bottom_z_m": 0.03,
         "tank_opening_z_m": 0.50,
     }
+
+
+class _FakeRowValidationBackend:
+    def __init__(self, outcomes: tuple[str, ...]) -> None:
+        self.outcomes = outcomes
+        self.calls = 0
+
+    def validate_view_pose(self, view) -> dict[str, object]:
+        outcome = self.outcomes[self.calls]
+        self.calls += 1
+        if outcome == "success":
+            return {
+                "status": "success",
+                "message": "validated",
+                "actual_camera_position_world": list(view.desired_camera_position_world),
+                "actual_qpos": [0.01 * (index + 1) for index in range(8)],
+                "ik": {
+                    "success": True,
+                    "iterations": 3,
+                    "position_error_m": 0.001,
+                    "orientation_error_rad": 0.01,
+                },
+                "collision": {
+                    "collision_free": True,
+                    "robot_scene_contact_count": 0,
+                    "robot_self_contact_count": 0,
+                    "robot_scene_contacts": [],
+                    "robot_self_contacts": [],
+                },
+            }
+        if outcome == "success_no_qpos":
+            return {
+                "status": "success",
+                "message": "validated without qpos",
+                "actual_camera_position_world": list(view.desired_camera_position_world),
+                "ik": {
+                    "success": True,
+                    "iterations": 3,
+                    "position_error_m": 0.001,
+                    "orientation_error_rad": 0.01,
+                },
+                "collision": {
+                    "collision_free": True,
+                    "robot_scene_contact_count": 0,
+                    "robot_self_contact_count": 0,
+                    "robot_scene_contacts": [],
+                    "robot_self_contacts": [],
+                },
+            }
+        if outcome == "ik_failed":
+            return {
+                "status": "failed",
+                "message": "IK did not reach the requested wrist-camera pose.",
+                "actual_camera_position_world": list(view.desired_camera_position_world),
+                "ik": {
+                    "success": False,
+                    "iterations": 220,
+                    "position_error_m": 0.2,
+                    "orientation_error_rad": 0.5,
+                },
+                "collision": {
+                    "collision_free": True,
+                    "robot_scene_contact_count": 0,
+                    "robot_self_contact_count": 0,
+                    "robot_scene_contacts": [],
+                    "robot_self_contacts": [],
+                },
+            }
+        return {
+            "status": "failed",
+            "message": "IK pose was rejected by robot collision check.",
+            "actual_camera_position_world": list(view.desired_camera_position_world),
+            "ik": {
+                "success": True,
+                "iterations": 5,
+                "position_error_m": 0.002,
+                "orientation_error_rad": 0.02,
+            },
+            "collision": {
+                "collision_free": False,
+                "robot_scene_contact_count": 1,
+                "robot_self_contact_count": 0,
+                "min_robot_scene_distance_m": -0.01,
+                "robot_scene_contacts": [{"body1": "gen3_forearm_link", "body2": "tank_top"}],
+                "robot_self_contacts": [],
+            },
+        }

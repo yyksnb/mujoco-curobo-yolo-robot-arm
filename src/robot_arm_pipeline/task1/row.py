@@ -23,6 +23,7 @@ from robot_arm_pipeline.task1.survey import (
     SurveySceneInput,
     SurveyView,
     SurveyWorkspace,
+    estimate_detection_ground_position,
     load_stage0_layout,
     survey_scene_from_stage0_layout,
 )
@@ -34,8 +35,28 @@ DEFAULT_ROW_VIEWS_PER_CANDIDATE = 3
 DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD = math.radians(45.0)
 DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M = 0.08
 DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M = 0.02
-DEFAULT_ROW_ENTRY_SIDE = "y-max"
+DEFAULT_ROW_ENTRY_SIDE = "survey-best"
 DEFAULT_ROW_CLUSTER_RADIUS_M = 0.055
+DEFAULT_ROW_VIEW_COLLISION_SEARCH = True
+DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5)
+DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M = (0.0, -0.04, -0.08, -0.12, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12)
+DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD = (
+    0.0,
+    math.radians(22.5),
+    -math.radians(22.5),
+    math.radians(45.0),
+    -math.radians(45.0),
+    math.radians(67.5),
+    -math.radians(67.5),
+    math.radians(90.0),
+    -math.radians(90.0),
+    math.radians(135.0),
+    -math.radians(135.0),
+    math.pi,
+)
+DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD = (0.0, math.radians(90.0), -math.radians(90.0), math.pi)
+DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS: int | None = None
+ROW_REACHABLE_CAPTURE_FIXED_POSE_SOURCE = "row_reachable_capture_plan_v1"
 DEFAULT_ROW_YOLO_CONFIDENCE = 0.20
 DEFAULT_ROW_YOLO_MAX_DETECTIONS = 20
 DEFAULT_ROW_YOLO_TILE_GRID_SIZE = 1
@@ -45,11 +66,13 @@ DEFAULT_ROW_POSE_MIN_PIXELS = 36
 DEFAULT_ROW_YAW_MIN_EIGEN_RATIO = 1.6
 DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE = 0.50
 DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT = 2
+DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE = 1.25
 DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M = 0.22
+DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M = 0.02
 DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE = 0.30
 DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT = 1
 DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX = 45_000.0
-DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M = 0.08
+DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M = 0.045
 DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO = 0.80
 DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO = 1.35
 DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE = 0.50
@@ -118,6 +141,12 @@ class RowConfig:
     look_at_height_offset_m: float = DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M
     entry_side: str = DEFAULT_ROW_ENTRY_SIDE
     row_cluster_radius_m: float = DEFAULT_ROW_CLUSTER_RADIUS_M
+    row_view_collision_search: bool = DEFAULT_ROW_VIEW_COLLISION_SEARCH
+    row_view_candidate_standoff_multipliers: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS
+    row_view_candidate_camera_z_offsets_m: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M
+    row_view_candidate_angle_offsets_rad: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD
+    row_view_candidate_roll_offsets_rad: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD
+    row_view_candidate_max_attempts: int | None = DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS
     yolo_confidence: float = DEFAULT_ROW_YOLO_CONFIDENCE
     yolo_iou: float | None = None
     yolo_image_size: int | None = None
@@ -132,7 +161,9 @@ class RowConfig:
     yaw_min_eigen_ratio: float = DEFAULT_ROW_YAW_MIN_EIGEN_RATIO
     stable_object_min_confidence: float = DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE
     stable_object_min_support_count: int = DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT
+    stable_object_min_evidence_score: float = DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE
     stable_object_same_class_nms_radius_m: float = DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M
+    stable_object_workspace_margin_m: float = DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M
     tentative_object_min_confidence: float = DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE
     tentative_object_min_support_count: int = DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT
     tentative_object_small_bbox_area_px: float = DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX
@@ -173,6 +204,18 @@ class RowConfig:
             raise ValueError("entry_side must be one of y-max, y-min, x-min, x-max, center, or survey-best")
         if self.row_cluster_radius_m <= 0.0:
             raise ValueError("row_cluster_radius_m must be positive")
+        if not self.row_view_candidate_standoff_multipliers:
+            raise ValueError("row_view_candidate_standoff_multipliers must not be empty")
+        if any(value <= 0.0 for value in self.row_view_candidate_standoff_multipliers):
+            raise ValueError("row_view_candidate_standoff_multipliers must be positive")
+        if not self.row_view_candidate_camera_z_offsets_m:
+            raise ValueError("row_view_candidate_camera_z_offsets_m must not be empty")
+        if not self.row_view_candidate_angle_offsets_rad:
+            raise ValueError("row_view_candidate_angle_offsets_rad must not be empty")
+        if not self.row_view_candidate_roll_offsets_rad:
+            raise ValueError("row_view_candidate_roll_offsets_rad must not be empty")
+        if self.row_view_candidate_max_attempts is not None and self.row_view_candidate_max_attempts <= 0:
+            raise ValueError("row_view_candidate_max_attempts must be positive when set")
         if not 0.0 <= self.yolo_confidence <= 1.0:
             raise ValueError("yolo_confidence must be between 0 and 1")
         if self.yolo_tile_grid_size <= 0:
@@ -189,8 +232,12 @@ class RowConfig:
             raise ValueError("stable_object_min_confidence must be between 0 and 1")
         if self.stable_object_min_support_count <= 0:
             raise ValueError("stable_object_min_support_count must be positive")
+        if self.stable_object_min_evidence_score <= 0.0:
+            raise ValueError("stable_object_min_evidence_score must be positive")
         if self.stable_object_same_class_nms_radius_m <= 0.0:
             raise ValueError("stable_object_same_class_nms_radius_m must be positive")
+        if self.stable_object_workspace_margin_m < 0.0:
+            raise ValueError("stable_object_workspace_margin_m must be non-negative")
         if not 0.0 <= self.tentative_object_min_confidence <= 1.0:
             raise ValueError("tentative_object_min_confidence must be between 0 and 1")
         if self.tentative_object_min_support_count <= 0:
@@ -276,6 +323,7 @@ class RowObservation:
     yaw_confidence: float
     extent_xy_m: tuple[float, float] | None
     T_world_object: tuple[tuple[float, float, float, float], ...]
+    position_source: str = "close RGB bbox ground-plane projection"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -294,6 +342,7 @@ class RowObservation:
             "yaw_confidence": _round(self.yaw_confidence),
             "extent_xy_m": [_round(value) for value in self.extent_xy_m] if self.extent_xy_m else None,
             "T_world_object": [list(row) for row in self.T_world_object],
+            "position_source": self.position_source,
         }
 
 
@@ -445,9 +494,26 @@ def run_task1_row(
     backend = MujocoSurveyBackend(config=config.capture_config(), scene=scene, detector=detector)
     view_results: list[dict[str, Any]] = []
     row_observations: list[RowObservation] = []
+    row_reachable_planning_summary: dict[str, Any] | None = None
     try:
         backend.load()
         backend.apply_scene_objects()
+        planned_views, row_view_selections, row_reachable_planning_summary = _select_reachable_row_capture_plan(
+            backend=backend,
+            planned_views=planned_views,
+            workspace=workspace,
+            config=config,
+        )
+        plan_payload = _plan_payload(
+            created_utc=created_utc,
+            survey_report=survey_report,
+            scene=scene,
+            config=config,
+            row_dir=row_dir,
+            plan_path=plan_path,
+            report_path=report_path,
+            planned_views=planned_views,
+        )
         for planned in planned_views:
             view_result, survey_observations = backend.capture_view(
                 planned.view,
@@ -456,6 +522,15 @@ def run_task1_row(
                 yolo_dir=yolo_dir,
                 annotated_dir=annotated_dir,
                 tiles_dir=tiles_dir,
+            )
+            view_result["row_view_selection"] = row_view_selections.get(
+                planned.view.view_id,
+                {
+                    "status": "missing_selection_record",
+                    "strategy": "candidate_level_reachable_row_capture_plan_v1",
+                    "planned_view_id": planned.view.view_id,
+                    "notes": ["Internal row planner did not provide a selection record for this reachable view."],
+                },
             )
             view_result["candidate_id"] = planned.candidate_id
             view_result["candidate_rough_position_world"] = [
@@ -494,6 +569,7 @@ def run_task1_row(
             ambiguous_objects=[],
             rejected_hypotheses=[],
             object_selection_summary=_stable_selection_empty_metadata(config),
+            row_reachable_planning_summary=row_reachable_planning_summary,
         )
         _write_json(report_path, report)
         return report
@@ -509,7 +585,9 @@ def run_task1_row(
         workspace=workspace,
         min_confidence=config.stable_object_min_confidence,
         min_support_count=config.stable_object_min_support_count,
+        min_evidence_score=config.stable_object_min_evidence_score,
         same_class_nms_radius_m=config.stable_object_same_class_nms_radius_m,
+        workspace_margin_m=config.stable_object_workspace_margin_m,
         tentative_min_confidence=config.tentative_object_min_confidence,
         tentative_min_support_count=config.tentative_object_min_support_count,
         tentative_small_bbox_area_px=config.tentative_object_small_bbox_area_px,
@@ -524,7 +602,11 @@ def run_task1_row(
     rejected_hypotheses = object_selection["rejected_hypotheses"]
     object_selection_summary = object_selection["object_selection_summary"]
     success_count = sum(1 for view in view_results if view.get("status") == "success")
-    if success_count == len(view_results):
+    planning_shortfall = (
+        row_reachable_planning_summary is not None
+        and int(row_reachable_planning_summary.get("insufficient_candidate_count", 0)) > 0
+    )
+    if view_results and success_count == len(view_results) and not planning_shortfall:
         status = "success"
     elif success_count > 0:
         status = "partial"
@@ -536,6 +618,7 @@ def run_task1_row(
         status=status,
         message=(
             f"Captured {success_count}/{len(view_results)} task1 row close-inspection views "
+            f"from {row_reachable_planning_summary.get('requested_view_count') if row_reachable_planning_summary else len(view_results)} requested reachable slots "
             f"and selected {len(stable_objects)} stable, {len(tentative_objects)} tentative, "
             f"{len(ambiguous_objects)} ambiguous objects from {len(object_hypotheses)} hypotheses."
         ),
@@ -555,6 +638,7 @@ def run_task1_row(
         ambiguous_objects=ambiguous_objects,
         rejected_hypotheses=rejected_hypotheses,
         object_selection_summary=object_selection_summary,
+        row_reachable_planning_summary=row_reachable_planning_summary,
     )
     _write_json(report_path, report)
     return report
@@ -592,7 +676,9 @@ def select_row_objects(
     workspace: SurveyWorkspace | dict[str, float],
     min_confidence: float = DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
     min_support_count: int = DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
+    min_evidence_score: float = DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
     same_class_nms_radius_m: float = DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
+    workspace_margin_m: float = DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
 ) -> dict[str, Any]:
     if not 0.0 <= min_confidence <= 1.0:
         raise ValueError("min_confidence must be between 0 and 1")
@@ -605,7 +691,9 @@ def select_row_objects(
         workspace=workspace,
         min_confidence=min_confidence,
         min_support_count=min_support_count,
+        min_evidence_score=min_evidence_score,
         same_class_nms_radius_m=same_class_nms_radius_m,
+        workspace_margin_m=workspace_margin_m,
         tentative_min_confidence=DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
         tentative_min_support_count=DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
         tentative_small_bbox_area_px=DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
@@ -622,7 +710,9 @@ def select_row_objects_with_policy(
     workspace: SurveyWorkspace | dict[str, float],
     min_confidence: float = DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
     min_support_count: int = DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
+    min_evidence_score: float = DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
     same_class_nms_radius_m: float = DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
+    workspace_margin_m: float = DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
     tentative_min_confidence: float = DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
     tentative_min_support_count: int = DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
     tentative_small_bbox_area_px: float = DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
@@ -635,8 +725,12 @@ def select_row_objects_with_policy(
         raise ValueError("min_confidence must be between 0 and 1")
     if min_support_count <= 0:
         raise ValueError("min_support_count must be positive")
+    if min_evidence_score <= 0.0:
+        raise ValueError("min_evidence_score must be positive")
     if same_class_nms_radius_m <= 0.0:
         raise ValueError("same_class_nms_radius_m must be positive")
+    if workspace_margin_m < 0.0:
+        raise ValueError("workspace_margin_m must be non-negative")
     if not 0.0 <= tentative_min_confidence <= 1.0:
         raise ValueError("tentative_min_confidence must be between 0 and 1")
     if tentative_min_support_count <= 0:
@@ -670,15 +764,15 @@ def select_row_objects_with_policy(
         if not class_name:
             reasons.append("missing_class")
         position = _position_from_hypothesis(hypothesis)
-        if position is None or not _position_inside_workspace(position, bounds):
+        if position is None or not _position_inside_workspace(position, bounds, margin_m=workspace_margin_m):
             reasons.append("outside_workspace")
+        evidence_score = _stable_evidence_score(hypothesis)
         confidence = float(hypothesis.get("confidence", 0.0))
-        if confidence < min_confidence:
+        if confidence < min_confidence and evidence_score < min_evidence_score:
             reasons.append("low_confidence")
         support_count = int(hypothesis.get("support_count", 0))
         if support_count < min_support_count:
             reasons.append("low_support_count")
-        evidence_score = _stable_evidence_score(hypothesis)
         if reasons:
             _append_rejection_record(
                 rejected_records,
@@ -788,6 +882,8 @@ def select_row_objects_with_policy(
             record["hypothesis"],
             evidence_score=record["evidence_score"],
             duplicate_hypothesis_ids=record["duplicate_hypothesis_ids"],
+            workspace_bounds=bounds,
+            workspace_margin_m=workspace_margin_m,
         )
         for index, record in enumerate(selected)
     ]
@@ -860,7 +956,9 @@ def select_row_objects_with_policy(
         "thresholds": {
             "min_confidence": _round(min_confidence),
             "min_support_count": min_support_count,
+            "min_evidence_score": _round(min_evidence_score),
             "same_class_nms_radius_m": _round(same_class_nms_radius_m),
+            "workspace_margin_m": _round(workspace_margin_m),
             "tentative_min_confidence": _round(tentative_min_confidence),
             "tentative_min_support_count": tentative_min_support_count,
             "tentative_small_bbox_area_px": _round(tentative_small_bbox_area_px),
@@ -903,6 +1001,486 @@ def select_stable_row_objects(
         same_class_nms_radius_m=same_class_nms_radius_m,
     )
     return selection["stable_objects"], selection["object_selection_summary"]
+
+
+def _select_row_capture_view(
+    *,
+    backend: MujocoSurveyBackend,
+    planned: RowPlannedView,
+    workspace: SurveyWorkspace,
+    config: RowConfig,
+) -> tuple[SurveyView | None, dict[str, Any]]:
+    if not config.row_view_collision_search:
+        return planned.view, {
+            "status": "disabled",
+            "strategy": "nominal_row_view_without_candidate_search",
+            "planned_view_id": planned.view.view_id,
+            "selected_candidate_index": 0,
+            "attempt_count": 0,
+            "notes": [
+                "Row view collision-aware candidate search was disabled by configuration.",
+            ],
+        }
+
+    candidate_views, candidate_limit_reached = _row_view_candidate_views(planned, workspace=workspace, config=config)
+    attempts: list[dict[str, Any]] = []
+    rejected_counts = {
+        "ik_failed": 0,
+        "collision": 0,
+        "camera_constraint": 0,
+        "other_failed": 0,
+    }
+    for candidate_index, (candidate_view, candidate_metadata) in enumerate(candidate_views):
+        validation = backend.validate_view_pose(candidate_view)
+        attempt = _row_view_validation_attempt_summary(
+            candidate_index=candidate_index,
+            metadata=candidate_metadata,
+            validation=validation,
+        )
+        attempts.append(attempt)
+        if validation.get("status") == "success":
+            return candidate_view, {
+                "status": "selected",
+                "strategy": "ik_collision_checked_row_view_candidates_v1",
+                "planned_view_id": planned.view.view_id,
+                "selected_candidate_index": candidate_index,
+                "attempt_count": len(attempts),
+                "candidate_limit_reached": candidate_limit_reached,
+                "rejected_counts": rejected_counts,
+                "selected_candidate": candidate_metadata,
+                "attempts": attempts,
+                "notes": [
+                    "Row chose the first candidate whose full MuJoCo IK pose passed robot collision checks.",
+                ],
+            }
+        _accumulate_row_view_rejection(rejected_counts, validation)
+
+    return None, {
+        "status": "failed_no_collision_free_candidate",
+        "strategy": "ik_collision_checked_row_view_candidates_v1",
+        "planned_view_id": planned.view.view_id,
+        "selected_candidate_index": None,
+        "attempt_count": len(attempts),
+        "candidate_limit_reached": candidate_limit_reached,
+        "rejected_counts": rejected_counts,
+        "attempts": attempts,
+        "notes": [
+            "No row view candidate passed IK and full robot collision checks; this planned view was not rendered.",
+        ],
+    }
+
+
+def _select_reachable_row_capture_plan(
+    *,
+    backend: MujocoSurveyBackend,
+    planned_views: tuple[RowPlannedView, ...],
+    workspace: SurveyWorkspace,
+    config: RowConfig,
+) -> tuple[tuple[RowPlannedView, ...], dict[str, dict[str, Any]], dict[str, Any]]:
+    if not config.row_view_collision_search:
+        selections = {
+            planned.view.view_id: {
+                "status": "disabled",
+                "strategy": "nominal_row_view_without_candidate_search",
+                "planned_view_id": planned.view.view_id,
+                "selected_candidate_index": 0,
+                "attempt_count": 0,
+                "notes": [
+                    "Debug-only row view collision-aware planning was disabled; reachability is not guaranteed.",
+                ],
+            }
+            for planned in planned_views
+        }
+        return planned_views, selections, {
+            "strategy": "candidate_level_reachable_row_capture_plan_v1",
+            "enabled": False,
+            "requested_view_count": len(planned_views),
+            "selected_view_count": len(planned_views),
+            "insufficient_candidate_count": 0,
+            "candidate_summaries": [],
+            "notes": [
+                "Reachable row capture planning was disabled by configuration.",
+            ],
+        }
+
+    selected_views: list[RowPlannedView] = []
+    selections: dict[str, dict[str, Any]] = {}
+    candidate_summaries: list[dict[str, Any]] = []
+    for candidate_id, candidate_plans in _group_row_plans_by_candidate(planned_views):
+        selected_for_candidate: list[RowPlannedView] = []
+        rejected_counts = {
+            "ik_failed": 0,
+            "collision": 0,
+            "camera_constraint": 0,
+            "other_failed": 0,
+            "missing_validated_qpos": 0,
+        }
+        failed_attempt_samples: list[dict[str, Any]] = []
+        attempted_pose_keys: set[tuple[float, ...]] = set()
+        candidate_limit_reached = False
+        duplicate_success_count = 0
+        attempt_count = 0
+        requested_count = len(candidate_plans)
+        primary_missed_view_ids: list[str] = []
+        primary_selected_count = 0
+        secondary_selected_count = 0
+
+        def try_select_candidate_view(
+            *,
+            source_planned: RowPlannedView,
+            candidate_index: int,
+            candidate_view: SurveyView,
+            metadata: dict[str, Any],
+            planning_pass: str,
+        ) -> bool:
+            nonlocal attempt_count, duplicate_success_count, primary_selected_count, secondary_selected_count
+            pose_key = _row_view_pose_key(candidate_view)
+            if pose_key in attempted_pose_keys:
+                return False
+            attempted_pose_keys.add(pose_key)
+            validation = backend.validate_view_pose(candidate_view)
+            attempt_count += 1
+            attempt = _row_view_validation_attempt_summary(
+                candidate_index=attempt_count - 1,
+                metadata={
+                    **metadata,
+                    "source_planned_view_id": source_planned.view.view_id,
+                    "source_candidate_index": candidate_index,
+                    "planning_pass": planning_pass,
+                },
+                validation=validation,
+            )
+            if validation.get("status") != "success":
+                _accumulate_row_view_rejection(rejected_counts, validation)
+                if len(failed_attempt_samples) < 8:
+                    failed_attempt_samples.append(attempt)
+                return False
+            actual_qpos = validation.get("actual_qpos")
+            if not isinstance(actual_qpos, list) or not actual_qpos:
+                rejected_counts["missing_validated_qpos"] += 1
+                attempt["status"] = "failed"
+                attempt["message"] = "Validated row candidate did not include actual_qpos for reproducible capture."
+                if len(failed_attempt_samples) < 8:
+                    failed_attempt_samples.append(attempt)
+                return False
+            if _duplicates_selected_camera_position(candidate_view, selected_for_candidate):
+                duplicate_success_count += 1
+                return False
+
+            local_index = len(selected_for_candidate)
+            selected_view_id = f"row_{candidate_id}_{local_index:02d}"
+            selected_view = _copy_row_survey_view(
+                candidate_view,
+                view_id=selected_view_id,
+                grid_row=source_planned.view.grid_row,
+                grid_col=local_index,
+                fixed_pose_source=ROW_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
+                fixed_qpos=tuple(float(value) for value in actual_qpos),
+            )
+            selected_planned = RowPlannedView(
+                candidate_id=candidate_id,
+                candidate_rough_position_world=source_planned.candidate_rough_position_world,
+                approach_angle_rad=float(metadata["approach_angle_rad"]),
+                view=selected_view,
+            )
+            selected_for_candidate.append(selected_planned)
+            if planning_pass == "primary_slot":
+                primary_selected_count += 1
+            else:
+                secondary_selected_count += 1
+            selections[selected_view_id] = {
+                "status": "selected",
+                "strategy": "candidate_level_reachable_row_capture_plan_v1",
+                "planned_view_id": selected_view_id,
+                "source_planned_view_id": source_planned.view.view_id,
+                "selected_candidate_index": attempt_count - 1,
+                "attempt_count": attempt_count,
+                "candidate_limit_reached": candidate_limit_reached,
+                "planning_pass": planning_pass,
+                "selected_candidate": {
+                    **metadata,
+                    "source_planned_view_id": source_planned.view.view_id,
+                    "source_candidate_index": candidate_index,
+                    "planning_pass": planning_pass,
+                },
+                "validation": attempt,
+                "notes": [
+                    "Row planned this capture only after the full MuJoCo IK pose passed robot collision checks.",
+                ],
+            }
+            return True
+
+        for source_planned in candidate_plans:
+            candidate_views, limit_reached = _row_view_candidate_views(
+                source_planned,
+                workspace=workspace,
+                config=config,
+            )
+            candidate_limit_reached = candidate_limit_reached or limit_reached
+            slot_selected = False
+            for candidate_index, (candidate_view, metadata) in enumerate(candidate_views):
+                slot_selected = try_select_candidate_view(
+                    source_planned=source_planned,
+                    candidate_index=candidate_index,
+                    candidate_view=candidate_view,
+                    metadata=metadata,
+                    planning_pass="primary_slot",
+                )
+                if slot_selected:
+                    break
+            if not slot_selected:
+                primary_missed_view_ids.append(source_planned.view.view_id)
+            if len(selected_for_candidate) >= requested_count:
+                break
+
+        if len(selected_for_candidate) < requested_count:
+            for source_planned in candidate_plans:
+                candidate_views, limit_reached = _row_view_candidate_views(
+                    source_planned,
+                    workspace=workspace,
+                    config=config,
+                )
+                candidate_limit_reached = candidate_limit_reached or limit_reached
+                for candidate_index, (candidate_view, metadata) in enumerate(candidate_views):
+                    selected = try_select_candidate_view(
+                        source_planned=source_planned,
+                        candidate_index=candidate_index,
+                        candidate_view=candidate_view,
+                        metadata=metadata,
+                        planning_pass="secondary_fill",
+                    )
+                    if selected and len(selected_for_candidate) >= requested_count:
+                        break
+                if len(selected_for_candidate) >= requested_count:
+                    break
+
+        selected_views.extend(selected_for_candidate)
+        candidate_summaries.append(
+            {
+                "candidate_id": candidate_id,
+                "status": (
+                    "selected_requested_view_count"
+                    if len(selected_for_candidate) >= requested_count
+                    else "insufficient_reachable_views"
+                ),
+                "requested_view_count": requested_count,
+                "selected_view_count": len(selected_for_candidate),
+                "primary_selected_view_count": primary_selected_count,
+                "secondary_selected_view_count": secondary_selected_count,
+                "primary_missed_view_ids": primary_missed_view_ids,
+                "attempt_count": attempt_count,
+                "unique_pose_attempt_count": len(attempted_pose_keys),
+                "duplicate_success_count": duplicate_success_count,
+                "candidate_limit_reached": candidate_limit_reached,
+                "rejected_counts": rejected_counts,
+                "selected_view_ids": [planned.view.view_id for planned in selected_for_candidate],
+                "failed_attempt_samples": failed_attempt_samples,
+            }
+        )
+
+    insufficient_count = sum(
+        1 for summary in candidate_summaries if summary["status"] == "insufficient_reachable_views"
+    )
+    return tuple(selected_views), selections, {
+        "strategy": "candidate_level_reachable_row_capture_plan_v1",
+        "enabled": True,
+        "requested_view_count": len(planned_views),
+        "selected_view_count": len(selected_views),
+        "candidate_count": len(candidate_summaries),
+        "insufficient_candidate_count": insufficient_count,
+        "candidate_limit_reached_count": sum(1 for summary in candidate_summaries if summary["candidate_limit_reached"]),
+        "candidate_summaries": candidate_summaries,
+        "notes": [
+            "Only IK/collision-validated row views are included in planned_views and rendered.",
+            "If selected_view_count is lower than requested_view_count, the report is partial instead of rendering an unreachable row view.",
+        ],
+    }
+
+
+def _row_view_candidate_views(
+    planned: RowPlannedView,
+    *,
+    workspace: SurveyWorkspace,
+    config: RowConfig,
+) -> tuple[list[tuple[SurveyView, dict[str, Any]]], bool]:
+    target = planned.candidate_rough_position_world
+    look_at = (
+        target[0],
+        target[1],
+        min(workspace.max_camera_z_m, workspace.bottom_z_m + config.look_at_height_offset_m),
+    )
+    candidates: list[tuple[SurveyView, dict[str, Any]]] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    for angle_offset in config.row_view_candidate_angle_offsets_rad:
+        angle = _normalize_angle(planned.approach_angle_rad + angle_offset)
+        for z_offset in config.row_view_candidate_camera_z_offsets_m:
+            camera_z = config.camera_z_m + z_offset
+            for standoff_multiplier in config.row_view_candidate_standoff_multipliers:
+                standoff = config.row_standoff_m * standoff_multiplier
+                camera_position = (
+                    target[0] + math.cos(angle) * standoff,
+                    target[1] + math.sin(angle) * standoff,
+                    camera_z,
+                )
+                if not _camera_position_is_valid(camera_position, target, workspace=workspace, config=config):
+                    continue
+                key = (
+                    _round(camera_position[0]),
+                    _round(camera_position[1]),
+                    _round(camera_position[2]),
+                    _round(angle),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                base_transform = _make_look_at_transform(camera_position, look_at)
+                for roll_offset in config.row_view_candidate_roll_offsets_rad:
+                    view = SurveyView(
+                        view_id=planned.view.view_id,
+                        grid_row=planned.view.grid_row,
+                        grid_col=planned.view.grid_col,
+                        camera_name=planned.view.camera_name,
+                        desired_camera_position_world=_round_vector(camera_position),
+                        look_at_world=_round_vector(look_at),
+                        T_world_camera=_roll_camera_transform(base_transform, roll_offset),
+                        scan_layer=planned.view.scan_layer,
+                        scan_grid_size=planned.view.scan_grid_size,
+                    )
+                    metadata = {
+                        "view_id": planned.view.view_id,
+                        "angle_offset_rad": _round(angle_offset),
+                        "roll_offset_rad": _round(roll_offset),
+                        "approach_angle_rad": _round(angle),
+                        "standoff_multiplier": _round(standoff_multiplier),
+                        "standoff_m": _round(standoff),
+                        "camera_z_offset_m": _round(z_offset),
+                        "desired_camera_position_world": [_round(value) for value in view.desired_camera_position_world],
+                        "look_at_world": [_round(value) for value in view.look_at_world],
+                    }
+                    candidates.append((view, metadata))
+                    if (
+                        config.row_view_candidate_max_attempts is not None
+                        and len(candidates) >= config.row_view_candidate_max_attempts
+                    ):
+                        return candidates, True
+    return candidates, False
+
+
+def _group_row_plans_by_candidate(
+    planned_views: tuple[RowPlannedView, ...],
+) -> list[tuple[str, list[RowPlannedView]]]:
+    groups: list[tuple[str, list[RowPlannedView]]] = []
+    by_id: dict[str, list[RowPlannedView]] = {}
+    for planned in planned_views:
+        if planned.candidate_id not in by_id:
+            by_id[planned.candidate_id] = []
+            groups.append((planned.candidate_id, by_id[planned.candidate_id]))
+        by_id[planned.candidate_id].append(planned)
+    return groups
+
+
+def _row_view_pose_key(view: SurveyView) -> tuple[float, ...]:
+    return tuple(
+        _round(value)
+        for value in (
+            *view.desired_camera_position_world,
+            *(component for row in view.T_world_camera[:3] for component in row[:3]),
+        )
+    )
+
+
+def _duplicates_selected_camera_position(
+    view: SurveyView,
+    selected_plans: list[RowPlannedView],
+    *,
+    min_distance_m: float = 0.025,
+) -> bool:
+    return any(
+        _xy_distance(view.desired_camera_position_world, selected.view.desired_camera_position_world) < min_distance_m
+        for selected in selected_plans
+    )
+
+
+def _copy_row_survey_view(
+    view: SurveyView,
+    *,
+    view_id: str,
+    grid_row: int,
+    grid_col: int,
+    fixed_pose_source: str | None = None,
+    fixed_qpos: tuple[float, ...] | None = None,
+) -> SurveyView:
+    return SurveyView(
+        view_id=view_id,
+        grid_row=grid_row,
+        grid_col=grid_col,
+        camera_name=view.camera_name,
+        desired_camera_position_world=view.desired_camera_position_world,
+        look_at_world=view.look_at_world,
+        T_world_camera=view.T_world_camera,
+        scan_layer=view.scan_layer,
+        scan_grid_size=view.scan_grid_size,
+        fixed_pose_source=fixed_pose_source if fixed_pose_source is not None else view.fixed_pose_source,
+        fixed_qpos=fixed_qpos if fixed_qpos is not None else view.fixed_qpos,
+    )
+
+
+def _row_view_validation_attempt_summary(
+    *,
+    candidate_index: int,
+    metadata: dict[str, Any],
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    collision = validation.get("collision") if isinstance(validation.get("collision"), dict) else {}
+    ik = validation.get("ik") if isinstance(validation.get("ik"), dict) else {}
+    return {
+        "candidate_index": candidate_index,
+        "status": validation.get("status"),
+        "message": validation.get("message"),
+        "candidate": metadata,
+        "actual_camera_position_world": validation.get("actual_camera_position_world"),
+        "ik": {
+            "success": ik.get("success"),
+            "iterations": ik.get("iterations"),
+            "position_error_m": ik.get("position_error_m"),
+            "orientation_error_rad": ik.get("orientation_error_rad"),
+        },
+        "collision": {
+            "collision_free": collision.get("collision_free"),
+            "robot_scene_contact_count": collision.get("robot_scene_contact_count"),
+            "robot_self_contact_count": collision.get("robot_self_contact_count"),
+            "min_robot_scene_distance_m": collision.get("min_robot_scene_distance_m"),
+            "min_robot_self_distance_m": collision.get("min_robot_self_distance_m"),
+            "robot_scene_contacts": collision.get("robot_scene_contacts", [])[:3],
+            "robot_self_contacts": collision.get("robot_self_contacts", [])[:3],
+        },
+    }
+
+
+def _accumulate_row_view_rejection(rejected_counts: dict[str, int], validation: dict[str, Any]) -> None:
+    ik = validation.get("ik") if isinstance(validation.get("ik"), dict) else {}
+    collision = validation.get("collision") if isinstance(validation.get("collision"), dict) else {}
+    message = str(validation.get("message") or "")
+    if ik and not ik.get("success", False):
+        rejected_counts["ik_failed"] += 1
+    elif collision and not collision.get("collision_free", True):
+        rejected_counts["collision"] += 1
+    elif "camera" in message and ("inside" in message or "opening" in message or "workspace" in message):
+        rejected_counts["camera_constraint"] += 1
+    else:
+        rejected_counts["other_failed"] += 1
+
+
+def _row_view_selection_failed_result(planned: RowPlannedView, row_view_selection: dict[str, Any]) -> dict[str, Any]:
+    result = _planned_row_view_result(planned)
+    result["status"] = "failed"
+    result["message"] = "No IK/collision-safe row view candidate was available; row capture was not rendered."
+    result["candidate_id"] = planned.candidate_id
+    result["candidate_rough_position_world"] = [
+        _round(value) for value in planned.candidate_rough_position_world
+    ]
+    result["row_view_selection"] = row_view_selection
+    return result
 
 
 def _append_rejection_record(
@@ -1463,7 +2041,21 @@ def _row_observations_from_capture(
     for local_index, survey_observation in enumerate(survey_observations):
         if survey_observation.rough_position_world is None:
             continue
-        position = survey_observation.rough_position_world
+        ground_position = estimate_detection_ground_position(
+            bbox_xyxy=survey_observation.bbox_xyxy,
+            depth=None,
+            T_world_camera=camera_transform,
+            image_width=config.image_width,
+            image_height=config.image_height,
+            fovy_rad=fovy_rad,
+            ground_z_m=workspace.bottom_z_m,
+        )
+        if ground_position is None:
+            position = survey_observation.rough_position_world
+            position_source = "close RGB-D YOLO bbox depth projection fallback"
+        else:
+            position = ground_position
+            position_source = "close RGB bbox ground-plane projection"
         yaw_rad, yaw_confidence, extent_xy_m = _estimate_yaw_from_depth(
             bbox_xyxy=survey_observation.bbox_xyxy,
             depth=depth,
@@ -1493,6 +2085,7 @@ def _row_observations_from_capture(
                 yaw_confidence=yaw_confidence,
                 extent_xy_m=extent_xy_m,
                 T_world_object=_make_yaw_transform(position, yaw_for_transform),
+                position_source=position_source,
             )
         )
     return observations
@@ -1613,7 +2206,7 @@ def _row_hypothesis_payload(index: int, cluster: list[RowObservation]) -> dict[s
         "best_image_path": best.image_path,
         "best_bbox_xyxy": [_round(value) for value in best.bbox_xyxy],
         "pose_quality": {
-            "position_source": "close RGB-D YOLO bbox depth projection",
+            "position_source": _row_position_source(cluster),
             "yaw_source": "depth_pca" if yaw_rad is not None else "unresolved_fallback_zero_in_T_world_object",
             "yaw_confidence": _round(yaw_confidence),
             "multi_candidate_merge": len(source_candidates) > 1,
@@ -1625,12 +2218,23 @@ def _row_hypothesis_payload(index: int, cluster: list[RowObservation]) -> dict[s
     }
 
 
+def _row_position_source(cluster: list[RowObservation]) -> str:
+    sources = sorted({observation.position_source for observation in cluster if observation.position_source})
+    if not sources:
+        return "unknown"
+    if len(sources) == 1:
+        return sources[0]
+    return "mixed: " + ", ".join(sources)
+
+
 def _stable_object_payload(
     index: int,
     hypothesis: dict[str, Any],
     *,
     evidence_score: float,
     duplicate_hypothesis_ids: list[str],
+    workspace_bounds: dict[str, float],
+    workspace_margin_m: float,
 ) -> dict[str, Any]:
     position = _position_from_hypothesis(hypothesis)
     if position is None:
@@ -1648,6 +2252,17 @@ def _stable_object_payload(
         for view_id in hypothesis.get("supporting_row_views", [])
         if view_id is not None
     ]
+    within_nominal_workspace = _position_inside_workspace(position, workspace_bounds, margin_m=0.0)
+    pose_quality = dict(hypothesis.get("pose_quality", {}))
+    notes = [
+        "Stable object selected from close RGB-D row hypotheses after evidence filtering, same-class merging, and cross-class ambiguity checks.",
+    ]
+    if not within_nominal_workspace:
+        pose_quality["workspace_bounds_status"] = "within_configured_selection_margin"
+        pose_quality["workspace_margin_m"] = _round(workspace_margin_m)
+        notes.append(
+            "Position is outside nominal tank XY bounds but within the configured row selection margin; raw RGB-D estimate is retained."
+        )
     return {
         "object_id": f"row_object_{index + 1:03d}",
         "source_hypothesis_id": hypothesis.get("hypothesis_id"),
@@ -1668,11 +2283,13 @@ def _stable_object_payload(
             "quality": "stable",
             "from_close_rgbd": True,
             "same_class_duplicates_suppressed": len(duplicate_hypothesis_ids),
+            "workspace_filter": {
+                "within_nominal_workspace": within_nominal_workspace,
+                "workspace_margin_m": _round(workspace_margin_m),
+            },
         },
-        "pose_quality": hypothesis.get("pose_quality", {}),
-        "notes": [
-            "Stable object selected from close RGB-D row hypotheses after evidence filtering, same-class merging, and cross-class ambiguity checks.",
-        ],
+        "pose_quality": pose_quality,
+        "notes": notes,
     }
 
 
@@ -1721,10 +2338,15 @@ def _workspace_bounds(workspace: SurveyWorkspace | dict[str, float]) -> dict[str
     return {key: float(workspace[key]) for key in ("x_min", "x_max", "y_min", "y_max", "bottom_z_m", "tank_opening_z_m")}
 
 
-def _position_inside_workspace(position: tuple[float, float, float], bounds: dict[str, float]) -> bool:
+def _position_inside_workspace(
+    position: tuple[float, float, float],
+    bounds: dict[str, float],
+    *,
+    margin_m: float = 0.0,
+) -> bool:
     return (
-        bounds["x_min"] <= position[0] <= bounds["x_max"]
-        and bounds["y_min"] <= position[1] <= bounds["y_max"]
+        bounds["x_min"] - margin_m <= position[0] <= bounds["x_max"] + margin_m
+        and bounds["y_min"] - margin_m <= position[1] <= bounds["y_max"] + margin_m
     )
 
 
@@ -1746,7 +2368,9 @@ def _stable_selection_empty_metadata(config: RowConfig) -> dict[str, Any]:
         "thresholds": {
             "min_confidence": _round(config.stable_object_min_confidence),
             "min_support_count": config.stable_object_min_support_count,
+            "min_evidence_score": _round(config.stable_object_min_evidence_score),
             "same_class_nms_radius_m": _round(config.stable_object_same_class_nms_radius_m),
+            "workspace_margin_m": _round(config.stable_object_workspace_margin_m),
             "tentative_min_confidence": _round(config.tentative_object_min_confidence),
             "tentative_min_support_count": config.tentative_object_min_support_count,
             "tentative_small_bbox_area_px": _round(config.tentative_object_small_bbox_area_px),
@@ -1858,8 +2482,9 @@ def _report_payload(
     ambiguous_objects: list[dict[str, Any]],
     rejected_hypotheses: list[dict[str, Any]],
     object_selection_summary: dict[str, Any],
+    row_reachable_planning_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": "task1_row_report_v1",
         "stage": "row",
         "status": status,
@@ -1883,6 +2508,8 @@ def _report_payload(
         "survey_candidates": [candidate.to_dict() for candidate in survey_report.candidates],
         "planned_views": [planned.to_dict() for planned in planned_views],
         "views": view_results,
+        "row_reachable_planning_summary": row_reachable_planning_summary,
+        "row_view_selection_summary": _row_view_selection_summary(view_results),
         "row_observations": row_observations,
         "object_hypotheses": object_hypotheses,
         "stable_objects": stable_objects,
@@ -1898,6 +2525,49 @@ def _report_payload(
             "Tentative and ambiguous objects are retained for explicit follow-up instead of being silently filtered.",
             "Object hypotheses are retained as a recall-first diagnostic pool; unresolved yaw is explicitly marked.",
         ],
+    }
+    return payload
+
+
+def _row_view_selection_summary(view_results: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_count = 0
+    selected_alternative_count = 0
+    failed_no_safe_candidate_count = 0
+    total_attempt_count = 0
+    collision_rejection_count = 0
+    ik_rejection_count = 0
+    candidate_limit_reached_count = 0
+    for view_result in view_results:
+        selection = view_result.get("row_view_selection")
+        if not isinstance(selection, dict):
+            continue
+        total_attempt_count += int(selection.get("attempt_count", 0))
+        rejected = selection.get("rejected_counts")
+        if isinstance(rejected, dict):
+            collision_rejection_count += int(rejected.get("collision", 0))
+            ik_rejection_count += int(rejected.get("ik_failed", 0))
+        if selection.get("candidate_limit_reached"):
+            candidate_limit_reached_count += 1
+        if selection.get("status") == "selected":
+            selected_count += 1
+            if int(selection.get("selected_candidate_index") or 0) > 0:
+                selected_alternative_count += 1
+        elif selection.get("status") == "failed_no_collision_free_candidate":
+            failed_no_safe_candidate_count += 1
+    return {
+        "strategy": "ik_collision_checked_row_view_candidates_v1",
+        "enabled": any(
+            isinstance(view.get("row_view_selection"), dict)
+            and view["row_view_selection"].get("status") != "disabled"
+            for view in view_results
+        ),
+        "selected_count": selected_count,
+        "selected_alternative_count": selected_alternative_count,
+        "failed_no_safe_candidate_count": failed_no_safe_candidate_count,
+        "total_attempt_count": total_attempt_count,
+        "collision_rejection_count": collision_rejection_count,
+        "ik_rejection_count": ik_rejection_count,
+        "candidate_limit_reached_count": candidate_limit_reached_count,
     }
 
 
@@ -2037,6 +2707,36 @@ def _make_look_at_transform(
         (_round(right[0]), _round(up[0]), _round(camera_z[0]), _round(camera_position[0])),
         (_round(right[1]), _round(up[1]), _round(camera_z[1]), _round(camera_position[1])),
         (_round(right[2]), _round(up[2]), _round(camera_z[2]), _round(camera_position[2])),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+
+def _roll_camera_transform(
+    transform: tuple[tuple[float, float, float, float], ...],
+    roll_rad: float,
+) -> tuple[tuple[float, float, float, float], ...]:
+    if abs(roll_rad) <= 1e-12:
+        return transform
+    right = (transform[0][0], transform[1][0], transform[2][0])
+    up = (transform[0][1], transform[1][1], transform[2][1])
+    camera_z = (transform[0][2], transform[1][2], transform[2][2])
+    position = (transform[0][3], transform[1][3], transform[2][3])
+    cos_roll = math.cos(roll_rad)
+    sin_roll = math.sin(roll_rad)
+    rolled_right = (
+        right[0] * cos_roll + up[0] * sin_roll,
+        right[1] * cos_roll + up[1] * sin_roll,
+        right[2] * cos_roll + up[2] * sin_roll,
+    )
+    rolled_up = (
+        -right[0] * sin_roll + up[0] * cos_roll,
+        -right[1] * sin_roll + up[1] * cos_roll,
+        -right[2] * sin_roll + up[2] * cos_roll,
+    )
+    return (
+        (_round(rolled_right[0]), _round(rolled_up[0]), _round(camera_z[0]), _round(position[0])),
+        (_round(rolled_right[1]), _round(rolled_up[1]), _round(camera_z[1]), _round(position[1])),
+        (_round(rolled_right[2]), _round(rolled_up[2]), _round(camera_z[2]), _round(position[2])),
         (0.0, 0.0, 0.0, 1.0),
     )
 

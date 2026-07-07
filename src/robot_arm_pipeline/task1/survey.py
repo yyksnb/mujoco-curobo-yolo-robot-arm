@@ -1124,7 +1124,9 @@ class MujocoSurveyBackend:
 
     def validate_view_pose(self, view: SurveyView) -> dict[str, Any]:
         if view.fixed_qpos is not None:
-            return self._validate_fixed_survey_view_pose(view)
+            if view.fixed_pose_source == FIXED_MIXED_4X4_POSE_SOURCE:
+                return self._validate_fixed_survey_view_pose(view)
+            return self._validate_fixed_camera_view_pose(view)
         if self._use_reachable_survey_pose_search(view):
             return self._validate_reachable_survey_view_pose(view)
 
@@ -1203,6 +1205,68 @@ class MujocoSurveyBackend:
             result["status"] = "failed"
             result["message"] = str(exc)
             return result, []
+
+    def _validate_fixed_camera_view_pose(self, view: SurveyView) -> dict[str, Any]:
+        result = _planned_view_result(view)
+        if view.fixed_qpos is None:
+            result["status"] = "failed"
+            result["message"] = "Fixed camera view is missing fixed_qpos."
+            return result
+
+        data = self._data()
+        mujoco = self._mujoco()
+        model = self._model()
+        np = _import_numpy()
+        qpos_count = min(len(view.fixed_qpos), int(model.nq))
+        try:
+            data.qpos[:qpos_count] = view.fixed_qpos[:qpos_count]
+            mujoco.mj_forward(model, data)
+            actual_position = self._camera_position()
+            actual_transform = self._camera_transform()
+            target_position = np.asarray(view.desired_camera_position_world, dtype=float)
+            current_position = np.asarray(actual_position, dtype=float)
+            target_rotation = np.asarray([row[:3] for row in view.T_world_camera[:3]], dtype=float)
+            current_rotation = np.asarray([row[:3] for row in actual_transform[:3]], dtype=float)
+            position_error = float(np.linalg.norm(target_position - current_position))
+            orientation_error = float(np.linalg.norm(_orientation_error(np, current_rotation, target_rotation)))
+            collision = self._collision_report()
+
+            result["resolved_camera_name"] = self.resolved_camera_name
+            result["actual_camera_position_world"] = [_round(value) for value in actual_position]
+            result["actual_T_world_camera"] = [list(row) for row in actual_transform]
+            result["actual_qpos"] = [_round(float(value)) for value in data.qpos]
+            result["camera_fovy_rad"] = _round(self._camera_fovy_rad())
+            result["pose_search"] = {
+                "strategy": "fixed_qpos_from_validated_camera_pose",
+                "source": view.fixed_pose_source,
+                "found": True,
+            }
+            result["ik"] = {
+                "success": (
+                    position_error <= self.config.ik_position_tolerance_m
+                    and orientation_error <= self.config.ik_orientation_tolerance_rad
+                ),
+                "source": "fixed_qpos_from_validated_camera_pose",
+                "position_error_m": _round(position_error),
+                "orientation_error_rad": _round(orientation_error),
+            }
+            result["collision"] = collision
+            self.workspace.validate_camera_position(actual_position)
+            if not result["ik"]["success"]:
+                result["status"] = "failed"
+                result["message"] = "Fixed qpos camera pose no longer matches the requested wrist-camera pose."
+                return result
+            if not collision["collision_free"]:
+                result["status"] = "failed"
+                result["message"] = "Fixed qpos camera pose was rejected by robot collision check."
+                return result
+            result["status"] = "success"
+            result["message"] = "Validated fixed collision-free camera pose."
+            return result
+        except Exception as exc:
+            result["status"] = "failed"
+            result["message"] = str(exc)
+            return result
 
     def _validate_fixed_survey_view_pose(self, view: SurveyView) -> dict[str, Any]:
         result = _planned_view_result(view)

@@ -70,10 +70,18 @@ from robot_arm_pipeline.task1.row import (  # noqa: E402
     DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M,
     DEFAULT_ROW_STANDOFF_M,
     DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD,
+    DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD,
+    DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M,
+    DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS,
+    DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD,
+    DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS,
+    DEFAULT_ROW_VIEW_COLLISION_SEARCH,
     DEFAULT_ROW_VIEWS_PER_CANDIDATE,
     DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
+    DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
     DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
     DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
+    DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
     DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
     DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
     DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
@@ -535,6 +543,42 @@ def main() -> None:
         help="World XY radius for fusing close RGB-D row observations into object hypotheses.",
     )
     parser.add_argument(
+        "--disable-row-view-collision-search",
+        action="store_true",
+        default=not DEFAULT_ROW_VIEW_COLLISION_SEARCH,
+        help="Debug only: render nominal row views without row-stage IK/collision-checked candidate selection.",
+    )
+    parser.add_argument(
+        "--row-view-candidate-standoff-multipliers",
+        type=_parse_float_tuple,
+        default=DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS,
+        help="Comma-separated standoff multipliers tried by row-stage collision-safe view selection.",
+    )
+    parser.add_argument(
+        "--row-view-candidate-camera-z-offsets",
+        type=_parse_float_tuple,
+        default=DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M,
+        help="Comma-separated camera-z offsets tried by row-stage collision-safe view selection.",
+    )
+    parser.add_argument(
+        "--row-view-candidate-angle-offsets-deg",
+        type=_parse_float_tuple,
+        default=tuple(value * 180.0 / 3.141592653589793 for value in DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD),
+        help="Comma-separated angle offsets in degrees tried by row-stage collision-safe view selection.",
+    )
+    parser.add_argument(
+        "--row-view-candidate-roll-offsets-deg",
+        type=_parse_float_tuple,
+        default=tuple(value * 180.0 / 3.141592653589793 for value in DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD),
+        help="Comma-separated camera roll offsets in degrees tried by row-stage collision-safe view selection.",
+    )
+    parser.add_argument(
+        "--row-view-candidate-max-attempts",
+        type=int,
+        default=DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS,
+        help="Maximum IK/collision validation attempts per planned row view.",
+    )
+    parser.add_argument(
         "--stable-object-min-confidence",
         type=float,
         default=DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
@@ -547,10 +591,22 @@ def main() -> None:
         help="Minimum close-view observation support count for a row hypothesis to enter stable_objects.",
     )
     parser.add_argument(
+        "--stable-object-min-evidence-score",
+        type=float,
+        default=DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
+        help="Minimum multi-view evidence score that can compensate for slightly low row confidence.",
+    )
+    parser.add_argument(
         "--stable-object-same-class-nms-radius",
         type=float,
         default=DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
         help="World XY same-class suppression radius for stable row objects.",
+    )
+    parser.add_argument(
+        "--stable-object-workspace-margin",
+        type=float,
+        default=DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
+        help="XY tolerance for accepting close RGB-D row object estimates near tank workspace bounds.",
     )
     parser.add_argument(
         "--tentative-object-min-confidence",
@@ -797,9 +853,21 @@ def main() -> None:
             look_at_height_offset_m=args.row_look_at_height_offset,
             entry_side=args.row_entry_side,
             row_cluster_radius_m=args.row_cluster_radius,
+            row_view_collision_search=not args.disable_row_view_collision_search,
+            row_view_candidate_standoff_multipliers=args.row_view_candidate_standoff_multipliers,
+            row_view_candidate_camera_z_offsets_m=args.row_view_candidate_camera_z_offsets,
+            row_view_candidate_angle_offsets_rad=tuple(
+                value * 3.141592653589793 / 180.0 for value in args.row_view_candidate_angle_offsets_deg
+            ),
+            row_view_candidate_roll_offsets_rad=tuple(
+                value * 3.141592653589793 / 180.0 for value in args.row_view_candidate_roll_offsets_deg
+            ),
+            row_view_candidate_max_attempts=args.row_view_candidate_max_attempts,
             stable_object_min_confidence=args.stable_object_min_confidence,
             stable_object_min_support_count=args.stable_object_min_support_count,
+            stable_object_min_evidence_score=args.stable_object_min_evidence_score,
             stable_object_same_class_nms_radius_m=args.stable_object_same_class_nms_radius,
+            stable_object_workspace_margin_m=args.stable_object_workspace_margin,
             tentative_object_min_confidence=args.tentative_object_min_confidence,
             tentative_object_min_support_count=args.tentative_object_min_support_count,
             tentative_object_small_bbox_area_px=args.tentative_object_small_bbox_area,
