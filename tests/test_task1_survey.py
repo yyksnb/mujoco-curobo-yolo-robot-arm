@@ -33,10 +33,19 @@ from robot_arm_pipeline.task1.row import (
     _select_row_capture_view,
 )
 from robot_arm_pipeline.task1.final import (
+    DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
     DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
+    DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY,
+    DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY,
+    DEFAULT_FINAL_ENTRY_PATH_POLICY,
+    DEFAULT_FINAL_ENTRY_PORTAL_MODES,
     DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
+    FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
     FinalTarget,
     FinalConfig,
+    _capture_first_reachable_candidate,
+    _overall_status,
+    _final_reachable_planning_summary,
     _matched_observations,
     build_final_plan,
     load_task1_row_report,
@@ -972,15 +981,33 @@ def test_final_plan_consumes_layered_row_report(tmp_path: Path) -> None:
         assert item.entry_views[0].desired_camera_position_world[2] == pytest.approx(
             workspace.max_camera_z_m - DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M
         )
+        assert item.entry_views[0].look_at_world[0] == pytest.approx(item.entry_views[0].desired_camera_position_world[0])
+        assert item.entry_views[0].look_at_world[1] == pytest.approx(item.entry_views[0].desired_camera_position_world[1])
+        assert item.entry_views[0].look_at_world[2] == pytest.approx(workspace.bottom_z_m)
+        assert item.entry_views[1].desired_camera_position_world[0] == pytest.approx(
+            item.entry_views[0].desired_camera_position_world[0]
+        )
+        assert item.entry_views[1].desired_camera_position_world[1] == pytest.approx(
+            item.entry_views[0].desired_camera_position_world[1]
+        )
+        lateral_z = position[2] + (item.entry_views[0].desired_camera_position_world[2] - position[2]) / 2.0
+        assert item.entry_views[1].desired_camera_position_world[2] == pytest.approx(lateral_z)
+        assert item.entry_views[-1].desired_camera_position_world[0] == pytest.approx(position[0])
+        assert item.entry_views[-1].desired_camera_position_world[1] == pytest.approx(position[1])
         assert item.entry_views[-1].desired_camera_position_world[2] > position[2]
+        assert item.entry_views[-1].look_at_world == pytest.approx(item.view.look_at_world)
         assert len(item.view_candidates) >= 2
         assert item.view_candidates[0].view.view_id == item.view.view_id
         assert item.view_candidates[0].standoff_multiplier == pytest.approx(1.0)
+        assert item.view_candidates[0].entry_portal_mode == "final-vertical"
         assert any(
             candidate.standoff_multiplier == pytest.approx(DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1])
             for candidate in item.view_candidates
         )
         assert all(candidate.entry_views for candidate in item.view_candidates)
+        assert all("camera_z_offset_m" in candidate.to_dict() for candidate in item.view_candidates)
+        assert all("roll_offset_deg" in candidate.to_dict() for candidate in item.view_candidates)
+        assert all("entry_portal_mode" in candidate.to_dict() for candidate in item.view_candidates)
 
 
 def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) -> None:
@@ -1027,6 +1054,191 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
         candidate["standoff_multiplier"] == DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1]
         for candidate in report["planned_captures"][0]["view_candidates"]
     )
+    assert "final_view_camera_z_offsets_m" in report["final_config"]
+    assert "final_view_roll_offsets_deg" in report["final_config"]
+    assert report["final_config"]["entry_portal_modes"] == list(DEFAULT_FINAL_ENTRY_PORTAL_MODES)
+    assert report["final_config"]["entry_orientation_policy"] == DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY
+    assert (
+        report["final_config"]["entry_lateral_orientation_policy"]
+        == DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY
+    )
+    assert report["final_config"]["entry_path_policy"] == DEFAULT_FINAL_ENTRY_PATH_POLICY
+    assert report["final_config"]["desired_stable_object_count"] == DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT
+    assert report["planned_captures"][0]["view_candidates"][0]["entry_portal_mode"] == "final-vertical"
+    assert report["final_reachable_planning_summary"]["strategy"] == "whole_arm_final_view_candidate_selection_v1"
+
+
+def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    row_report_path = _write_row_report(tmp_path, layout_path)
+    row_report = load_task1_row_report(row_report_path)
+    config = FinalConfig(
+        run_yolo=False,
+        camera_z_m=0.30,
+        standoff_m=0.12,
+        min_oblique_distance_m=0.06,
+        entry_validation_samples=1,
+        final_view_angle_offsets_deg=(0.0, 30.0, -30.0),
+        final_view_standoff_multipliers=(1.0,),
+        final_view_camera_z_offsets_m=(0.0,),
+        final_view_roll_offsets_deg=(0.0,),
+        centerline_view_angle_offsets_deg=(),
+    )
+    _, planned = build_final_plan(row_report, config)
+    backend = _FakeFinalCaptureBackend(("collision", "success", "collision", "success", "success"))
+
+    result = _capture_first_reachable_candidate(
+        backend=backend,
+        planned=planned[0],
+        images_dir=tmp_path / "images",
+        depth_dir=tmp_path / "depth",
+        yolo_dir=tmp_path / "yolo",
+        annotated_dir=tmp_path / "annotated",
+        tiles_dir=tmp_path / "tiles",
+        config=config,
+    )
+
+    assert result["status"] == "captured_yolo_skipped"
+    assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
+        "entry_validation_failed",
+        "final_pose_failed",
+        "captured",
+    ]
+    assert result["selected_view_candidate"]["view"]["fixed_pose_source"] == FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE
+    assert backend.captured_view is not None
+    assert backend.captured_view.fixed_pose_source == FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE
+    assert backend.captured_view.fixed_qpos is not None
+    summary = _final_reachable_planning_summary(planned_captures=(planned[0],), object_captures=[result])
+    assert summary["attempt_status_counts"] == {
+        "entry_validation_failed": 1,
+        "final_pose_failed": 1,
+        "captured": 1,
+    }
+    assert summary["rejection_counts"]["entry_collision"] == 1
+    assert summary["rejection_counts"]["final_collision"] == 1
+    assert summary["selected_fixed_qpos_count"] == 1
+
+
+def test_final_capture_continues_after_unconfirmed_safe_candidate(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    row_report_path = _write_row_report(tmp_path, layout_path)
+    row_report = load_task1_row_report(row_report_path)
+    config = FinalConfig(
+        camera_z_m=0.30,
+        standoff_m=0.12,
+        min_oblique_distance_m=0.06,
+        entry_validation_samples=1,
+        final_view_angle_offsets_deg=(0.0, 30.0),
+        final_view_standoff_multipliers=(1.0,),
+        final_view_camera_z_offsets_m=(0.0,),
+        final_view_roll_offsets_deg=(0.0,),
+        centerline_view_angle_offsets_deg=(),
+    )
+    _, planned = build_final_plan(row_report, config)
+    target = planned[0].target
+    backend = _FakeFinalCaptureBackend(
+        ("success", "success", "success", "success"),
+        capture_observations=(
+            [],
+            [
+                SurveyObservation(
+                    view_id="final_confirmed",
+                    image_path="confirmed.png",
+                    bbox_xyxy=(100.0, 120.0, 180.0, 220.0),
+                    confidence=0.9,
+                    class_id=1,
+                    class_name=target.class_name,
+                    rough_position_world=target.position_world,
+                )
+            ],
+        ),
+    )
+
+    result = _capture_first_reachable_candidate(
+        backend=backend,
+        planned=planned[0],
+        images_dir=tmp_path / "images",
+        depth_dir=tmp_path / "depth",
+        yolo_dir=tmp_path / "yolo",
+        annotated_dir=tmp_path / "annotated",
+        tiles_dir=tmp_path / "tiles",
+        config=config,
+    )
+
+    assert result["status"] == "confirmed"
+    assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
+        "captured_unconfirmed",
+        "captured",
+    ]
+    assert backend.capture_calls == 2
+
+
+def test_final_capture_continues_after_quality_limited_candidate(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    row_report_path = _write_row_report(tmp_path, layout_path)
+    row_report = load_task1_row_report(row_report_path)
+    config = FinalConfig(
+        camera_z_m=0.30,
+        standoff_m=0.12,
+        min_oblique_distance_m=0.06,
+        entry_validation_samples=1,
+        final_view_angle_offsets_deg=(0.0, 30.0),
+        final_view_standoff_multipliers=(1.0,),
+        final_view_camera_z_offsets_m=(0.0,),
+        final_view_roll_offsets_deg=(0.0,),
+        centerline_view_angle_offsets_deg=(),
+    )
+    _, planned = build_final_plan(row_report, config)
+    target = planned[0].target
+    backend = _FakeFinalCaptureBackend(
+        ("success", "success", "success", "success"),
+        capture_observations=(
+            [
+                SurveyObservation(
+                    view_id="final_clipped",
+                    image_path="clipped.png",
+                    bbox_xyxy=(0.0, 120.0, 180.0, 220.0),
+                    confidence=0.93,
+                    class_id=1,
+                    class_name=target.class_name,
+                    rough_position_world=target.position_world,
+                )
+            ],
+            [
+                SurveyObservation(
+                    view_id="final_confirmed",
+                    image_path="confirmed.png",
+                    bbox_xyxy=(100.0, 120.0, 180.0, 220.0),
+                    confidence=0.9,
+                    class_id=1,
+                    class_name=target.class_name,
+                    rough_position_world=target.position_world,
+                )
+            ],
+        ),
+    )
+
+    result = _capture_first_reachable_candidate(
+        backend=backend,
+        planned=planned[0],
+        images_dir=tmp_path / "images",
+        depth_dir=tmp_path / "depth",
+        yolo_dir=tmp_path / "yolo",
+        annotated_dir=tmp_path / "annotated",
+        tiles_dir=tmp_path / "tiles",
+        config=config,
+    )
+
+    assert result["status"] == "confirmed"
+    assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
+        "captured_quality_limited",
+        "captured",
+    ]
+    assert result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["status"] == "limited"
+    assert result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["reasons"] == [
+        "bbox_too_close_to_image_boundary"
+    ]
+    assert backend.capture_calls == 2
 
 
 def test_final_stable_selection_outputs_downstream_object_list() -> None:
@@ -1098,6 +1310,165 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {"class_conflict": 1}
 
 
+def test_final_stable_selection_rejects_duplicate_follow_up_object() -> None:
+    selection = select_stable_final_objects(
+        [
+            _final_payload(
+                object_id="row_object_001",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="rivet_gun",
+                detected_class_name="rivet_gun",
+                position_world=[0.240, 0.216, 0.03],
+                source_transform=None,
+            ),
+            _final_payload(
+                object_id="row_tentative_001",
+                source_status="tentative",
+                target_role="follow_up",
+                capture_status="follow_up_observed",
+                source_class_name="rivet_gun",
+                detected_class_name="rivet_gun",
+                position_world=[0.232, 0.219, 0.03],
+                source_transform=None,
+            ),
+        ]
+    )
+
+    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["row_object_001"]
+    assert selection["stable_object_selection"]["stable_object_count"] == 1
+    assert selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "duplicate_follow_up_observation": 1
+    }
+    duplicate = selection["unstable_objects"][0]
+    assert duplicate["object_id"] == "row_tentative_001"
+    assert duplicate["duplicate_of_object_id"] == "row_object_001"
+    assert duplicate["duplicate_xy_distance_m"] == pytest.approx(0.008544, abs=1e-6)
+
+
+def test_final_stable_selection_rejects_low_confidence_follow_up_object() -> None:
+    selection = select_stable_final_objects(
+        [
+            _final_payload(
+                object_id="row_object_001",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="tape",
+                detected_class_name="tape",
+                position_world=[0.65, 0.44, 0.03],
+                source_transform=None,
+            ),
+            _final_payload(
+                object_id="row_tentative_001",
+                source_status="tentative",
+                target_role="follow_up",
+                capture_status="follow_up_observed",
+                source_class_name="tape",
+                detected_class_name="tape",
+                position_world=[0.47, 0.50, 0.03],
+                source_transform=None,
+                confidence=0.15,
+            ),
+        ]
+    )
+
+    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["row_object_001"]
+    assert selection["stable_object_selection"]["stable_object_count"] == 1
+    assert selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "follow_up_low_confidence": 1
+    }
+    assert selection["unstable_objects"][0]["object_id"] == "row_tentative_001"
+
+
+def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> None:
+    primary_captures = [
+        _final_payload(
+            object_id=f"row_object_{index:03d}",
+            source_status="stable",
+            target_role="primary",
+            capture_status="confirmed",
+            source_class_name=f"class_{index}",
+            detected_class_name=f"class_{index}",
+            position_world=[0.20 + index * 0.08, 0.30 + index * 0.04, 0.03],
+            source_transform=None,
+        )
+        for index in range(1, 6)
+    ]
+    selection = select_stable_final_objects(
+        primary_captures
+        + [
+            _final_payload(
+                object_id="row_tentative_001",
+                source_status="tentative",
+                target_role="follow_up",
+                capture_status="follow_up_observed",
+                source_class_name="extra_class",
+                detected_class_name="extra_class",
+                position_world=[0.76, 0.72, 0.03],
+                source_transform=None,
+                confidence=0.91,
+            )
+        ],
+        desired_stable_object_count=5,
+    )
+
+    assert [obj["object_id"] for obj in selection["stable_objects"]] == [
+        "row_object_001",
+        "row_object_002",
+        "row_object_003",
+        "row_object_004",
+        "row_object_005",
+    ]
+    assert selection["stable_object_selection"]["rejected_reason_counts"] == {"follow_up_not_needed": 1}
+    assert selection["unstable_objects"][0]["object_id"] == "row_tentative_001"
+
+
+def test_final_stable_selection_reports_skipped_follow_up_as_not_needed() -> None:
+    captures = [
+        _final_payload(
+            object_id=f"row_object_{index:03d}",
+            source_status="stable",
+            target_role="primary",
+            capture_status="confirmed",
+            source_class_name=f"class_{index}",
+            detected_class_name=f"class_{index}",
+            position_world=[0.20 + index * 0.08, 0.30 + index * 0.04, 0.03],
+            source_transform=None,
+        )
+        for index in range(1, 6)
+    ]
+    captures.append(
+        {
+            "target": {
+                "object_id": "row_tentative_001",
+                "source_status": "tentative",
+                "target_role": "follow_up",
+                "class_name": "extra_class",
+                "candidate_class_names": ["extra_class"],
+            },
+            "status": "skipped_follow_up_not_needed",
+            "source_status": "tentative",
+            "target_role": "follow_up",
+            "recognition": {
+                "status": "not_run",
+                "reason": "desired_stable_object_count_already_reached",
+            },
+            "view": {"status": "planned"},
+        }
+    )
+
+    selection = select_stable_final_objects(captures, desired_stable_object_count=5)
+
+    assert selection["stable_object_selection"]["stable_object_count"] == 5
+    assert selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "skipped_follow_up_not_needed": 1
+    }
+    assert selection["unstable_objects"][0]["object_id"] == "row_tentative_001"
+    assert _overall_status(captures) == "success"
+
+
 def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
     target = FinalTarget(
         object_id="row_object_002",
@@ -1139,6 +1510,49 @@ def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
     assert matched[0]["observation_kind"] == "merged_same_class_bbox_fragments"
     assert matched[0]["bbox_xyxy"] == [810.0, 340.0, 1226.0, 505.0]
     assert matched[0]["source_observation_count"] == 2
+    assert matched[0]["selection_score"]["bbox_area_px"] > matched[1]["selection_score"]["bbox_area_px"]
+
+
+def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> None:
+    target = FinalTarget(
+        object_id="row_object_004",
+        target_role="primary",
+        source_status="stable",
+        position_world=(0.62, 0.47, 0.03),
+        class_name="本子",
+        confidence=0.78,
+        T_world_object=None,
+        best_image_path=None,
+        best_bbox_xyxy=None,
+        supporting_views=(),
+        candidate_class_names=("本子",),
+        source_payload={},
+    )
+    observations = [
+        SurveyObservation(
+            view_id="final_row_object_004",
+            image_path="final_row_object_004_rgb.png",
+            bbox_xyxy=(784.0, 305.0, 1017.0, 565.0),
+            confidence=0.83,
+            class_id=2,
+            class_name="本子",
+            rough_position_world=(0.621, 0.471, 0.03),
+        ),
+        SurveyObservation(
+            view_id="final_row_object_004",
+            image_path="final_row_object_004_rgb.png",
+            bbox_xyxy=(902.0, 507.0, 1422.0, 1079.0),
+            confidence=0.74,
+            class_id=2,
+            class_name="本子",
+            rough_position_world=(0.625, 0.473, 0.03),
+        ),
+    ]
+
+    matched = _matched_observations(target, observations, config=FinalConfig(image_width=1920, image_height=1080))
+
+    assert matched[0]["bbox_xyxy"] == [902.0, 507.0, 1422.0, 1079.0]
+    assert matched[0]["selection_score"]["border_safe"] is False
     assert matched[0]["selection_score"]["bbox_area_px"] > matched[1]["selection_score"]["bbox_area_px"]
 
 
@@ -1409,6 +1823,7 @@ def _final_payload(
     position_world: list[float],
     source_transform: list[list[float]] | None,
     candidate_class_names: list[str] | None = None,
+    confidence: float = 0.82,
 ) -> dict[str, object]:
     target = {
         "object_id": object_id,
@@ -1430,7 +1845,7 @@ def _final_payload(
             "detected_class_name": detected_class_name,
             "class_match": source_class_name == detected_class_name if source_class_name else None,
             "candidate_class_names": candidate_class_names or ([source_class_name] if source_class_name else []),
-            "confidence": 0.82,
+            "confidence": confidence,
             "position_world": position_world,
             "target_xy_distance_m": 0.01,
             "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
@@ -1438,7 +1853,7 @@ def _final_payload(
         },
         "best_observation": {
             "class_name": detected_class_name,
-            "confidence": 0.82,
+            "confidence": confidence,
             "rough_position_world": position_world,
             "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
         },
@@ -1628,3 +2043,44 @@ class _FakeRowValidationBackend:
                 "robot_self_contacts": [],
             },
         }
+
+
+class _FakeFinalCaptureBackend(_FakeRowValidationBackend):
+    def __init__(
+        self,
+        outcomes: tuple[str, ...],
+        *,
+        capture_observations: tuple[list[SurveyObservation], ...] | None = None,
+    ) -> None:
+        super().__init__(outcomes)
+        self.captured_view = None
+        self.capture_calls = 0
+        self.capture_observations = capture_observations or ([],)
+
+    def capture_view(
+        self,
+        view,
+        *,
+        images_dir: Path,
+        depth_dir: Path,
+        yolo_dir: Path,
+        annotated_dir: Path,
+        tiles_dir: Path,
+    ):
+        self.captured_view = view
+        observations = self.capture_observations[min(self.capture_calls, len(self.capture_observations) - 1)]
+        self.capture_calls += 1
+        return (
+            {
+                "status": "success",
+                "message": "captured with fixed qpos",
+                "view_id": view.view_id,
+                "fixed_pose_source": view.fixed_pose_source,
+                "fixed_qpos": list(view.fixed_qpos) if view.fixed_qpos is not None else None,
+                "rgb_image_path": str(images_dir / f"{view.view_id}_rgb.png"),
+                "depth_path": str(depth_dir / f"{view.view_id}_depth.npy"),
+                "annotated_image_path": str(annotated_dir / f"{view.view_id}_yolo.png"),
+                "yolo_raw_path": str(yolo_dir / f"{view.view_id}.json"),
+            },
+            observations,
+        )

@@ -38,17 +38,41 @@ DEFAULT_FINAL_LOOK_AT_HEIGHT_OFFSET_M = 0.025
 DEFAULT_FINAL_TARGET_MATCH_RADIUS_M = 0.07
 DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES = 3
 DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M = 0.02
+DEFAULT_FINAL_ENTRY_PORTAL_MODES = ("final-vertical", "opening-grid-nearest", "workspace-center")
+DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY = "vertical-descent"
+DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY = "final-look-at"
+DEFAULT_FINAL_ENTRY_PATH_POLICY = "portal-descent-then-lateral"
 DEFAULT_FINAL_IK_POSITION_TOLERANCE_M = 0.005
-DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG = (0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 180.0)
-DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS = (1.0, 1.5)
+DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG = (
+    0.0,
+    22.5,
+    -22.5,
+    45.0,
+    -45.0,
+    67.5,
+    -67.5,
+    90.0,
+    -90.0,
+    135.0,
+    -135.0,
+    180.0,
+)
+DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5)
+DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M = (0.0, -0.04, -0.08, -0.12, 0.04, 0.08, 0.12)
+DEFAULT_FINAL_VIEW_ROLL_OFFSETS_DEG = (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0)
 DEFAULT_FINAL_CENTERLINE_VIEW_ANGLE_OFFSETS_DEG = (0.0, 45.0, -45.0)
 DEFAULT_FINAL_ENTRY_SIDE = "y-max"
 DEFAULT_FINAL_YOLO_CONFIDENCE = 0.20
 DEFAULT_FINAL_YOLO_MAX_DETECTIONS = 12
 DEFAULT_FINAL_YOLO_TILE_GRID_SIZE = 1
+FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE = "final_reachable_capture_plan_v1"
 FINAL_STABLE_SELECTION_POLICY_VERSION = "final_stable_selection_policy_v1"
+FINAL_BBOX_QUALITY_POLICY_VERSION = "final_bbox_quality_policy_v1"
 DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO = 0.15
 DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX = 8.0
+DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M = DEFAULT_FINAL_TARGET_MATCH_RADIUS_M
+DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE = DEFAULT_FINAL_YOLO_CONFIDENCE
+DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT = 5
 
 
 @dataclass(frozen=True)
@@ -89,8 +113,15 @@ class FinalConfig:
     target_match_radius_m: float = DEFAULT_FINAL_TARGET_MATCH_RADIUS_M
     entry_validation_samples: int = DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES
     entry_clearance_margin_m: float = DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M
+    entry_portal_modes: tuple[str, ...] = DEFAULT_FINAL_ENTRY_PORTAL_MODES
+    entry_orientation_policy: str = DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY
+    entry_lateral_orientation_policy: str = DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY
+    entry_path_policy: str = DEFAULT_FINAL_ENTRY_PATH_POLICY
+    desired_stable_object_count: int | None = DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT
     final_view_angle_offsets_deg: tuple[float, ...] = DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG
     final_view_standoff_multipliers: tuple[float, ...] = DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS
+    final_view_camera_z_offsets_m: tuple[float, ...] = DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M
+    final_view_roll_offsets_deg: tuple[float, ...] = DEFAULT_FINAL_VIEW_ROLL_OFFSETS_DEG
     centerline_view_angle_offsets_deg: tuple[float, ...] = DEFAULT_FINAL_CENTERLINE_VIEW_ANGLE_OFFSETS_DEG
     yolo_confidence: float = DEFAULT_FINAL_YOLO_CONFIDENCE
     yolo_iou: float | None = None
@@ -137,6 +168,23 @@ class FinalConfig:
             raise ValueError("look_at_height_offset_m must be non-negative")
         if self.entry_side not in {"y-max", "y-min", "x-min", "x-max", "center"}:
             raise ValueError("entry_side must be one of y-max, y-min, x-min, x-max, or center")
+        if not self.entry_portal_modes:
+            raise ValueError("entry_portal_modes must contain at least one mode")
+        unsupported_entry_portal_modes = set(self.entry_portal_modes) - {
+            "final-vertical",
+            "workspace-center",
+            "opening-grid-nearest",
+        }
+        if unsupported_entry_portal_modes:
+            raise ValueError("entry_portal_modes values must be final-vertical, workspace-center, or opening-grid-nearest")
+        if self.entry_orientation_policy not in {"vertical-descent", "target-look-at"}:
+            raise ValueError("entry_orientation_policy must be vertical-descent or target-look-at")
+        if self.entry_lateral_orientation_policy not in {"entry-orientation", "final-look-at"}:
+            raise ValueError("entry_lateral_orientation_policy must be entry-orientation or final-look-at")
+        if self.entry_path_policy not in {"portal-descent-then-lateral", "direct-interpolate"}:
+            raise ValueError("entry_path_policy must be portal-descent-then-lateral or direct-interpolate")
+        if self.desired_stable_object_count is not None and self.desired_stable_object_count <= 0:
+            raise ValueError("desired_stable_object_count must be positive when provided")
         if self.target_match_radius_m <= 0.0:
             raise ValueError("target_match_radius_m must be positive")
         if self.entry_validation_samples <= 0:
@@ -153,7 +201,13 @@ class FinalConfig:
             raise ValueError("final_view_angle_offsets_deg must contain at least one angle")
         if not self.final_view_standoff_multipliers:
             raise ValueError("final_view_standoff_multipliers must contain at least one multiplier")
+        if not self.final_view_camera_z_offsets_m:
+            raise ValueError("final_view_camera_z_offsets_m must contain at least one offset")
+        if not self.final_view_roll_offsets_deg:
+            raise ValueError("final_view_roll_offsets_deg must contain at least one angle")
         _validate_angle_offsets(self.final_view_angle_offsets_deg, field_name="final_view_angle_offsets_deg")
+        _validate_angle_offsets(self.final_view_camera_z_offsets_m, field_name="final_view_camera_z_offsets_m")
+        _validate_angle_offsets(self.final_view_roll_offsets_deg, field_name="final_view_roll_offsets_deg")
         _validate_angle_offsets(self.centerline_view_angle_offsets_deg, field_name="centerline_view_angle_offsets_deg")
         _validate_positive_multipliers(
             self.final_view_standoff_multipliers,
@@ -248,6 +302,10 @@ class FinalViewCandidate:
     angle_offset_deg: float
     standoff_m: float
     standoff_multiplier: float
+    camera_z_offset_m: float
+    roll_offset_deg: float
+    entry_portal_mode: str
+    candidate_source: str
     direction_adjusted: bool
     camera_position_world: tuple[float, float, float]
 
@@ -261,6 +319,10 @@ class FinalViewCandidate:
             "angle_offset_deg": _round(self.angle_offset_deg),
             "standoff_m": _round(self.standoff_m),
             "standoff_multiplier": _round(self.standoff_multiplier),
+            "camera_z_offset_m": _round(self.camera_z_offset_m),
+            "roll_offset_deg": _round(self.roll_offset_deg),
+            "entry_portal_mode": self.entry_portal_mode,
+            "candidate_source": self.candidate_source,
             "direction_adjusted": self.direction_adjusted,
             "camera_position_world": [_round(value) for value in self.camera_position_world],
         }
@@ -493,7 +555,29 @@ def run_task1_final(
     try:
         backend.load()
         backend.apply_scene_objects()
-        for planned in planned_captures:
+        primary_plans = tuple(planned for planned in planned_captures if planned.target.source_status == "stable")
+        follow_up_plans = tuple(planned for planned in planned_captures if planned.target.source_status != "stable")
+
+        for planned in primary_plans:
+            capture_result = _capture_first_reachable_candidate(
+                backend=backend,
+                planned=planned,
+                images_dir=images_dir,
+                depth_dir=depth_dir,
+                yolo_dir=yolo_dir,
+                annotated_dir=annotated_dir,
+                tiles_dir=tiles_dir,
+                config=config,
+            )
+            object_captures.append(capture_result)
+
+        for planned in follow_up_plans:
+            if _desired_stable_count_reached(
+                object_captures,
+                desired_stable_object_count=config.desired_stable_object_count,
+            ):
+                object_captures.append(_skipped_follow_up_capture_result(planned))
+                continue
             capture_result = _capture_first_reachable_candidate(
                 backend=backend,
                 planned=planned,
@@ -545,21 +629,62 @@ def run_task1_final(
     return report
 
 
-def select_stable_final_objects(object_captures: list[dict[str, Any]]) -> dict[str, Any]:
+def select_stable_final_objects(
+    object_captures: list[dict[str, Any]],
+    *,
+    desired_stable_object_count: int | None = DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
+) -> dict[str, Any]:
     if not object_captures:
-        return _stable_selection_payload([], [], status="not_run")
+        return _stable_selection_payload([], [], status="not_run", desired_stable_object_count=desired_stable_object_count)
     if all(capture.get("status") == "planned" for capture in object_captures):
-        return _stable_selection_payload([], [], status="not_run")
+        return _stable_selection_payload([], [], status="not_run", desired_stable_object_count=desired_stable_object_count)
 
-    stable_objects: list[dict[str, Any]] = []
+    primary_objects: list[dict[str, Any]] = []
+    follow_up_objects: list[tuple[dict[str, Any], dict[str, Any]]] = []
     rejected_objects: list[dict[str, Any]] = []
     for capture in object_captures:
         stable_object, rejection = _stable_object_from_capture(capture)
         if stable_object is not None:
-            stable_objects.append(stable_object)
+            if stable_object.get("source_status") == "stable":
+                primary_objects.append(stable_object)
+            else:
+                follow_up_objects.append((stable_object, capture))
         elif rejection is not None:
             rejected_objects.append(rejection)
-    return _stable_selection_payload(stable_objects, rejected_objects, status="success")
+
+    stable_objects = list(primary_objects)
+    for stable_object, capture in follow_up_objects:
+        if desired_stable_object_count is not None and len(stable_objects) >= desired_stable_object_count:
+            rejected_objects.append(
+                _follow_up_not_needed_rejection_payload(
+                    capture,
+                    desired_stable_object_count=desired_stable_object_count,
+                    stable_object_count=len(stable_objects),
+                )
+            )
+            continue
+        duplicate = _matching_stable_object(
+            stable_object,
+            stable_objects,
+            max_distance_m=DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M,
+        )
+        if duplicate is not None:
+            rejected_objects.append(
+                _duplicate_follow_up_rejection_payload(
+                    capture,
+                    stable_object=stable_object,
+                    duplicate=duplicate,
+                    max_distance_m=DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M,
+                )
+            )
+            continue
+        stable_objects.append(stable_object)
+    return _stable_selection_payload(
+        stable_objects,
+        rejected_objects,
+        status="success",
+        desired_stable_object_count=desired_stable_object_count,
+    )
 
 
 def _capture_first_reachable_candidate(
@@ -574,6 +699,7 @@ def _capture_first_reachable_candidate(
     config: FinalConfig,
 ) -> dict[str, Any]:
     candidate_attempts: list[dict[str, Any]] = []
+    best_captured_result: dict[str, Any] | None = None
     for candidate in planned.view_candidates:
         entry_results = _validate_entry_views(backend, planned, candidate)
         failed_entry = next((entry for entry in entry_results if entry.get("status") != "success"), None)
@@ -583,43 +709,91 @@ def _capture_first_reachable_candidate(
                     candidate=candidate,
                     entry_results=entry_results,
                     view_result=_planned_view_result(candidate.view),
+                    final_pose_validation=None,
                     status="entry_validation_failed",
                     message=str(failed_entry.get("message") or "entry validation failed"),
                 )
             )
             continue
 
+        final_pose_validation = _validate_final_view_candidate(backend, candidate)
+        if final_pose_validation.get("status") != "success":
+            candidate_attempts.append(
+                _candidate_attempt_payload(
+                    candidate=candidate,
+                    entry_results=entry_results,
+                    view_result=_planned_view_result(candidate.view),
+                    final_pose_validation=final_pose_validation,
+                    status="final_pose_failed",
+                    message=str(final_pose_validation.get("message") or "final pose validation failed"),
+                )
+            )
+            continue
+
+        actual_qpos = _actual_qpos_from_validation(final_pose_validation)
+        if actual_qpos is None:
+            final_pose_validation = dict(final_pose_validation)
+            final_pose_validation["status"] = "failed"
+            final_pose_validation["message"] = "Validated final candidate did not include actual_qpos for reproducible capture."
+            candidate_attempts.append(
+                _candidate_attempt_payload(
+                    candidate=candidate,
+                    entry_results=entry_results,
+                    view_result=_planned_view_result(candidate.view),
+                    final_pose_validation=final_pose_validation,
+                    status="final_pose_failed",
+                    message=str(final_pose_validation["message"]),
+                )
+            )
+            continue
+
+        selected_candidate = _copy_final_view_candidate_with_fixed_qpos(candidate, fixed_qpos=actual_qpos)
         view_result, observations = backend.capture_view(
-            candidate.view,
+            selected_candidate.view,
             images_dir=images_dir,
             depth_dir=depth_dir,
             yolo_dir=yolo_dir,
             annotated_dir=annotated_dir,
             tiles_dir=tiles_dir,
         )
-        attempt_status = "captured" if view_result.get("status") == "success" else "final_pose_failed"
-        candidate_attempts.append(
-            _candidate_attempt_payload(
-                candidate=candidate,
-                entry_results=entry_results,
-                view_result=view_result,
-                status=attempt_status,
-                message=str(view_result.get("message") or attempt_status),
-            )
+        attempt = _candidate_attempt_payload(
+            candidate=selected_candidate,
+            entry_results=entry_results,
+            view_result=view_result,
+            final_pose_validation=final_pose_validation,
+            status="captured" if view_result.get("status") == "success" else "final_pose_failed",
+            message=str(view_result.get("message") or "captured"),
         )
+        candidate_attempts.append(attempt)
         if view_result.get("status") != "success":
             continue
 
-        return _object_capture_result(
+        capture_result = _object_capture_result(
             planned=planned,
-            selected_candidate=candidate,
+            selected_candidate=selected_candidate,
             candidate_attempts=candidate_attempts,
             entry_results=entry_results,
             view_result=view_result,
             observations=observations,
             config=config,
         )
+        attempt["capture_status"] = capture_result["status"]
+        attempt["recognition"] = capture_result["recognition"]
+        if _capture_result_satisfies_target(capture_result):
+            return capture_result
+        attempt["status"] = f"captured_{capture_result['status']}"
+        attempt["message"] = _continue_after_capture_message(capture_result)
+        if best_captured_result is None or _capture_result_fallback_score(capture_result) > _capture_result_fallback_score(
+            best_captured_result
+        ):
+            best_captured_result = capture_result
 
+    if best_captured_result is not None:
+        best_captured_result["view_candidate_attempts"] = candidate_attempts
+        best_captured_result["notes"] = list(best_captured_result.get("notes", [])) + [
+            "No later collision-safe final candidate confirmed this target; this is the best captured but unresolved result.",
+        ]
+        return best_captured_result
     return _all_candidates_failed_capture_result(planned, candidate_attempts)
 
 
@@ -628,6 +802,7 @@ def _candidate_attempt_payload(
     candidate: FinalViewCandidate,
     entry_results: list[dict[str, Any]],
     view_result: dict[str, Any],
+    final_pose_validation: dict[str, Any] | None,
     status: str,
     message: str,
 ) -> dict[str, Any]:
@@ -636,6 +811,7 @@ def _candidate_attempt_payload(
         "status": status,
         "message": message,
         "entry_validation": entry_results,
+        "final_pose_validation": final_pose_validation,
         "view": view_result,
     }
 
@@ -788,10 +964,17 @@ def _angle_from_view_to_target(view_payload: dict[str, Any], target: tuple[float
     camera_position = _view_camera_position(view_payload)
     if camera_position is None:
         return None
+    return _angle_from_camera_position_to_target(camera_position, target)
+
+
+def _angle_from_camera_position_to_target(
+    camera_position: tuple[float, float, float],
+    target: tuple[float, float, float],
+) -> float:
     dx = camera_position[0] - target[0]
     dy = camera_position[1] - target[1]
     if math.hypot(dx, dy) <= 1e-9:
-        return None
+        return 0.0
     return math.atan2(dy, dx)
 
 
@@ -852,41 +1035,48 @@ def _select_camera_position_candidates(
         ]
     )
     standoff_records = _unique_standoff_records(config)
+    z_offset_records = _unique_float_records(config.final_view_camera_z_offsets_m)
     evaluated: list[dict[str, Any]] = []
     valid_candidates: list[dict[str, Any]] = []
     for standoff_record in standoff_records:
         standoff_m = float(standoff_record["standoff_m"])
         standoff_multiplier = float(standoff_record["standoff_multiplier"])
-        for record in angle_records:
-            angle = float(record["angle_rad"])
-            position = (
-                target[0] + math.cos(angle) * standoff_m,
-                target[1] + math.sin(angle) * standoff_m,
-                config.camera_z_m,
-            )
-            valid, reason = _camera_position_validity(position, target, workspace=workspace, config=config)
-            payload = {
-                "angle_rad": _round(_normalize_angle(angle)),
-                "angle_source": str(record["angle_source"]),
-                "angle_offset_deg": _round(float(record["angle_offset_deg"])),
-                "standoff_m": _round(standoff_m),
-                "standoff_multiplier": _round(standoff_multiplier),
-                "camera_position_world": [_round(value) for value in position],
-                "valid": valid,
-                "reason": reason,
-            }
-            evaluated.append(payload)
-            if valid:
-                valid_candidates.append(
-                    {
-                        "angle_rad": _normalize_angle(angle),
-                        "angle_source": str(record["angle_source"]),
-                        "angle_offset_deg": float(record["angle_offset_deg"]),
-                        "standoff_m": _round(standoff_m),
-                        "standoff_multiplier": _round(standoff_multiplier),
-                        "camera_position_world": _round_vector(position),
-                    }
+        for z_offset in z_offset_records:
+            camera_z = config.camera_z_m + float(z_offset)
+            for record in angle_records:
+                angle = float(record["angle_rad"])
+                position = (
+                    target[0] + math.cos(angle) * standoff_m,
+                    target[1] + math.sin(angle) * standoff_m,
+                    camera_z,
                 )
+                valid, reason = _camera_position_validity(position, target, workspace=workspace, config=config)
+                payload = {
+                    "candidate_source": "generated_final_policy",
+                    "angle_rad": _round(_normalize_angle(angle)),
+                    "angle_source": str(record["angle_source"]),
+                    "angle_offset_deg": _round(float(record["angle_offset_deg"])),
+                    "standoff_m": _round(standoff_m),
+                    "standoff_multiplier": _round(standoff_multiplier),
+                    "camera_z_offset_m": _round(float(z_offset)),
+                    "camera_position_world": [_round(value) for value in position],
+                    "valid": valid,
+                    "reason": reason,
+                }
+                evaluated.append(payload)
+                if valid:
+                    valid_candidates.append(
+                        {
+                            "angle_rad": _normalize_angle(angle),
+                            "angle_source": str(record["angle_source"]),
+                            "candidate_source": "generated_final_policy",
+                            "angle_offset_deg": float(record["angle_offset_deg"]),
+                            "standoff_m": _round(standoff_m),
+                            "standoff_multiplier": _round(standoff_multiplier),
+                            "camera_z_offset_m": _round(float(z_offset)),
+                            "camera_position_world": _round_vector(position),
+                        }
+                    )
     if valid_candidates:
         return (tuple(valid_candidates), evaluated)
     raise ValueError(f"could not place final camera inside tank for target near {target}")
@@ -903,42 +1093,62 @@ def _view_candidates_for_target(
     config: FinalConfig,
 ) -> tuple[FinalViewCandidate, ...]:
     view_candidates: list[FinalViewCandidate] = []
-    for candidate_index, candidate in enumerate(camera_candidates):
-        suffix = "primary" if candidate_index == 0 else f"alt_{candidate_index:02d}"
-        view_id = view_id_prefix if candidate_index == 0 else f"{view_id_prefix}_{suffix}"
+    roll_offsets = _unique_float_records(config.final_view_roll_offsets_deg)
+    entry_portal_modes = _unique_text_records(config.entry_portal_modes)
+    candidate_index = 0
+    for candidate in camera_candidates:
         camera_position = _position_from_value(candidate["camera_position_world"])
-        view = SurveyView(
-            view_id=view_id,
-            grid_row=target_index,
-            grid_col=candidate_index,
-            camera_name=config.camera_name,
-            desired_camera_position_world=_round_vector(camera_position),
-            look_at_world=_round_vector(look_at),
-            T_world_camera=_make_look_at_transform(camera_position, look_at),
-        )
-        entry_views = _entry_validation_views(
-            view_id_prefix=view_id,
-            final_camera_position=camera_position,
-            look_at=look_at,
-            workspace=workspace,
-            config=config,
-            target_index=target_index,
-        )
-        angle = float(candidate["angle_rad"])
-        view_candidates.append(
-            FinalViewCandidate(
-                candidate_id=f"{view_id_prefix}_{suffix}",
-                view=view,
-                entry_views=entry_views,
-                approach_angle_rad=angle,
-                angle_source=str(candidate["angle_source"]),
-                angle_offset_deg=float(candidate["angle_offset_deg"]),
-                standoff_m=float(candidate["standoff_m"]),
-                standoff_multiplier=float(candidate["standoff_multiplier"]),
-                direction_adjusted=abs(_normalize_angle(angle - preferred_angle)) > 1e-6,
-                camera_position_world=camera_position,
-            )
-        )
+        base_transform = _make_look_at_transform(camera_position, look_at)
+        candidate_transform = candidate.get("T_world_camera")
+        candidate_roll_offsets = (0.0,) if candidate_transform is not None else roll_offsets
+        for roll_offset_deg in candidate_roll_offsets:
+            for entry_portal_mode in entry_portal_modes:
+                suffix = "primary" if candidate_index == 0 else f"alt_{candidate_index:02d}"
+                view_id = view_id_prefix if candidate_index == 0 else f"{view_id_prefix}_{suffix}"
+                transform = (
+                    candidate_transform
+                    if candidate_transform is not None
+                    else _roll_camera_transform(base_transform, math.radians(float(roll_offset_deg)))
+                )
+                view = SurveyView(
+                    view_id=view_id,
+                    grid_row=target_index,
+                    grid_col=candidate_index,
+                    camera_name=config.camera_name,
+                    desired_camera_position_world=_round_vector(camera_position),
+                    look_at_world=_round_vector(look_at),
+                    T_world_camera=transform,
+                )
+                entry_views = _entry_validation_views(
+                    view_id_prefix=view_id,
+                    final_camera_position=camera_position,
+                    look_at=look_at,
+                    roll_offset_deg=float(roll_offset_deg),
+                    entry_portal_mode=entry_portal_mode,
+                    workspace=workspace,
+                    config=config,
+                    target_index=target_index,
+                )
+                angle = float(candidate["angle_rad"])
+                view_candidates.append(
+                    FinalViewCandidate(
+                        candidate_id=f"{view_id_prefix}_{suffix}",
+                        view=view,
+                        entry_views=entry_views,
+                        approach_angle_rad=angle,
+                        angle_source=str(candidate["angle_source"]),
+                        angle_offset_deg=float(candidate["angle_offset_deg"]),
+                        standoff_m=float(candidate["standoff_m"]),
+                        standoff_multiplier=float(candidate["standoff_multiplier"]),
+                        camera_z_offset_m=float(candidate["camera_z_offset_m"]),
+                        roll_offset_deg=float(roll_offset_deg),
+                        entry_portal_mode=entry_portal_mode,
+                        candidate_source=str(candidate.get("candidate_source") or "generated_final_policy"),
+                        direction_adjusted=abs(_normalize_angle(angle - preferred_angle)) > 1e-6,
+                        camera_position_world=camera_position,
+                    )
+                )
+                candidate_index += 1
     return tuple(view_candidates)
 
 
@@ -963,6 +1173,8 @@ def _entry_validation_views(
     view_id_prefix: str,
     final_camera_position: tuple[float, float, float],
     look_at: tuple[float, float, float],
+    roll_offset_deg: float,
+    entry_portal_mode: str,
     workspace: SurveyWorkspace,
     config: FinalConfig,
     target_index: int,
@@ -973,12 +1185,31 @@ def _entry_validation_views(
             "final entry clearance margin leaves no vertical room above final camera pose: "
             f"entry_top_z={top_z:.4f}, final_camera_z={final_camera_position[2]:.4f}"
         )
+    entry_start_position = _entry_portal_camera_position(
+        final_camera_position,
+        entry_z=top_z,
+        entry_portal_mode=entry_portal_mode,
+        workspace=workspace,
+    )
+    entry_positions = _entry_validation_positions(
+        final_camera_position=final_camera_position,
+        entry_start_position=entry_start_position,
+        config=config,
+    )
     views: list[SurveyView] = []
-    for sample_index in range(config.entry_validation_samples):
-        fraction_from_final = (config.entry_validation_samples - sample_index) / config.entry_validation_samples
-        z = final_camera_position[2] + (top_z - final_camera_position[2]) * fraction_from_final
-        camera_position = (final_camera_position[0], final_camera_position[1], z)
+    for sample_index, camera_position in enumerate(entry_positions):
         workspace.validate_camera_position(camera_position)
+        entry_look_at = _entry_validation_look_at(
+            camera_position,
+            final_look_at=look_at,
+            workspace=workspace,
+            config=config,
+            sample_index=sample_index,
+        )
+        transform = _roll_camera_transform(
+            _make_look_at_transform(camera_position, entry_look_at),
+            math.radians(roll_offset_deg),
+        )
         views.append(
             SurveyView(
                 view_id=f"{view_id_prefix}_entry_{sample_index:02d}",
@@ -986,11 +1217,155 @@ def _entry_validation_views(
                 grid_col=sample_index + 1,
                 camera_name=config.camera_name,
                 desired_camera_position_world=_round_vector(camera_position),
-                look_at_world=_round_vector(look_at),
-                T_world_camera=_make_look_at_transform(camera_position, look_at),
+                look_at_world=_round_vector(entry_look_at),
+                T_world_camera=transform,
             )
         )
     return tuple(views)
+
+
+def _entry_validation_positions(
+    *,
+    final_camera_position: tuple[float, float, float],
+    entry_start_position: tuple[float, float, float],
+    config: FinalConfig,
+) -> tuple[tuple[float, float, float], ...]:
+    if config.entry_path_policy == "direct-interpolate":
+        return tuple(
+            _interpolate_position(
+                final_camera_position,
+                entry_start_position,
+                (config.entry_validation_samples - sample_index) / config.entry_validation_samples,
+            )
+            for sample_index in range(config.entry_validation_samples)
+        )
+    if config.entry_path_policy == "portal-descent-then-lateral":
+        return _staged_entry_validation_positions(
+            final_camera_position=final_camera_position,
+            entry_start_position=entry_start_position,
+            sample_count=config.entry_validation_samples,
+        )
+    raise ValueError(f"unsupported final entry_path_policy: {config.entry_path_policy}")
+
+
+def _staged_entry_validation_positions(
+    *,
+    final_camera_position: tuple[float, float, float],
+    entry_start_position: tuple[float, float, float],
+    sample_count: int,
+) -> tuple[tuple[float, float, float], ...]:
+    if sample_count <= 1:
+        return (entry_start_position,)
+
+    top_z = entry_start_position[2]
+    final_z = final_camera_position[2]
+    lateral_z = final_z + (top_z - final_z) / 2.0
+    descent_count = _staged_entry_descent_sample_count(sample_count)
+    lateral_count = sample_count - descent_count
+
+    positions: list[tuple[float, float, float]] = []
+    for index in range(descent_count):
+        fraction = index / max(descent_count - 1, 1)
+        z = top_z + (lateral_z - top_z) * fraction
+        positions.append((entry_start_position[0], entry_start_position[1], z))
+
+    for index in range(lateral_count):
+        fraction = (index + 1) / lateral_count
+        x = entry_start_position[0] + (final_camera_position[0] - entry_start_position[0]) * fraction
+        y = entry_start_position[1] + (final_camera_position[1] - entry_start_position[1]) * fraction
+        positions.append((x, y, lateral_z))
+
+    return tuple(positions)
+
+
+def _staged_entry_descent_sample_count(sample_count: int) -> int:
+    if sample_count <= 1:
+        return 1
+    return max(2, (sample_count + 1) // 2)
+
+
+def _entry_validation_look_at(
+    camera_position: tuple[float, float, float],
+    *,
+    final_look_at: tuple[float, float, float],
+    workspace: SurveyWorkspace,
+    config: FinalConfig,
+    sample_index: int,
+) -> tuple[float, float, float]:
+    if _entry_sample_uses_final_look_at(sample_index, config=config):
+        return final_look_at
+    if config.entry_orientation_policy == "target-look-at":
+        return final_look_at
+    if config.entry_orientation_policy == "vertical-descent":
+        return (
+            camera_position[0],
+            camera_position[1],
+            workspace.bottom_z_m,
+        )
+    raise ValueError(f"unsupported final entry_orientation_policy: {config.entry_orientation_policy}")
+
+
+def _entry_sample_uses_final_look_at(sample_index: int, *, config: FinalConfig) -> bool:
+    if config.entry_path_policy != "portal-descent-then-lateral":
+        return False
+    if config.entry_lateral_orientation_policy != "final-look-at":
+        return False
+    return sample_index >= _staged_entry_descent_sample_count(config.entry_validation_samples)
+
+
+def _entry_portal_camera_position(
+    final_camera_position: tuple[float, float, float],
+    *,
+    entry_z: float,
+    entry_portal_mode: str,
+    workspace: SurveyWorkspace,
+) -> tuple[float, float, float]:
+    if entry_portal_mode == "final-vertical":
+        return (final_camera_position[0], final_camera_position[1], entry_z)
+    if entry_portal_mode == "workspace-center":
+        return (
+            (workspace.x_min + workspace.x_max) / 2.0,
+            (workspace.y_min + workspace.y_max) / 2.0,
+            entry_z,
+        )
+    if entry_portal_mode == "opening-grid-nearest":
+        x, y = _nearest_opening_grid_entry_xy(final_camera_position, workspace=workspace)
+        return (x, y, entry_z)
+    raise ValueError(f"unsupported final entry_portal_mode: {entry_portal_mode}")
+
+
+def _nearest_opening_grid_entry_xy(
+    final_camera_position: tuple[float, float, float],
+    *,
+    workspace: SurveyWorkspace,
+) -> tuple[float, float]:
+    step_x = (workspace.x_max - workspace.x_min) / 4.0
+    step_y = (workspace.y_max - workspace.y_min) / 4.0
+    centers = [
+        (
+            workspace.x_min + (col + 0.5) * step_x,
+            workspace.y_max - (row + 0.5) * step_y,
+        )
+        for row in (1, 2, 3)
+        for col in (1, 2, 3)
+    ]
+    return min(
+        centers,
+        key=lambda center: math.hypot(center[0] - final_camera_position[0], center[1] - final_camera_position[1]),
+    )
+
+
+def _interpolate_position(
+    final_position: tuple[float, float, float],
+    entry_position: tuple[float, float, float],
+    fraction_from_final: float,
+) -> tuple[float, float, float]:
+    fraction = min(max(float(fraction_from_final), 0.0), 1.0)
+    return (
+        final_position[0] + (entry_position[0] - final_position[0]) * fraction,
+        final_position[1] + (entry_position[1] - final_position[1]) * fraction,
+        final_position[2] + (entry_position[2] - final_position[2]) * fraction,
+    )
 
 
 def _validate_entry_views(
@@ -1005,10 +1380,82 @@ def _validate_entry_views(
         result["validation_role"] = "top_opening_entry_sample"
         result["target_object_id"] = planned.target.object_id
         result["view_candidate_id"] = active_candidate.candidate_id
+        if result.get("status") == "success" and _actual_qpos_from_validation(result) is None:
+            result = dict(result)
+            result["status"] = "failed"
+            result["message"] = "Entry validation did not include actual_qpos for whole-arm path traceability."
         results.append(result)
         if result.get("status") != "success":
             break
     return results
+
+
+def _validate_final_view_candidate(
+    backend: MujocoSurveyBackend,
+    candidate: FinalViewCandidate,
+) -> dict[str, Any]:
+    result = backend.validate_view_pose(candidate.view)
+    result["validation_role"] = "final_photo_pose"
+    result["view_candidate_id"] = candidate.candidate_id
+    return result
+
+
+def _actual_qpos_from_validation(validation: dict[str, Any]) -> tuple[float, ...] | None:
+    actual_qpos = validation.get("actual_qpos")
+    if not isinstance(actual_qpos, list) or not actual_qpos:
+        return None
+    try:
+        return tuple(float(value) for value in actual_qpos)
+    except (TypeError, ValueError):
+        return None
+
+
+def _copy_final_view_candidate_with_fixed_qpos(
+    candidate: FinalViewCandidate,
+    *,
+    fixed_qpos: tuple[float, ...],
+) -> FinalViewCandidate:
+    return FinalViewCandidate(
+        candidate_id=candidate.candidate_id,
+        view=_copy_final_survey_view(
+            candidate.view,
+            fixed_pose_source=FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
+            fixed_qpos=fixed_qpos,
+        ),
+        entry_views=candidate.entry_views,
+        approach_angle_rad=candidate.approach_angle_rad,
+        angle_source=candidate.angle_source,
+        angle_offset_deg=candidate.angle_offset_deg,
+        standoff_m=candidate.standoff_m,
+        standoff_multiplier=candidate.standoff_multiplier,
+        camera_z_offset_m=candidate.camera_z_offset_m,
+        roll_offset_deg=candidate.roll_offset_deg,
+        entry_portal_mode=candidate.entry_portal_mode,
+        candidate_source=candidate.candidate_source,
+        direction_adjusted=candidate.direction_adjusted,
+        camera_position_world=candidate.camera_position_world,
+    )
+
+
+def _copy_final_survey_view(
+    view: SurveyView,
+    *,
+    fixed_pose_source: str,
+    fixed_qpos: tuple[float, ...],
+) -> SurveyView:
+    return SurveyView(
+        view_id=view.view_id,
+        grid_row=view.grid_row,
+        grid_col=view.grid_col,
+        camera_name=view.camera_name,
+        desired_camera_position_world=view.desired_camera_position_world,
+        look_at_world=view.look_at_world,
+        T_world_camera=view.T_world_camera,
+        scan_layer=view.scan_layer,
+        scan_grid_size=view.scan_grid_size,
+        fixed_pose_source=fixed_pose_source,
+        fixed_qpos=fixed_qpos,
+    )
 
 
 def _object_capture_result(
@@ -1095,6 +1542,7 @@ def _entry_failed_capture_result(
                 candidate=planned.view_candidates[0],
                 entry_results=entry_results,
                 view_result=_planned_view_result(planned.view),
+                final_pose_validation=None,
                 status="entry_validation_failed",
                 message=str(failed_entry.get("message") or "entry validation failed"),
             )
@@ -1112,7 +1560,7 @@ def _entry_failed_capture_result(
         "annotated_image_path": None,
         "yolo_raw_path": None,
         "notes": [
-            "The top-opening entry pose samples did not all pass IK and collision checks, so the final photo was not rendered.",
+            "The top-opening entry waypoints did not all pass whole-arm IK and collision checks, so the final photo was not rendered.",
             f"First failed entry sample: {failed_entry.get('view_id')}.",
         ],
     }
@@ -1143,6 +1591,48 @@ def _planned_capture_result(planned: FinalPlannedCapture) -> dict[str, Any]:
     }
 
 
+def _skipped_follow_up_capture_result(planned: FinalPlannedCapture) -> dict[str, Any]:
+    return {
+        "target": planned.target.to_dict(),
+        "status": "skipped_follow_up_not_needed",
+        "source_status": planned.target.source_status,
+        "target_role": planned.target.target_role,
+        "selected_view_candidate": None,
+        "view_candidate_attempts": [],
+        "view_candidates": [candidate.to_dict() for candidate in planned.view_candidates],
+        "view": _planned_view_result(planned.view),
+        "entry_validation": [],
+        "matched_observations": [],
+        "best_observation": None,
+        "recognition": {
+            "status": "not_run",
+            "reason": "desired_stable_object_count_already_reached",
+        },
+        "final_image_path": None,
+        "depth_path": None,
+        "annotated_image_path": None,
+        "yolo_raw_path": None,
+        "notes": [
+            "This follow-up target was not rendered because confirmed primary/follow-up objects already reached the configured desired stable count.",
+            "Skipped follow-up targets remain visible in object_captures and unstable_objects instead of being treated as successful detections.",
+        ],
+    }
+
+
+def _desired_stable_count_reached(
+    object_captures: list[dict[str, Any]],
+    *,
+    desired_stable_object_count: int | None,
+) -> bool:
+    if desired_stable_object_count is None:
+        return False
+    selection = select_stable_final_objects(
+        object_captures,
+        desired_stable_object_count=desired_stable_object_count,
+    )
+    return int(selection["stable_object_selection"]["stable_object_count"]) >= desired_stable_object_count
+
+
 def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     target = capture.get("target")
     if not isinstance(target, dict):
@@ -1153,7 +1643,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
     elif status == "follow_up_observed":
         reason = _follow_up_stable_reason(target, capture)
         if reason is None:
-            return None, _rejected_stable_object_payload(capture, reason="follow_up_not_resolved")
+            return None, _rejected_stable_object_payload(capture, reason=_follow_up_rejection_reason(target, capture))
     else:
         return None, _rejected_stable_object_payload(capture, reason=status or "not_stable_status")
 
@@ -1201,6 +1691,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
                 "reason": reason,
                 "target_xy_distance_m": recognition.get("target_xy_distance_m"),
                 "target_match_radius_m": recognition.get("target_match_radius_m"),
+                "bbox_quality": recognition.get("bbox_quality"),
             },
             "pose_quality": {
                 "position_source": "final_close_yolo_depth_observation",
@@ -1216,9 +1707,75 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
     return stable_object, None
 
 
+def _matching_stable_object(
+    candidate: dict[str, Any],
+    accepted: list[dict[str, Any]],
+    *,
+    max_distance_m: float,
+) -> dict[str, Any] | None:
+    candidate_class = _optional_text(candidate.get("class_name"))
+    candidate_position = _optional_position_from_value(candidate.get("position_world"))
+    if candidate_class is None or candidate_position is None:
+        return None
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in accepted:
+        item_class = _optional_text(item.get("class_name"))
+        item_position = _optional_position_from_value(item.get("position_world"))
+        if item_class != candidate_class or item_position is None:
+            continue
+        distance = _xy_distance(candidate_position, item_position)
+        if distance > max_distance_m:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    return best[1] if best is not None else None
+
+
+def _duplicate_follow_up_rejection_payload(
+    capture: dict[str, Any],
+    *,
+    stable_object: dict[str, Any],
+    duplicate: dict[str, Any],
+    max_distance_m: float,
+) -> dict[str, Any]:
+    rejection = _rejected_stable_object_payload(capture, reason="duplicate_follow_up_observation")
+    candidate_position = _optional_position_from_value(stable_object.get("position_world"))
+    duplicate_position = _optional_position_from_value(duplicate.get("position_world"))
+    distance = (
+        _xy_distance(candidate_position, duplicate_position)
+        if candidate_position is not None and duplicate_position is not None
+        else None
+    )
+    rejection["duplicate_of_object_id"] = duplicate.get("object_id")
+    rejection["duplicate_xy_distance_m"] = _round(distance) if distance is not None else None
+    rejection["duplicate_radius_m"] = _round(max_distance_m)
+    rejection["notes"] = [
+        "This follow-up target was resolved visually but excluded from stable_objects because it duplicates an already confirmed stable object.",
+    ]
+    return rejection
+
+
+def _follow_up_not_needed_rejection_payload(
+    capture: dict[str, Any],
+    *,
+    desired_stable_object_count: int,
+    stable_object_count: int,
+) -> dict[str, Any]:
+    rejection = _rejected_stable_object_payload(capture, reason="follow_up_not_needed")
+    rejection["desired_stable_object_count"] = int(desired_stable_object_count)
+    rejection["current_stable_object_count"] = int(stable_object_count)
+    rejection["notes"] = [
+        "This follow-up target was observed but excluded from stable_objects because primary confirmed objects already reached the configured desired count.",
+    ]
+    return rejection
+
+
 def _follow_up_stable_reason(target: dict[str, Any], capture: dict[str, Any]) -> str | None:
     recognition = capture.get("recognition")
     if not isinstance(recognition, dict):
+        return None
+    confidence = _optional_float(recognition.get("confidence"))
+    if confidence is None or confidence < DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE:
         return None
     detected_class = _optional_text(recognition.get("detected_class_name"))
     if detected_class is None:
@@ -1237,11 +1794,32 @@ def _follow_up_stable_reason(target: dict[str, Any], capture: dict[str, Any]) ->
     return None
 
 
+def _follow_up_rejection_reason(target: dict[str, Any], capture: dict[str, Any]) -> str:
+    recognition = capture.get("recognition")
+    if not isinstance(recognition, dict):
+        return "follow_up_not_resolved"
+    confidence = _optional_float(recognition.get("confidence"))
+    if confidence is None or confidence < DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE:
+        return "follow_up_low_confidence"
+    detected_class = _optional_text(recognition.get("detected_class_name"))
+    if detected_class is None:
+        return "follow_up_not_resolved"
+    source_status = str(target.get("source_status") or "")
+    source_class = _optional_text(target.get("class_name"))
+    candidate_class_names = _string_tuple(target.get("candidate_class_names", []))
+    if source_status == "tentative" and source_class is not None and detected_class != source_class:
+        return "follow_up_class_mismatch"
+    if source_status == "ambiguous" and candidate_class_names and detected_class not in candidate_class_names:
+        return "follow_up_class_mismatch"
+    return "follow_up_not_resolved"
+
+
 def _stable_selection_payload(
     stable_objects: list[dict[str, Any]],
     rejected_objects: list[dict[str, Any]],
     *,
     status: str,
+    desired_stable_object_count: int | None,
 ) -> dict[str, Any]:
     rejected_counts: dict[str, int] = {}
     for rejected in rejected_objects:
@@ -1256,11 +1834,17 @@ def _stable_selection_payload(
             "stable_object_count": len(stable_objects),
             "unstable_object_count": len(rejected_objects),
             "rejected_reason_counts": rejected_counts,
+            "desired_stable_object_count": desired_stable_object_count,
+            "follow_up_duplicate_radius_m": _round(DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M),
+            "follow_up_promotion_min_confidence": _round(DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE),
             "rules": [
                 "Primary row-stable targets enter stable_objects only when close capture confirms the same class.",
-                "Tentative targets enter stable_objects only when close capture observes the same class, or when no tentative class was supplied.",
-                "Ambiguous targets enter stable_objects only when close capture resolves to one of the candidate classes.",
-                "Unconfirmed, class-conflict, skipped, and failed captures are kept out of stable_objects.",
+                "Follow-up targets are promotion candidates only while the stable object list is below the configured desired count.",
+                "Follow-up targets are not rendered once the configured desired stable count has already been reached.",
+                "Tentative targets enter stable_objects only when close capture observes the same class with enough confidence, or when no tentative class was supplied.",
+                "Ambiguous targets enter stable_objects only when close capture resolves to one of the candidate classes with enough confidence.",
+                "Resolved follow-up targets are kept out of stable_objects when they duplicate an already confirmed same-class object within the configured XY radius.",
+                "Quality-limited, unconfirmed, class-conflict, skipped, and failed captures are kept out of stable_objects.",
             ],
         },
     }
@@ -1278,6 +1862,9 @@ def _rejected_stable_object_payload(capture: dict[str, Any], *, reason: str) -> 
         "detected_class_name": recognition.get("detected_class_name"),
         "source_class_name": recognition.get("source_class_name"),
         "candidate_class_names": recognition.get("candidate_class_names", []),
+        "bbox_xyxy": recognition.get("bbox_xyxy"),
+        "bbox_quality": recognition.get("bbox_quality"),
+        "target_xy_distance_m": recognition.get("target_xy_distance_m"),
         "final_image_path": capture.get("final_image_path"),
         "notes": [
             "This target is intentionally excluded from stable_objects because close-capture evidence did not satisfy the stable selection policy.",
@@ -1350,7 +1937,8 @@ def _recognition_payload(
         class_match = None
     else:
         class_match = detected_class == target.class_name
-    return {
+    bbox_quality = _bbox_quality_payload(best_observation, config=config)
+    payload = {
         "status": "observed",
         "source_class_name": target.class_name,
         "detected_class_name": detected_class,
@@ -1361,7 +1949,49 @@ def _recognition_payload(
         "target_xy_distance_m": best_observation.get("target_xy_distance_m"),
         "bbox_xyxy": best_observation.get("bbox_xyxy"),
         "target_match_radius_m": _round(config.target_match_radius_m),
+        "bbox_quality": bbox_quality,
     }
+    if not bbox_quality["accepted"]:
+        payload["reason"] = "bbox_quality_limited"
+    return payload
+
+
+def _bbox_quality_payload(
+    observation: dict[str, Any],
+    *,
+    config: FinalConfig,
+) -> dict[str, Any]:
+    bbox = _bbox_tuple(observation.get("bbox_xyxy"))
+    bbox_area = _bbox_area_px(bbox)
+    margin = _bbox_border_margin_px(bbox, image_width=config.image_width, image_height=config.image_height)
+    border_safe = margin >= config.selection_border_margin_px
+    reasons: list[str] = []
+    if bbox_area <= 0.0:
+        reasons.append("empty_bbox")
+    if not border_safe:
+        reasons.append("bbox_too_close_to_image_boundary")
+    accepted = bbox_area > 0.0 and border_safe
+    return {
+        "policy_version": FINAL_BBOX_QUALITY_POLICY_VERSION,
+        "status": "accepted" if accepted else "limited",
+        "accepted": accepted,
+        "bbox_area_px": _round(bbox_area),
+        "bbox_min_border_margin_px": _round(margin),
+        "selection_border_margin_px": _round(config.selection_border_margin_px),
+        "image_width": int(config.image_width),
+        "image_height": int(config.image_height),
+        "reasons": reasons,
+        "rules": [
+            "A final confirmation bbox must have positive image area.",
+            "A final confirmation bbox must keep the configured minimum distance from every image border.",
+            "Border-limited observations remain visible in reports but do not confirm or promote objects.",
+        ],
+    }
+
+
+def _recognition_bbox_quality_accepted(recognition: dict[str, Any]) -> bool:
+    bbox_quality = recognition.get("bbox_quality")
+    return isinstance(bbox_quality, dict) and bbox_quality.get("accepted") is True
 
 
 def _merge_same_class_observation_fragments(
@@ -1470,7 +2100,7 @@ def _final_observation_selection_score(
     distance = float(item.get("target_xy_distance_m", float("inf")))
     confidence = float(item.get("confidence", 0.0))
     item["selection_score"] = {
-        "policy_version": "final_observation_selection_policy_v2",
+        "policy_version": "final_observation_selection_policy_v3",
         "class_match": class_match,
         "bbox_area_px": _round(bbox_area),
         "bbox_min_border_margin_px": _round(margin),
@@ -1481,15 +2111,15 @@ def _final_observation_selection_score(
         "rules": [
             "Prefer detections whose class matches the final target.",
             "Prefer bbox fragments merged from same-class overlapping detections when available.",
-            "Prefer detections with enough image-border margin.",
-            "Prefer larger bbox area before using target distance as a tie-breaker.",
+            "Prefer larger bbox area before treating image-border margin as a tie-breaker.",
+            "Prefer detections with enough image-border margin before using target distance as a tie-breaker.",
         ],
     }
     return (
         1.0 if class_match else 0.0,
         float(merged_count),
-        1.0 if border_safe else 0.0,
         bbox_area,
+        1.0 if border_safe else 0.0,
         -distance,
         confidence,
     )
@@ -1512,22 +2142,54 @@ def _capture_status(
     if target.source_status == "stable":
         class_match = recognition.get("class_match")
         if class_match is True:
+            if not _recognition_bbox_quality_accepted(recognition):
+                return "quality_limited"
             return "confirmed"
         if class_match is False:
             return "class_conflict"
         return "unconfirmed"
+    if not _recognition_bbox_quality_accepted(recognition):
+        return "quality_limited"
     return "follow_up_observed"
+
+
+def _capture_result_satisfies_target(capture: dict[str, Any]) -> bool:
+    return str(capture.get("status") or "") in {"confirmed", "follow_up_observed", "captured_yolo_skipped"}
+
+
+def _capture_result_fallback_score(capture: dict[str, Any]) -> tuple[float, float, float]:
+    status = str(capture.get("status") or "")
+    status_score = {
+        "quality_limited": 2.5,
+        "class_conflict": 2.0,
+        "unconfirmed": 1.0,
+        "capture_failed": 0.0,
+    }.get(status, 0.0)
+    recognition = capture.get("recognition") if isinstance(capture.get("recognition"), dict) else {}
+    confidence = _float_or_zero(recognition.get("confidence"))
+    distance = _float_or_zero(recognition.get("target_xy_distance_m"))
+    return (status_score, confidence, -distance)
+
+
+def _continue_after_capture_message(capture: dict[str, Any]) -> str:
+    recognition = capture.get("recognition") if isinstance(capture.get("recognition"), dict) else {}
+    reason = recognition.get("reason") or recognition.get("status") or capture.get("status")
+    return f"Captured image did not satisfy final target confirmation policy; continuing to next candidate ({reason})."
 
 
 def _capture_notes(target: FinalTarget, status: str) -> list[str]:
     notes = [
         "Single-object capture used row report target positions as formal inputs and did not assume a fixed object count.",
-        "The final photo was rendered only after top-opening entry samples and the final wrist-camera pose passed IK and collision checks.",
+        "The final photo was rendered only after top-opening entry waypoints and the final wrist-camera pose passed whole-arm IK and collision checks.",
+        "The rendered pose reused the validated fixed qpos recorded in selected_view_candidate.view.",
+        "If a collision-safe capture does not confirm the target, final continues trying later collision-safe candidates before returning an unresolved result.",
     ]
     if target.source_status != "stable":
         notes.append("This target came from tentative or ambiguous row evidence and remains a follow-up result, not a stable object promotion.")
     if status == "class_conflict":
         notes.append("The closest close-view YOLO observation did not match the source stable class name.")
+    if status == "quality_limited":
+        notes.append("The closest close-view YOLO observation was kept in the report but its bbox did not satisfy final confirmation quality.")
     if status == "unconfirmed":
         notes.append("No close YOLO-depth observation confirmed this target within the configured association radius.")
     return notes
@@ -1536,7 +2198,7 @@ def _capture_notes(target: FinalTarget, status: str) -> list[str]:
 def _overall_status(object_captures: list[dict[str, Any]]) -> str:
     if not object_captures:
         return "failed"
-    success_statuses = {"confirmed", "follow_up_observed", "captured_yolo_skipped"}
+    success_statuses = {"confirmed", "follow_up_observed", "captured_yolo_skipped", "skipped_follow_up_not_needed"}
     if all(capture.get("status") in success_statuses for capture in object_captures):
         return "success"
     if any(capture.get("view", {}).get("status") == "success" for capture in object_captures):
@@ -1552,6 +2214,98 @@ def _summary_message(object_captures: list[dict[str, Any]], *, planned_count: in
     captured_count = sum(1 for capture in object_captures if capture.get("view", {}).get("status") == "success")
     count_text = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
     return f"Captured {captured_count}/{planned_count} final views; result_status_counts: {count_text}."
+
+
+def _final_reachable_planning_summary(
+    *,
+    planned_captures: tuple[FinalPlannedCapture, ...],
+    object_captures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    attempt_count = 0
+    attempt_status_counts: dict[str, int] = {}
+    rejection_counts = {
+        "entry_collision": 0,
+        "entry_ik_failed": 0,
+        "entry_missing_qpos": 0,
+        "final_collision": 0,
+        "final_ik_failed": 0,
+        "final_missing_qpos": 0,
+        "render_revalidation_failed": 0,
+    }
+    selected_fixed_qpos_count = 0
+    for capture in object_captures:
+        selected_candidate = capture.get("selected_view_candidate")
+        selected_view = selected_candidate.get("view") if isinstance(selected_candidate, dict) else None
+        if isinstance(selected_view, dict) and selected_view.get("fixed_pose_source") == FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE:
+            selected_fixed_qpos_count += 1
+        attempts = capture.get("view_candidate_attempts", [])
+        if not isinstance(attempts, list):
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            attempt_count += 1
+            status = str(attempt.get("status") or "unknown")
+            attempt_status_counts[status] = attempt_status_counts.get(status, 0) + 1
+            for entry in attempt.get("entry_validation", []):
+                if isinstance(entry, dict):
+                    _accumulate_final_validation_rejection(
+                        rejection_counts,
+                        entry,
+                        collision_key="entry_collision",
+                        ik_key="entry_ik_failed",
+                        missing_qpos_key="entry_missing_qpos",
+                    )
+            final_validation = attempt.get("final_pose_validation")
+            if isinstance(final_validation, dict):
+                _accumulate_final_validation_rejection(
+                    rejection_counts,
+                    final_validation,
+                    collision_key="final_collision",
+                    ik_key="final_ik_failed",
+                    missing_qpos_key="final_missing_qpos",
+                )
+            view = attempt.get("view")
+            if isinstance(view, dict) and view.get("status") != "success" and status == "final_pose_failed":
+                rejection_counts["render_revalidation_failed"] += 1
+    return {
+        "strategy": "whole_arm_final_view_candidate_selection_v1",
+        "planned_target_count": len(planned_captures),
+        "planned_view_candidate_count": sum(len(planned.view_candidates) for planned in planned_captures),
+        "captured_target_count": sum(1 for capture in object_captures if capture.get("view", {}).get("status") == "success"),
+        "selected_fixed_qpos_count": selected_fixed_qpos_count,
+        "attempt_count": attempt_count,
+        "attempt_status_counts": attempt_status_counts,
+        "rejection_counts": rejection_counts,
+        "rules": [
+            "Final candidates enumerate standoff, approach angle, camera height, and camera roll from FinalConfig.",
+            "Entry portal modes are also candidate-level policy choices from FinalConfig, including the optional nearest opening-grid portal.",
+            "Each candidate is accepted only after all top-opening portal entry waypoints and the final photo pose pass MuJoCo IK and robot collision checks.",
+            "The rendered final photo reuses the validated qpos through fixed_pose_source instead of solving a new pose silently.",
+            "If no candidate passes, the target remains failed or partial and is not promoted to stable_objects.",
+        ],
+    }
+
+
+def _accumulate_final_validation_rejection(
+    counts: dict[str, int],
+    validation: dict[str, Any],
+    *,
+    collision_key: str,
+    ik_key: str,
+    missing_qpos_key: str,
+) -> None:
+    if validation.get("status") == "success":
+        return
+    collision = validation.get("collision") if isinstance(validation.get("collision"), dict) else {}
+    ik = validation.get("ik") if isinstance(validation.get("ik"), dict) else {}
+    message = str(validation.get("message") or "")
+    if collision and not collision.get("collision_free", True):
+        counts[collision_key] += 1
+    elif ik and not ik.get("success", False):
+        counts[ik_key] += 1
+    elif "actual_qpos" in message:
+        counts[missing_qpos_key] += 1
 
 
 def _plan_payload(
@@ -1588,11 +2342,35 @@ def _plan_payload(
             "camera_must_be_inside_tank": True,
             "camera_z_must_be_below_tank_opening": True,
             "entry_clearance_margin_m": _round(config.entry_clearance_margin_m),
+            "entry_portal_modes": list(config.entry_portal_modes),
+            "entry_orientation_policy": config.entry_orientation_policy,
+            "entry_lateral_orientation_policy": config.entry_lateral_orientation_policy,
+            "entry_path_policy": config.entry_path_policy,
+            "desired_stable_object_count": config.desired_stable_object_count,
             "final_view_not_top_down_only": True,
             "multiple_final_view_candidates": True,
             "multiple_final_view_standoff_distances": True,
-            "entry_path": "discrete wrist-camera pose samples from the top opening down to each final photo pose",
-            "pose_validation": "MuJoCo IK plus robot collision check for entry samples and final photo pose.",
+            "multiple_final_camera_height_candidates": True,
+            "multiple_final_camera_roll_candidates": True,
+            "entry_path": (
+                "discrete whole-arm entry waypoints from the configured top-opening portal to each final photo pose, "
+                "with portal-descent waypoints using entry_orientation_policy and lateral waypoints using "
+                "entry_lateral_orientation_policy"
+            ),
+            "portal_descent_then_lateral_note": (
+                "portal-descent-then-lateral first validates vertical descent at the opening portal, then validates "
+                "low-height lateral motion toward the final photo pose before rendering. The lateral samples use "
+                "entry_lateral_orientation_policy, which defaults to final-look-at so the wrist transitions toward "
+                "the photo approach inside the tank instead of sliding sideways while still pointing vertically down."
+            ),
+            "opening_grid_nearest_note": (
+                "opening-grid-nearest maps the tank opening to the inner 3x3 centers of a 4x4 workspace grid "
+                "and chooses the nearest center for each final camera candidate."
+            ),
+            "pose_validation": (
+                "MuJoCo IK plus robot body collision checks for every entry waypoint and the final photo pose."
+            ),
+            "render_pose_reuse": "selected final captures are rendered with fixed_qpos from the validated final pose",
             "row_report_is_layered_input": True,
         },
         "workspace": workspace.to_dict(),
@@ -1622,7 +2400,14 @@ def _report_payload(
 ) -> dict[str, Any]:
     primary_targets = [planned.target.to_dict() for planned in planned_captures if planned.target.source_status == "stable"]
     follow_up_targets = [planned.target.to_dict() for planned in planned_captures if planned.target.source_status != "stable"]
-    stable_selection = select_stable_final_objects(object_captures)
+    stable_selection = select_stable_final_objects(
+        object_captures,
+        desired_stable_object_count=config.desired_stable_object_count,
+    )
+    reachable_planning_summary = _final_reachable_planning_summary(
+        planned_captures=planned_captures,
+        object_captures=object_captures,
+    )
     return {
         "schema_version": "task1_final_report_v1",
         "stage": "final",
@@ -1650,12 +2435,14 @@ def _report_payload(
         "stable_object_selection": stable_selection["stable_object_selection"],
         "quality": row_report.object_selection_summary,
         "object_selection_summary": row_report.object_selection_summary,
+        "final_reachable_planning_summary": reachable_planning_summary,
         "planned_captures": [planned.to_dict() for planned in planned_captures],
         "object_captures": object_captures,
         "notes": [
             "Stable row objects are consumed as primary final capture targets.",
-            "Tentative and ambiguous row objects are consumed as explicit follow-up targets and can enter stable_objects only after close-capture resolution.",
+            "Tentative and ambiguous row objects are consumed as explicit follow-up targets only when the configured desired stable count still needs rescue candidates.",
             "Each target keeps its own capture status; unconfirmed and class-conflict results are kept out of stable_objects.",
+            "Final capture views are rendered only from fixed qpos values produced by successful whole-arm IK and collision validation.",
             "The report intentionally supports any number of row targets.",
         ],
     }
@@ -1835,6 +2622,18 @@ def _float_or_zero(value: Any) -> float:
         return 0.0
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
 def _safe_id(value: str) -> str:
     safe = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
     return safe or "target"
@@ -1861,6 +2660,36 @@ def _make_look_at_transform(
         (_round(right[0]), _round(up[0]), _round(camera_z[0]), _round(camera_position[0])),
         (_round(right[1]), _round(up[1]), _round(camera_z[1]), _round(camera_position[1])),
         (_round(right[2]), _round(up[2]), _round(camera_z[2]), _round(camera_position[2])),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+
+def _roll_camera_transform(
+    transform: tuple[tuple[float, float, float, float], ...],
+    roll_rad: float,
+) -> tuple[tuple[float, float, float, float], ...]:
+    if abs(roll_rad) <= 1e-12:
+        return transform
+    right = (transform[0][0], transform[1][0], transform[2][0])
+    up = (transform[0][1], transform[1][1], transform[2][1])
+    camera_z = (transform[0][2], transform[1][2], transform[2][2])
+    position = (transform[0][3], transform[1][3], transform[2][3])
+    cos_roll = math.cos(roll_rad)
+    sin_roll = math.sin(roll_rad)
+    rolled_right = (
+        right[0] * cos_roll + up[0] * sin_roll,
+        right[1] * cos_roll + up[1] * sin_roll,
+        right[2] * cos_roll + up[2] * sin_roll,
+    )
+    rolled_up = (
+        -right[0] * sin_roll + up[0] * cos_roll,
+        -right[1] * sin_roll + up[1] * cos_roll,
+        -right[2] * sin_roll + up[2] * cos_roll,
+    )
+    return (
+        (_round(rolled_right[0]), _round(rolled_up[0]), _round(camera_z[0]), _round(position[0])),
+        (_round(rolled_right[1]), _round(rolled_up[1]), _round(camera_z[1]), _round(position[1])),
+        (_round(rolled_right[2]), _round(rolled_up[2]), _round(camera_z[2]), _round(position[2])),
         (0.0, 0.0, 0.0, 1.0),
     )
 
@@ -1901,6 +2730,26 @@ def _unique_angle_records(records: list[dict[str, Any]]) -> tuple[dict[str, Any]
             copied = dict(record)
             copied["angle_rad"] = angle
             unique.append(copied)
+    return tuple(unique)
+
+
+def _unique_float_records(values: tuple[float, ...]) -> tuple[float, ...]:
+    unique: list[float] = []
+    for value in values:
+        numeric = float(value)
+        if any(abs(numeric - existing) <= 1e-9 for existing in unique):
+            continue
+        unique.append(numeric)
+    return tuple(unique)
+
+
+def _unique_text_records(values: tuple[str, ...]) -> tuple[str, ...]:
+    unique: list[str] = []
+    for value in values:
+        text = str(value)
+        if text in unique:
+            continue
+        unique.append(text)
     return tuple(unique)
 
 
