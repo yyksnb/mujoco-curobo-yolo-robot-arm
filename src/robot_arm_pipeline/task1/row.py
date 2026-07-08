@@ -275,6 +275,7 @@ class RowConfig:
             yolo_tile_nms_iou=self.yolo_tile_nms_iou,
             depth_sample_stride_px=self.depth_sample_stride_px,
             depth_component_min_pixels=self.depth_component_min_pixels,
+            save_depth_arrays=True,
             run_yolo=self.run_yolo,
             plan_only=self.plan_only,
             strict_yolo=self.strict_yolo,

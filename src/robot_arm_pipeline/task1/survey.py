@@ -18,7 +18,6 @@ DEFAULT_IMAGE_HEIGHT = 1080
 DEFAULT_TANK_OPENING_Z_M = 0.50
 DEFAULT_CAMERA_Z_M = 0.38
 DEFAULT_OPENING_CLEARANCE_M = 0.035
-DEFAULT_OBLIQUE_OFFSET_M = 0.075
 DEFAULT_CLUSTER_RADIUS_M = 0.11
 DEFAULT_CROSS_CLASS_MERGE_RADIUS_M = 0.06
 DEFAULT_CLUSTER_SPLIT_DISTANCE_M = 0.075
@@ -44,6 +43,9 @@ DEFAULT_WEAK_MULTIVIEW_FALLBACK_ELONGATED_MAX_BBOX_AREA_PX = 35_000.0
 DEFAULT_BBOX_CLIP_MARGIN_PX = 2.0
 DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE = 0.35
 DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M = 0.03
+DEFAULT_SAVE_CANDIDATE_ANNOTATIONS = True
+DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS = False
+DEFAULT_SAVE_DEPTH_ARRAYS = False
 DEFAULT_YOLO_TILE_GRID_SIZE = 2
 DEFAULT_YOLO_TILE_OVERLAP = 0.12
 DEFAULT_YOLO_TILE_NMS_IOU = 0.45
@@ -53,16 +55,9 @@ DEFAULT_DEPTH_COMPONENT_SPLIT_DISTANCE_M = 0.07
 DEFAULT_DEPTH_MODE_BAND_M = 0.025
 DEFAULT_DEPTH_FOREGROUND_PERCENTILE = 45.0
 DEFAULT_DEPTH_FOREGROUND_MARGIN_M = 0.025
-DEFAULT_SURVEY_REACHABLE_POSE_SAMPLES = 180_000
-DEFAULT_SURVEY_OPENING_REACHABLE_POSE_SAMPLES = 720_000
-DEFAULT_SURVEY_REACHABLE_MIN_CAMERA_Z_M = 0.08
-DEFAULT_SURVEY_POSE_SELECTION_POLICY = "higher_camera_z_then_cell_center"
-DEFAULT_SURVEY_CAMERA_Z_MODE = "fixed_mixed_4x4"
 DEFAULT_SURVEY_ABOVE_OPENING_MARGIN_M = 0.12
 DEFAULT_SURVEY_OPENING_VISIBILITY_MIN_FRACTION = 0.45
 DEFAULT_SURVEY_OPENING_VISIBILITY_GRID_SIZE = 3
-DEFAULT_SURVEY_OPENING_GRID_SIZE = 3
-HALTON_BASES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29)
 
 FIXED_MIXED_4X4_POSE_SOURCE = "fixed_mixed_4x4_v1"
 FIXED_MIXED_4X4_SURVEY_POSES: tuple[
@@ -305,7 +300,6 @@ class SurveyConfig:
     camera_z_m: float = DEFAULT_CAMERA_Z_M
     tank_opening_z_m: float = DEFAULT_TANK_OPENING_Z_M
     opening_clearance_m: float = DEFAULT_OPENING_CLEARANCE_M
-    oblique_offset_m: float = DEFAULT_OBLIQUE_OFFSET_M
     cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M
     cross_class_merge_radius_m: float = DEFAULT_CROSS_CLASS_MERGE_RADIUS_M
     cluster_split_distance_m: float = DEFAULT_CLUSTER_SPLIT_DISTANCE_M
@@ -333,6 +327,9 @@ class SurveyConfig:
     bbox_clip_margin_px: float = DEFAULT_BBOX_CLIP_MARGIN_PX
     min_unclipped_candidate_vote: float = DEFAULT_MIN_UNCLIPPED_CANDIDATE_VOTE
     candidate_workspace_margin_m: float = DEFAULT_CANDIDATE_WORKSPACE_MARGIN_M
+    save_candidate_annotations: bool = DEFAULT_SAVE_CANDIDATE_ANNOTATIONS
+    save_raw_yolo_annotations: bool = DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS
+    save_depth_arrays: bool = DEFAULT_SAVE_DEPTH_ARRAYS
     yolo_confidence: float = 0.15
     yolo_iou: float | None = None
     yolo_image_size: int | None = None
@@ -351,16 +348,9 @@ class SurveyConfig:
     ik_position_tolerance_m: float = 0.05
     ik_orientation_tolerance_rad: float = 0.35
     ik_damping: float = 1e-3
-    survey_reachable_pose_search: bool = True
-    survey_reachable_pose_samples: int = DEFAULT_SURVEY_REACHABLE_POSE_SAMPLES
-    survey_opening_reachable_pose_samples: int = DEFAULT_SURVEY_OPENING_REACHABLE_POSE_SAMPLES
-    survey_reachable_min_camera_z_m: float = DEFAULT_SURVEY_REACHABLE_MIN_CAMERA_Z_M
-    survey_pose_selection_policy: str = DEFAULT_SURVEY_POSE_SELECTION_POLICY
-    survey_camera_z_mode: str = DEFAULT_SURVEY_CAMERA_Z_MODE
     survey_above_opening_margin_m: float = DEFAULT_SURVEY_ABOVE_OPENING_MARGIN_M
     survey_opening_visibility_min_fraction: float = DEFAULT_SURVEY_OPENING_VISIBILITY_MIN_FRACTION
     survey_opening_visibility_grid_size: int = DEFAULT_SURVEY_OPENING_VISIBILITY_GRID_SIZE
-    survey_opening_grid_size: int = DEFAULT_SURVEY_OPENING_GRID_SIZE
 
     def fusion_policy(self) -> SurveyFusionPolicy:
         return SurveyFusionPolicy(
@@ -539,54 +529,13 @@ def build_grid_survey_plan(
     scene_or_layout: SurveySceneInput | Stage0Layout,
     config: SurveyConfig = SurveyConfig(),
 ) -> tuple[SurveyWorkspace, tuple[SurveyView, ...]]:
-    if config.grid_size <= 0:
-        raise ValueError("grid_size must be positive")
-    if config.survey_opening_grid_size <= 0:
-        raise ValueError("survey_opening_grid_size must be positive")
+    if config.grid_size != 4:
+        raise ValueError("task1 survey uses the fixed mixed 4x4 capture plan; grid_size must be 4")
     if config.image_width <= 0 or config.image_height <= 0:
         raise ValueError("image dimensions must be positive")
 
     scene = _survey_scene_input(scene_or_layout, config=config)
-    workspace = scene.workspace
-    views: list[SurveyView] = []
-    if config.survey_camera_z_mode == "fixed_mixed_4x4":
-        return workspace, _fixed_mixed_4x4_survey_views(config)
-
-    if config.survey_camera_z_mode == "opening_zone_then_below_opening":
-        _append_grid_survey_views(
-            views,
-            workspace=workspace,
-            config=config,
-            grid_size=config.survey_opening_grid_size,
-            scan_layer="opening_zone",
-            view_id_prefix="survey_opening",
-            camera_z_m=workspace.tank_opening_z_m + config.survey_above_opening_margin_m,
-        )
-        _append_grid_survey_views(
-            views,
-            workspace=workspace,
-            config=config,
-            grid_size=config.grid_size,
-            scan_layer="below_opening",
-            view_id_prefix="survey_inside",
-            camera_z_m=config.camera_z_m,
-        )
-        return workspace, tuple(views)
-
-    _append_grid_survey_views(
-        views,
-        workspace=workspace,
-        config=config,
-        grid_size=config.grid_size,
-        scan_layer=config.survey_camera_z_mode,
-        view_id_prefix="survey",
-        camera_z_m=(
-            workspace.tank_opening_z_m + config.survey_above_opening_margin_m
-            if config.survey_camera_z_mode == "opening_zone"
-            else config.camera_z_m
-        ),
-    )
-    return workspace, tuple(views)
+    return scene.workspace, _fixed_mixed_4x4_survey_views(config)
 
 
 def _fixed_mixed_4x4_survey_views(config: SurveyConfig) -> tuple[SurveyView, ...]:
@@ -613,56 +562,6 @@ def _fixed_mixed_4x4_survey_views(config: SurveyConfig) -> tuple[SurveyView, ...
     return tuple(sorted(views, key=lambda view: (view.grid_row, view.grid_col)))
 
 
-def _append_grid_survey_views(
-    views: list[SurveyView],
-    *,
-    workspace: SurveyWorkspace,
-    config: SurveyConfig,
-    grid_size: int,
-    scan_layer: str,
-    view_id_prefix: str,
-    camera_z_m: float,
-) -> None:
-    center_x = (workspace.x_min + workspace.x_max) / 2.0
-    center_y = (workspace.y_min + workspace.y_max) / 2.0
-    step_x = (workspace.x_max - workspace.x_min) / grid_size
-    step_y = (workspace.y_max - workspace.y_min) / grid_size
-
-    for row in range(grid_size):
-        for col in range(grid_size):
-            target_x = workspace.x_min + (col + 0.5) * step_x
-            target_y = workspace.y_max - (row + 0.5) * step_y
-            offset_x, offset_y = _oblique_offset(
-                target_x=target_x,
-                target_y=target_y,
-                center_x=center_x,
-                center_y=center_y,
-                offset_m=config.oblique_offset_m,
-            )
-            camera_position = (
-                _clamp(target_x + offset_x, workspace.x_min, workspace.x_max),
-                _clamp(target_y + offset_y, workspace.y_min, workspace.y_max),
-                camera_z_m,
-            )
-            if scan_layer == "below_opening":
-                workspace.validate_camera_position(camera_position)
-            look_at = (target_x, target_y, workspace.bottom_z_m)
-            view_index = row * grid_size + col
-            views.append(
-                SurveyView(
-                    view_id=f"{view_id_prefix}_{view_index:04d}",
-                    grid_row=row,
-                    grid_col=col,
-                    camera_name=config.camera_name,
-                    desired_camera_position_world=_round_vector(camera_position),
-                    look_at_world=_round_vector(look_at),
-                    T_world_camera=_make_look_at_transform(camera_position, look_at),
-                    scan_layer=scan_layer,
-                    scan_grid_size=grid_size,
-                )
-            )
-
-
 def run_task1_survey(
     layout_path: Path | str,
     config: SurveyConfig = SurveyConfig(),
@@ -685,6 +584,7 @@ def run_task1_survey(
     depth_dir = survey_dir / "depth"
     yolo_dir = survey_dir / "yolo_raw"
     annotated_dir = survey_dir / "annotated"
+    raw_annotated_dir = survey_dir / "raw_annotated"
     tiles_dir = survey_dir / "tiles"
     plan_path = survey_dir / "survey_plan.json"
     report_path = survey_dir / "survey_report.json"
@@ -747,7 +647,7 @@ def run_task1_survey(
         _write_layout_snapshot(layout_snapshot_path, layout)
         backend.load()
         backend.apply_scene_objects()
-        capture_views = backend.survey_capture_order(views)
+        capture_views = views
         plan_payload["views"] = [view.to_dict() for view in capture_views]
         for view in capture_views:
             view_result, view_observations = backend.capture_view(
@@ -756,6 +656,7 @@ def run_task1_survey(
                 depth_dir=depth_dir,
                 yolo_dir=yolo_dir,
                 annotated_dir=annotated_dir,
+                raw_annotated_dir=raw_annotated_dir,
                 tiles_dir=tiles_dir,
             )
             view_result["capture_order_index"] = len(view_results)
@@ -790,6 +691,19 @@ def run_task1_survey(
         policy=fusion_policy,
         candidate_workspace=scene.workspace,
     )
+    if config.save_candidate_annotations:
+        candidate_detections_by_view = _candidate_annotation_detections_by_view(
+            candidates,
+            observations,
+            match_radius_m=_candidate_annotation_match_radius(config),
+        )
+        _write_candidate_annotated_images(
+            view_results=view_results,
+            annotated_dir=annotated_dir,
+            detections_by_view=candidate_detections_by_view,
+            image_width=config.image_width,
+            image_height=config.image_height,
+        )
     success_count = sum(1 for view in view_results if view.get("status") == "success")
     if success_count == len(view_results):
         status = "success"
@@ -1057,8 +971,6 @@ class MujocoSurveyBackend:
         self.renderer: Any | None = None
         self.camera_id: int | None = None
         self.resolved_camera_name: str | None = None
-        self._reachable_survey_pose_map: dict[tuple[str, int, int, int], dict[str, Any]] | None = None
-        self._reachable_survey_pose_built_specs: set[tuple[str, int, int]] = set()
 
     def load(self) -> None:
         try:
@@ -1119,16 +1031,11 @@ class MujocoSurveyBackend:
                 self._set_body_geom_alpha(body_id, alpha=0.0)
         mujoco.mj_forward(model, data)
 
-    def apply_stage0_layout(self) -> None:
-        self.apply_scene_objects()
-
     def validate_view_pose(self, view: SurveyView) -> dict[str, Any]:
         if view.fixed_qpos is not None:
             if view.fixed_pose_source == FIXED_MIXED_4X4_POSE_SOURCE:
                 return self._validate_fixed_survey_view_pose(view)
             return self._validate_fixed_camera_view_pose(view)
-        if self._use_reachable_survey_pose_search(view):
-            return self._validate_reachable_survey_view_pose(view)
 
         result = _planned_view_result(view)
         try:
@@ -1168,6 +1075,7 @@ class MujocoSurveyBackend:
         yolo_dir: Path,
         annotated_dir: Path,
         tiles_dir: Path,
+        raw_annotated_dir: Path | None = None,
     ) -> tuple[dict[str, Any], list[SurveyObservation]]:
         result = _planned_view_result(view)
         try:
@@ -1176,20 +1084,25 @@ class MujocoSurveyBackend:
                 return result, []
 
             images_dir.mkdir(parents=True, exist_ok=True)
-            depth_dir.mkdir(parents=True, exist_ok=True)
             rgb_path, depth_path, depth = self._render(view, images_dir=images_dir, depth_dir=depth_dir)
             result["rgb_image_path"] = str(rgb_path)
-            result["depth_path"] = str(depth_path)
+            result["depth_path"] = str(depth_path) if depth_path is not None else None
+            result["depth_retention"] = _depth_retention_payload(self.config)
             raw_yolo_payload = self._run_yolo(view, rgb_path, yolo_dir, tiles_dir=tiles_dir)
             result["yolo_raw_path"] = raw_yolo_payload.get("_path")
-            annotated_path = _write_annotated_image(
-                rgb_path=rgb_path,
-                output_path=annotated_dir / f"{view.view_id}_yolo.png",
-                detections=raw_yolo_payload.get("detections", []),
-                image_width=self.config.image_width,
-                image_height=self.config.image_height,
-            )
-            result["annotated_image_path"] = str(annotated_path) if annotated_path is not None else None
+            if self.config.save_raw_yolo_annotations:
+                if raw_annotated_dir is None:
+                    raw_annotated_dir = annotated_dir.parent / "raw_annotated"
+                raw_annotated_path = _write_annotated_image(
+                    rgb_path=rgb_path,
+                    output_path=raw_annotated_dir / f"{view.view_id}_yolo_raw.png",
+                    detections=raw_yolo_payload.get("detections", []),
+                    image_width=self.config.image_width,
+                    image_height=self.config.image_height,
+                )
+                result["raw_annotated_image_path"] = (
+                    str(raw_annotated_path) if raw_annotated_path is not None else None
+                )
             result["yolo"] = {
                 "status": raw_yolo_payload.get("_status", "success"),
                 "detections": len(raw_yolo_payload.get("detections", [])),
@@ -1336,257 +1249,19 @@ class MujocoSurveyBackend:
             result["message"] = str(exc)
             return result
 
-    def _use_reachable_survey_pose_search(self, view: SurveyView) -> bool:
-        return (
-            self.config.survey_reachable_pose_search
-            and view.view_id.startswith("survey_")
-            and view.grid_row >= 0
-            and view.grid_col >= 0
-        )
-
-    def _validate_reachable_survey_view_pose(self, view: SurveyView) -> dict[str, Any]:
-        result = _planned_view_result(view)
-        pose = self._reachable_survey_pose_map_for_view(view).get(self._survey_pose_key(view))
-        if pose is None:
-            result["status"] = "failed"
-            result["message"] = (
-                "No collision-free reachable survey pose was found for this grid cell; "
-                "survey capture is not rendered for this view."
-            )
-            result["pose_search"] = {
-                "strategy": "reachable_joint_halton",
-                "samples": self._reachable_survey_pose_samples_for_mode(self._survey_pose_search_mode(view)),
-                "found": False,
-            }
-            return result
-
-        data = self._data()
-        mujoco = self._mujoco()
-        data.qpos[:] = pose["qpos"]
-        mujoco.mj_forward(self._model(), data)
-        selected_position = self._camera_position()
-        selected_transform = self._camera_transform()
-        selected_view = SurveyView(
-            view_id=view.view_id,
-            grid_row=view.grid_row,
-            grid_col=view.grid_col,
-            camera_name=view.camera_name,
-            desired_camera_position_world=selected_position,
-            look_at_world=pose["ground_hit_world"],
-            T_world_camera=selected_transform,
-            scan_layer=view.scan_layer,
-            scan_grid_size=view.scan_grid_size,
-        )
-        ik = self._solve_ik_for_view(selected_view)
-        ik["source"] = "selected_reachable_pose"
-        actual_position = self._camera_position()
-        result["resolved_camera_name"] = self.resolved_camera_name
-        result["actual_camera_position_world"] = [_round(value) for value in actual_position]
-        result["actual_T_world_camera"] = [list(row) for row in self._camera_transform()]
-        result["actual_qpos"] = [_round(float(value)) for value in data.qpos]
-        result["camera_fovy_rad"] = _round(self._camera_fovy_rad())
-        result["optical_axis_ground_hit_world"] = [_round(value) for value in pose["ground_hit_world"]]
-        result["pose_search"] = {
-            "strategy": "reachable_joint_halton",
-            "samples": pose["sample_count"],
-            "sample_index": pose["sample_index"],
-            "cell": [view.grid_row, view.grid_col],
-            "cell_center_error_m": _round(pose["cell_center_error_m"]),
-            "camera_height_m": _round(pose["camera_height_m"]),
-            "selection_policy": self.config.survey_pose_selection_policy,
-            "camera_z_mode": pose["camera_z_mode"],
-            "opening_visibility": pose.get("opening_visibility"),
-            "found": True,
-        }
-        result["ik"] = ik
-        self._validate_survey_camera_position(actual_position, mode=str(pose["camera_z_mode"]))
-        collision = self._collision_report()
-        result["collision"] = collision
-        if not ik["success"]:
-            result["status"] = "failed"
-            result["message"] = "IK did not validate the selected reachable survey pose."
-            return result
-        if not collision["collision_free"]:
-            result["status"] = "failed"
-            result["message"] = "Reachable survey pose was rejected by robot collision check."
-            return result
-        result["status"] = "success"
-        result["message"] = "Validated a collision-free reachable survey pose for this grid cell."
-        return result
-
-    def survey_capture_order(self, views: tuple[SurveyView, ...]) -> tuple[SurveyView, ...]:
-        if self.config.survey_camera_z_mode != "opening_zone_then_below_opening":
-            return views
-        opening_views: list[SurveyView] = []
-        inside_views: list[SurveyView] = []
-        for view in views:
-            if self._survey_pose_search_mode(view) == "opening_zone":
-                pose_map = self._reachable_survey_pose_map_for_view(view)
-                if self._survey_pose_key(view) in pose_map:
-                    opening_views.append(view)
-            else:
-                inside_views.append(view)
-
-        return tuple(
-            sorted(opening_views, key=lambda view: (view.grid_row, view.grid_col))
-            + sorted(inside_views, key=lambda view: (view.grid_row, view.grid_col))
-        )
-
-    def _reachable_survey_pose_map_for_view(self, view: SurveyView) -> dict[tuple[str, int, int, int], dict[str, Any]]:
-        if self._reachable_survey_pose_map is None:
-            self._reachable_survey_pose_map = {}
-        mode = self._survey_pose_search_mode(view)
-        sample_count = self._reachable_survey_pose_samples_for_mode(mode)
-        spec = (mode, view.scan_grid_size, sample_count)
-        if spec not in self._reachable_survey_pose_built_specs:
-            built = self._build_reachable_survey_pose_maps(
-                (mode,),
-                grid_size=view.scan_grid_size,
-                sample_count=sample_count,
-            )[mode]
-            for (row, col), pose in built.items():
-                self._reachable_survey_pose_map[(mode, view.scan_grid_size, row, col)] = pose
-            self._reachable_survey_pose_built_specs.add(spec)
-        return self._reachable_survey_pose_map
-
-    def _survey_pose_key(self, view: SurveyView) -> tuple[str, int, int, int]:
-        return (self._survey_pose_search_mode(view), view.scan_grid_size, view.grid_row, view.grid_col)
-
     def _survey_pose_search_mode(self, view: SurveyView) -> str:
         if view.scan_layer in ("opening_zone", "below_opening"):
             return view.scan_layer
-        if self.config.survey_camera_z_mode == "opening_zone_then_below_opening":
-            return "below_opening"
-        return self.config.survey_camera_z_mode
-
-    def _reachable_survey_pose_samples_for_mode(self, mode: str) -> int:
-        if mode == "opening_zone":
-            return int(self.config.survey_opening_reachable_pose_samples)
-        return int(self.config.survey_reachable_pose_samples)
-
-    def _build_reachable_survey_pose_maps(
-        self,
-        modes: tuple[str, ...],
-        *,
-        grid_size: int,
-        sample_count: int,
-    ) -> dict[str, dict[tuple[int, int], dict[str, Any]]]:
-        if sample_count <= 0:
-            return {mode: {} for mode in modes}
-
-        np = _import_numpy()
-        mujoco = self._mujoco()
-        model = self._model()
-        data = self._data()
-        original_qpos = np.array(data.qpos, dtype=float).copy()
-        joint_specs = self._robot_joint_sample_specs()
-        best_by_mode: dict[str, dict[tuple[int, int], dict[str, Any]]] = {mode: {} for mode in modes}
-
-        try:
-            for sample_index in range(1, sample_count + 1):
-                qpos = original_qpos.copy()
-                for dimension, (qpos_address, lower, upper) in enumerate(joint_specs):
-                    unit_value = _halton(sample_index, HALTON_BASES[dimension % len(HALTON_BASES)])
-                    qpos[qpos_address] = lower + (upper - lower) * unit_value
-
-                data.qpos[:] = qpos
-                mujoco.mj_forward(model, data)
-                camera_position = self._camera_position()
-                if camera_position[2] < self.workspace.bottom_z_m + self.config.survey_reachable_min_camera_z_m:
-                    continue
-
-                collision = self._collision_report()
-                if not collision["collision_free"]:
-                    continue
-
-                ground_hit = self._camera_bottom_hit()
-                if ground_hit is None:
-                    continue
-                cell = self._survey_cell_for_ground_hit(ground_hit, grid_size=grid_size)
-                if cell is None:
-                    continue
-
-                cell_center = self._survey_cell_center(*cell, grid_size=grid_size)
-                cell_center_error = _xy_distance(ground_hit, cell_center)
-                camera_height = float(camera_position[2])
-                for mode in modes:
-                    try:
-                        self._validate_survey_camera_position(camera_position, mode=mode)
-                    except ValueError:
-                        continue
-
-                    opening_visibility = None
-                    if mode == "opening_zone":
-                        opening_visibility = self._survey_cell_visibility(cell, grid_size=grid_size)
-                        if opening_visibility["visible_fraction"] < self.config.survey_opening_visibility_min_fraction:
-                            continue
-
-                    previous = best_by_mode[mode].get(cell)
-                    if previous is None or self._survey_pose_candidate_is_better(
-                        camera_height_m=camera_height,
-                        cell_center_error_m=cell_center_error,
-                        opening_visible_fraction=(
-                            float(opening_visibility["visible_fraction"]) if opening_visibility is not None else None
-                        ),
-                        previous=previous,
-                        mode=mode,
-                    ):
-                        best_by_mode[mode][cell] = {
-                            "qpos": np.array(qpos, dtype=float).copy(),
-                            "sample_count": sample_count,
-                            "sample_index": sample_index,
-                            "camera_position_world": tuple(float(value) for value in camera_position),
-                            "ground_hit_world": tuple(float(value) for value in ground_hit),
-                            "camera_height_m": camera_height,
-                            "cell_center_error_m": float(cell_center_error),
-                            "camera_z_mode": mode,
-                            "opening_visibility": opening_visibility,
-                        }
-        finally:
-            data.qpos[:] = original_qpos
-            mujoco.mj_forward(model, data)
-
-        return best_by_mode
-
-    def _survey_pose_candidate_is_better(
-        self,
-        *,
-        camera_height_m: float,
-        cell_center_error_m: float,
-        opening_visible_fraction: float | None,
-        previous: dict[str, Any],
-        mode: str,
-    ) -> bool:
-        if mode == "opening_zone":
-            previous_visibility = previous.get("opening_visibility") or {}
-            previous_fraction = float(previous_visibility.get("visible_fraction", 0.0))
-            return (
-                -(opening_visible_fraction or 0.0),
-                -camera_height_m,
-                cell_center_error_m,
-            ) < (
-                -previous_fraction,
-                -float(previous["camera_height_m"]),
-                float(previous["cell_center_error_m"]),
-            )
-
-        policy = self.config.survey_pose_selection_policy
-        previous_height = float(previous["camera_height_m"])
-        previous_error = float(previous["cell_center_error_m"])
-        if policy == "cell_center_then_higher_camera_z":
-            return (cell_center_error_m, -camera_height_m) < (previous_error, -previous_height)
-        if policy == "higher_camera_z_then_cell_center":
-            return (-camera_height_m, cell_center_error_m) < (-previous_height, previous_error)
-        raise ValueError(f"unsupported survey_pose_selection_policy: {policy}")
+        return "below_opening"
 
     def _validate_survey_camera_position(self, position: tuple[float, float, float], *, mode: str | None = None) -> None:
-        camera_z_mode = mode or self.config.survey_camera_z_mode
+        camera_z_mode = mode or "below_opening"
         if camera_z_mode == "below_opening":
             self.workspace.validate_camera_position(position)
             return
 
         if camera_z_mode != "opening_zone":
-            raise ValueError(f"unsupported survey_camera_z_mode: {camera_z_mode}")
+            raise ValueError(f"unsupported survey scan layer: {camera_z_mode}")
         if self.config.survey_above_opening_margin_m < 0.0:
             raise ValueError("survey_above_opening_margin_m must be non-negative")
 
@@ -1632,9 +1307,6 @@ class MujocoSurveyBackend:
             "total_samples": total,
             "blocked_by": {key: value for key, value in sorted(blocked.items())},
         }
-
-    def _opening_zone_visibility(self, cell: tuple[int, int], *, grid_size: int) -> dict[str, Any]:
-        return self._survey_cell_visibility(cell, grid_size=grid_size)
 
     def _survey_cell_sample_points(
         self,
@@ -1706,32 +1378,6 @@ class MujocoSurveyBackend:
         if body_name.startswith("target_"):
             return True
         return hit_position[2] < self.workspace.tank_opening_z_m - 0.04
-
-    def _robot_joint_sample_specs(self) -> tuple[tuple[int, float, float], ...]:
-        mujoco = self._mujoco()
-        model = self._model()
-        specs: list[tuple[int, float, float]] = []
-        for joint_id in range(int(model.njnt)):
-            body_id = int(model.jnt_bodyid[joint_id])
-            if not self._is_robot_body(body_id):
-                continue
-            joint_type = int(model.jnt_type[joint_id])
-            if joint_type not in (int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)):
-                continue
-            qpos_address = int(model.jnt_qposadr[joint_id])
-            if int(model.jnt_limited[joint_id]):
-                lower = float(model.jnt_range[joint_id][0])
-                upper = float(model.jnt_range[joint_id][1])
-            elif joint_type == int(mujoco.mjtJoint.mjJNT_HINGE):
-                lower, upper = -math.pi, math.pi
-            else:
-                continue
-            if upper <= lower:
-                continue
-            specs.append((qpos_address, lower, upper))
-        if not specs:
-            raise RuntimeError("No Gen3 robot joints were found for reachable survey pose search.")
-        return tuple(specs)
 
     def _camera_bottom_hit(self) -> tuple[float, float, float] | None:
         np = _import_numpy()
@@ -1825,7 +1471,7 @@ class MujocoSurveyBackend:
             "orientation_error_rad": _round(last_orientation_error),
         }
 
-    def _render(self, view: SurveyView, *, images_dir: Path, depth_dir: Path) -> tuple[Path, Path, Any]:
+    def _render(self, view: SurveyView, *, images_dir: Path, depth_dir: Path) -> tuple[Path, Path | None, Any]:
         mujoco = self._mujoco()
         renderer = self._renderer()
         data = self._data()
@@ -1838,8 +1484,11 @@ class MujocoSurveyBackend:
         renderer.update_scene(data, camera=camera_name)
         depth = renderer.render()
         renderer.disable_depth_rendering()
-        depth_path = depth_dir / f"{view.view_id}_depth.npy"
-        _import_numpy().save(depth_path, depth)
+        depth_path = None
+        if self.config.save_depth_arrays:
+            depth_dir.mkdir(parents=True, exist_ok=True)
+            depth_path = depth_dir / f"{view.view_id}_depth.npy"
+            _import_numpy().save(depth_path, depth)
         mujoco.mj_forward(self._model(), data)
         return rgb_path, depth_path, depth
 
@@ -2448,32 +2097,21 @@ def _plan_payload(
             "real_camera_note": "Real hardware is expected to use a 1080P depth camera.",
         },
         "constraints": {
-            "camera_must_be_inside_tank": config.survey_camera_z_mode == "below_opening",
+            "camera_must_be_inside_tank": False,
             "camera_xy_must_stay_over_tank_workspace": True,
-            "camera_z_must_be_below_tank_opening": config.survey_camera_z_mode == "below_opening",
+            "camera_z_must_be_below_tank_opening": False,
             "arm_entry": "from top square opening",
             "pose_validation": (
-                "Survey fixed-pose views replay a validated qpos table and run camera, cell visibility, and collision checks; "
-                "dynamic survey views use reachable joint-space pose search, IK validation, and collision checks before rendering."
+                "Survey fixed-pose views replay a validated qpos table and run camera, cell visibility, "
+                "and collision checks before rendering."
             ),
-            "survey_pose_strategy": (
-                "fixed_qpos_table"
-                if config.survey_camera_z_mode == "fixed_mixed_4x4"
-                else ("reachable_joint_halton" if config.survey_reachable_pose_search else "wrist_camera_ik")
-            ),
-            "fixed_pose_source": (
-                FIXED_MIXED_4X4_POSE_SOURCE if config.survey_camera_z_mode == "fixed_mixed_4x4" else None
-            ),
+            "survey_pose_strategy": "fixed_qpos_table",
+            "fixed_pose_source": FIXED_MIXED_4X4_POSE_SOURCE,
             "fixed_mixed_4x4_layers": {
                 "opening_zone_cells": [[row, col] for row in range(1, 4) for col in range(1, 4)],
                 "below_opening_cells": [[0, col] for col in range(4)] + [[row, 0] for row in range(1, 4)],
             },
-            "survey_pose_selection_policy": config.survey_pose_selection_policy,
-            "survey_reachable_pose_samples": config.survey_reachable_pose_samples,
-            "survey_opening_reachable_pose_samples": config.survey_opening_reachable_pose_samples,
-            "survey_camera_z_mode": config.survey_camera_z_mode,
             "survey_above_opening_margin_m": config.survey_above_opening_margin_m,
-            "survey_opening_grid_size": config.survey_opening_grid_size,
             "survey_opening_visibility_min_fraction": config.survey_opening_visibility_min_fraction,
             "survey_opening_visibility_grid_size": config.survey_opening_visibility_grid_size,
         },
@@ -2520,6 +2158,12 @@ def _report_payload(
         "run_yolo": config.run_yolo,
         "yolo_profile_path": str(config.yolo_profile_path),
         "fusion_policy": asdict(config.fusion_policy()),
+        "annotation_policy": {
+            "save_candidate_annotations": config.save_candidate_annotations,
+            "candidate_annotation_source": "final_candidate_supporting_observations",
+            "save_raw_yolo_annotations": config.save_raw_yolo_annotations,
+        },
+        "depth_retention": _depth_retention_payload(config),
         "selected_objects": [obj.to_dict() for obj in scene.objects],
         "views": views,
         "observations": observations,
@@ -2544,6 +2188,18 @@ def _planned_view_result(view: SurveyView) -> dict[str, Any]:
         "desired_camera_position_world": list(view.desired_camera_position_world),
         "look_at_world": list(view.look_at_world),
         "status": "planned",
+    }
+
+
+def _depth_retention_payload(config: SurveyConfig) -> dict[str, Any]:
+    return {
+        "saved": bool(config.save_depth_arrays),
+        "format": "npy_float32" if config.save_depth_arrays else None,
+        "reason": (
+            "retained_for_downstream_pose_debug"
+            if config.save_depth_arrays
+            else "discarded_after_observation_projection"
+        ),
     }
 
 
@@ -2627,6 +2283,132 @@ def _write_annotated_image(
         return output_path
     except Exception:
         return None
+
+
+def _candidate_annotation_match_radius(config: SurveyConfig) -> float:
+    return max(
+        config.cluster_radius_m,
+        config.cross_class_merge_radius_m,
+        config.weak_candidate_merge_radius_m,
+        config.large_same_class_merge_radius_m,
+        config.weak_near_strong_suppression_radius_m,
+    )
+
+
+def _candidate_annotation_detections_by_view(
+    candidates: list[dict[str, Any]],
+    observations: list[SurveyObservation],
+    *,
+    match_radius_m: float,
+) -> dict[str, list[dict[str, Any]]]:
+    candidate_infos: list[dict[str, Any]] = []
+    for order, candidate in enumerate(candidates):
+        position = candidate.get("rough_position_world")
+        if not isinstance(position, (list, tuple)) or len(position) < 2:
+            continue
+        supporting_views = candidate.get("supporting_views", [])
+        if not isinstance(supporting_views, list):
+            continue
+        class_votes = candidate.get("class_votes", {})
+        candidate_infos.append(
+            {
+                "order": order,
+                "candidate": candidate,
+                "position": _float_tuple_from_value(position, 3),
+                "supporting_views": set(str(view_id) for view_id in supporting_views),
+                "class_names": set(str(name) for name in class_votes) if isinstance(class_votes, dict) else set(),
+            }
+        )
+
+    selected: dict[tuple[int, str], tuple[tuple[float, float], SurveyObservation, dict[str, Any]]] = {}
+    for observation in observations:
+        if observation.rough_position_world is None:
+            continue
+        best_info: dict[str, Any] | None = None
+        best_rank: tuple[float, float, float] | None = None
+        best_score = _observation_annotation_score(observation)
+        for info in candidate_infos:
+            if observation.view_id not in info["supporting_views"]:
+                continue
+            class_names = info["class_names"]
+            if observation.class_name and class_names and observation.class_name not in class_names:
+                continue
+            distance = _xy_distance(observation.rough_position_world, info["position"])
+            if distance > match_radius_m:
+                continue
+            rank = (distance, -best_score[0], -best_score[1])
+            if best_rank is None or rank < best_rank:
+                best_info = info
+                best_rank = rank
+        if best_info is None:
+            continue
+        key = (int(best_info["order"]), observation.view_id)
+        previous = selected.get(key)
+        if previous is None or best_score > previous[0]:
+            selected[key] = (best_score, observation, best_info["candidate"])
+
+    by_view: dict[str, list[dict[str, Any]]] = {}
+    for (order, view_id), (_, observation, candidate) in sorted(selected.items()):
+        detection = _candidate_annotation_detection(candidate, observation)
+        detection["_candidate_order"] = order
+        by_view.setdefault(view_id, []).append(detection)
+    for detections in by_view.values():
+        detections.sort(key=lambda item: int(item.get("_candidate_order", 0)))
+        for detection in detections:
+            detection.pop("_candidate_order", None)
+    return by_view
+
+
+def _observation_annotation_score(observation: SurveyObservation) -> tuple[float, float]:
+    confidence = max(float(observation.confidence), 0.0)
+    return (_bbox_area(observation.bbox_xyxy) * confidence, confidence)
+
+
+def _candidate_annotation_detection(candidate: dict[str, Any], observation: SurveyObservation) -> dict[str, Any]:
+    class_name = observation.class_name or _candidate_dominant_class_name(candidate) or "object"
+    confidence = float(observation.confidence)
+    return {
+        "bbox_xyxy": list(observation.bbox_xyxy),
+        "confidence": confidence,
+        "class_id": observation.class_id,
+        "class_name": class_name,
+        "annotation_label": f"{candidate.get('candidate_id', 'candidate')} {class_name} {confidence:.2f}",
+    }
+
+
+def _candidate_dominant_class_name(candidate: dict[str, Any]) -> str | None:
+    class_votes = candidate.get("class_votes", {})
+    if not isinstance(class_votes, dict) or not class_votes:
+        return None
+    return max(class_votes, key=lambda class_name: float(class_votes[class_name]))
+
+
+def _write_candidate_annotated_images(
+    *,
+    view_results: list[dict[str, Any]],
+    annotated_dir: Path,
+    detections_by_view: dict[str, list[dict[str, Any]]],
+    image_width: int,
+    image_height: int,
+) -> None:
+    for view_result in view_results:
+        view_id = str(view_result.get("view_id", ""))
+        rgb_image_path = view_result.get("rgb_image_path")
+        if not view_id or not rgb_image_path:
+            continue
+        detections = detections_by_view.get(view_id, [])
+        annotated_path = _write_annotated_image(
+            rgb_path=Path(str(rgb_image_path)),
+            output_path=annotated_dir / f"{view_id}_yolo.png",
+            detections=detections,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        view_result["annotated_image_path"] = str(annotated_path) if annotated_path is not None else None
+        view_result["annotation"] = {
+            "source": "final_candidate_supporting_observations",
+            "detections": len(detections),
+        }
 
 
 def _image_tile_rects(
@@ -2785,6 +2567,9 @@ def _annotation_box_color(index: int) -> tuple[int, int, int]:
 
 
 def _annotation_detection_label(detection: dict[str, Any]) -> str:
+    annotation_label = detection.get("annotation_label")
+    if annotation_label:
+        return str(annotation_label)
     confidence = float(detection.get("confidence", detection.get("score", detection.get("conf", 0.0))))
     class_name = str(detection.get("class_name", "")).strip()
     if class_name:
@@ -2799,15 +2584,6 @@ def _run_id(created_utc: str, scene: SurveySceneInput) -> str:
     timestamp = created_utc.replace("+00:00", "Z").replace("-", "").replace(":", "").replace(".", "")
     seed = f"seed{scene.seed}" if scene.seed is not None else "seedunknown"
     return f"{timestamp}_{seed}"
-
-
-def _oblique_offset(*, target_x: float, target_y: float, center_x: float, center_y: float, offset_m: float) -> tuple[float, float]:
-    direction_x = center_x - target_x
-    direction_y = center_y - target_y
-    norm = math.hypot(direction_x, direction_y)
-    if norm <= 1e-9:
-        return (0.0, 0.0)
-    return (offset_m * direction_x / norm, offset_m * direction_y / norm)
 
 
 def _make_look_at_transform(
@@ -3477,21 +3253,6 @@ def _round(value: float) -> float:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return min(max(float(value), lower), upper)
-
-
-def _halton(index: int, base: int) -> float:
-    if index <= 0:
-        raise ValueError("Halton index must be positive")
-    if base <= 1:
-        raise ValueError("Halton base must be greater than 1")
-    result = 0.0
-    factor = 1.0 / float(base)
-    current = int(index)
-    while current > 0:
-        result += factor * (current % base)
-        current //= base
-        factor /= float(base)
-    return result
 
 
 def _import_numpy() -> Any:

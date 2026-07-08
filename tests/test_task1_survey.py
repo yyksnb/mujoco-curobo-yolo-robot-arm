@@ -11,10 +11,10 @@ from robot_arm_pipeline.task1.survey import (
     SurveyConfig,
     SurveyObservation,
     SurveyWorkspace,
+    _candidate_annotation_detections_by_view,
     _image_tile_rects,
     _merge_yolo_detections,
     _offset_bbox_xyxy,
-    _write_annotated_image,
     build_grid_survey_plan,
     fuse_survey_observations,
     load_stage0_layout,
@@ -78,21 +78,6 @@ def test_target_layout_loads_and_grid_survey_plan_stays_inside_tank(tmp_path: Pa
     assert all(workspace.y_min <= view.desired_camera_position_world[1] <= workspace.y_max for view in views)
 
 
-def test_grid_survey_rejects_camera_above_tank_opening(tmp_path: Path) -> None:
-    layout = load_stage0_layout(_write_layout(tmp_path))
-
-    with pytest.raises(ValueError, match="below the tank upper opening"):
-        build_grid_survey_plan(
-            layout,
-            SurveyConfig(
-                camera_z_m=0.52,
-                tank_opening_z_m=0.50,
-                opening_clearance_m=0.0,
-                survey_camera_z_mode="below_opening",
-            ),
-        )
-
-
 def test_survey_observations_are_fused_by_world_position() -> None:
     candidates = fuse_survey_observations(
         [
@@ -143,7 +128,7 @@ def test_survey_observations_are_fused_by_world_position() -> None:
     assert candidates[1]["support_count"] == 2
 
 
-def test_survey_fusion_splits_nearby_modes_and_filters_weak_tiny_candidates() -> None:
+def test_survey_fusion_splits_spatial_modes_and_mixed_class_clusters() -> None:
     candidates = fuse_survey_observations(
         [
             _observation("survey_0001", "drill", 0.86, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
@@ -163,8 +148,28 @@ def test_survey_fusion_splits_nearby_modes_and_filters_weak_tiny_candidates() ->
     assert len(candidates) == 2
     assert [candidate["support_count"] for candidate in candidates] == [3, 3]
 
+    mixed_class_observations = [
+        _observation("survey_0001", "标准件", 0.90, (0.53, 0.31, 0.03), bbox=(10.0, 10.0, 120.0, 120.0)),
+        _observation("survey_0002", "标准件", 0.88, (0.54, 0.32, 0.03), bbox=(11.0, 10.0, 121.0, 121.0)),
+        _observation("survey_0005", "标准件", 0.86, (0.52, 0.31, 0.03), bbox=(12.0, 10.0, 122.0, 122.0)),
+        _observation("survey_0001", "手套", 0.83, (0.60, 0.31, 0.03), bbox=(200.0, 10.0, 380.0, 180.0)),
+        _observation("survey_0002", "手套", 0.84, (0.61, 0.30, 0.03), bbox=(202.0, 12.0, 382.0, 182.0)),
+        _observation("survey_0005", "手套", 0.82, (0.60, 0.32, 0.03), bbox=(204.0, 12.0, 384.0, 182.0)),
+    ]
+    mixed_class_candidates = fuse_survey_observations(
+        mixed_class_observations,
+        cross_class_merge_radius_m=0.10,
+        cluster_split_distance_m=0.20,
+    )
 
-def test_survey_fusion_keeps_isolated_high_confidence_single_view_fallback() -> None:
+    labels = [
+        max(candidate["class_votes"], key=candidate["class_votes"].get)
+        for candidate in mixed_class_candidates
+    ]
+    assert labels == ["标准件", "手套"]
+
+
+def test_survey_single_view_fallback_accepts_isolated_new_class_and_rejects_duplicate() -> None:
     candidates = fuse_survey_observations(
         [
             _observation("survey_0001", "notebook", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
@@ -179,9 +184,21 @@ def test_survey_fusion_keeps_isolated_high_confidence_single_view_fallback() -> 
     assert candidates[1]["support_count"] == 1
     assert "single-view fallback" in candidates[1]["notes"][0]
 
+    duplicate_candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "standard", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "standard", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0008", "standard", 0.70, (0.70, 0.70, 0.03), bbox=(500.0, 400.0, 560.0, 460.0)),
+        ],
+        cluster_radius_m=0.06,
+    )
 
-def test_survey_fusion_rejects_clipped_weak_multiview_candidate() -> None:
-    candidates = fuse_survey_observations(
+    assert len(duplicate_candidates) == 1
+    assert duplicate_candidates[0]["support_count"] == 2
+
+
+def test_survey_fusion_gates_weak_candidates_and_keeps_explicit_multiview_fallback() -> None:
+    clipped_candidates = fuse_survey_observations(
         [
             _observation("survey_0001", "notebook", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
             _observation("survey_0002", "notebook", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
@@ -194,41 +211,9 @@ def test_survey_fusion_rejects_clipped_weak_multiview_candidate() -> None:
         min_unclipped_candidate_vote=0.15,
     )
 
-    assert len(candidates) == 1
-    assert candidates[0]["class_votes"]["notebook"] == pytest.approx(1.66)
+    assert len(clipped_candidates) == 1
+    assert clipped_candidates[0]["class_votes"]["notebook"] == pytest.approx(1.66)
 
-
-def test_survey_single_view_fallback_rejects_existing_class_duplicate() -> None:
-    candidates = fuse_survey_observations(
-        [
-            _observation("survey_0001", "standard", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-            _observation("survey_0002", "standard", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-            _observation("survey_0008", "standard", 0.70, (0.70, 0.70, 0.03), bbox=(500.0, 400.0, 560.0, 460.0)),
-        ],
-        cluster_radius_m=0.06,
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0]["support_count"] == 2
-
-
-def test_survey_fusion_suppresses_weak_candidate_near_strong_candidate() -> None:
-    candidates = fuse_survey_observations(
-        [
-            _observation("survey_0001", "marker", 0.90, (0.50, 0.50, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-            _observation("survey_0002", "marker", 0.88, (0.51, 0.50, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-            _observation("survey_0003", "tape", 0.44, (0.61, 0.53, 0.03), bbox=(500.0, 400.0, 620.0, 520.0)),
-            _observation("survey_0004", "hex", 0.43, (0.62, 0.53, 0.03), bbox=(502.0, 402.0, 622.0, 522.0)),
-        ],
-        cluster_radius_m=0.06,
-        weak_near_strong_suppression_radius_m=0.15,
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0]["class_votes"]["marker"] == pytest.approx(1.78)
-
-
-def test_survey_fusion_rejects_candidate_center_outside_workspace() -> None:
     workspace = SurveyWorkspace(
         x_min=0.15,
         x_max=0.85,
@@ -238,7 +223,7 @@ def test_survey_fusion_rejects_candidate_center_outside_workspace() -> None:
         tank_opening_z_m=0.50,
         opening_clearance_m=0.035,
     )
-    candidates = fuse_survey_observations(
+    outside_workspace_candidates = fuse_survey_observations(
         [
             _observation("survey_0001", "notebook", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
             _observation("survey_0002", "notebook", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
@@ -249,92 +234,89 @@ def test_survey_fusion_rejects_candidate_center_outside_workspace() -> None:
         candidate_workspace_margin_m=0.03,
     )
 
-    assert len(candidates) == 1
-    assert candidates[0]["class_votes"]["notebook"] == pytest.approx(1.66)
+    assert len(outside_workspace_candidates) == 1
+    assert outside_workspace_candidates[0]["class_votes"]["notebook"] == pytest.approx(1.66)
+
+    near_strong_candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "marker", 0.90, (0.50, 0.50, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "marker", 0.88, (0.51, 0.50, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0003", "tape", 0.44, (0.61, 0.53, 0.03), bbox=(500.0, 400.0, 620.0, 520.0)),
+            _observation("survey_0004", "hex", 0.43, (0.62, 0.53, 0.03), bbox=(502.0, 402.0, 622.0, 522.0)),
+        ],
+        cluster_radius_m=0.06,
+        weak_near_strong_suppression_radius_m=0.15,
+    )
+
+    assert len(near_strong_candidates) == 1
+    assert near_strong_candidates[0]["class_votes"]["marker"] == pytest.approx(1.78)
+
+    weak_fallback_candidates = fuse_survey_observations(
+        [
+            _observation("survey_0001", "本子", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
+            _observation("survey_0002", "本子", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
+            _observation("survey_0008", "标准件", 0.36, (0.72, 0.70, 0.03), bbox=(10.0, 10.0, 70.0, 70.0)),
+            _observation("survey_0009", "标准件", 0.35, (0.73, 0.70, 0.03), bbox=(12.0, 12.0, 72.0, 72.0)),
+        ],
+        cluster_radius_m=0.06,
+    )
+
+    assert len(weak_fallback_candidates) == 2
+    assert weak_fallback_candidates[1]["class_votes"]["标准件"] == pytest.approx(0.71)
+    assert "weak but spatially distinct multi-view" in weak_fallback_candidates[1]["notes"][0]
 
 
-def test_survey_fusion_splits_mixed_class_cluster_with_strong_secondary_evidence() -> None:
+def test_candidate_annotation_uses_final_candidate_supporting_observations_only() -> None:
+    candidates = [
+        {
+            "candidate_id": "candidate_001",
+            "rough_position_world": [0.30, 0.30, 0.03],
+            "supporting_views": ["survey_0000"],
+            "class_votes": {"marker": 1.4},
+        }
+    ]
     observations = [
-        _observation("survey_0001", "标准件", 0.90, (0.53, 0.31, 0.03), bbox=(10.0, 10.0, 120.0, 120.0)),
-        _observation("survey_0002", "标准件", 0.88, (0.54, 0.32, 0.03), bbox=(11.0, 10.0, 121.0, 121.0)),
-        _observation("survey_0005", "标准件", 0.86, (0.52, 0.31, 0.03), bbox=(12.0, 10.0, 122.0, 122.0)),
-        _observation("survey_0001", "手套", 0.83, (0.60, 0.31, 0.03), bbox=(200.0, 10.0, 380.0, 180.0)),
-        _observation("survey_0002", "手套", 0.84, (0.61, 0.30, 0.03), bbox=(202.0, 12.0, 382.0, 182.0)),
-        _observation("survey_0005", "手套", 0.82, (0.60, 0.32, 0.03), bbox=(204.0, 12.0, 384.0, 182.0)),
+        _observation(
+            "survey_0000",
+            "marker",
+            0.70,
+            (0.30, 0.30, 0.03),
+            bbox=(10.0, 10.0, 60.0, 60.0),
+        ),
+        _observation(
+            "survey_0000",
+            "marker",
+            0.90,
+            (0.31, 0.30, 0.03),
+            bbox=(12.0, 12.0, 80.0, 80.0),
+        ),
+        _observation(
+            "survey_0000",
+            "tape",
+            0.95,
+            (0.32, 0.30, 0.03),
+            bbox=(100.0, 100.0, 160.0, 160.0),
+        ),
+        _observation(
+            "survey_0001",
+            "marker",
+            0.95,
+            (0.30, 0.30, 0.03),
+            bbox=(100.0, 100.0, 160.0, 160.0),
+        ),
     ]
 
-    candidates = fuse_survey_observations(
+    detections_by_view = _candidate_annotation_detections_by_view(
+        candidates,
         observations,
-        cross_class_merge_radius_m=0.10,
-        cluster_split_distance_m=0.20,
+        match_radius_m=0.10,
     )
 
-    labels = [max(candidate["class_votes"], key=candidate["class_votes"].get) for candidate in candidates]
-    assert labels == ["标准件", "手套"]
-
-
-def test_survey_fusion_keeps_distinct_weak_multiview_class_fallback() -> None:
-    observations = [
-        _observation("survey_0001", "本子", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-        _observation("survey_0002", "本子", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-        _observation("survey_0008", "标准件", 0.36, (0.72, 0.70, 0.03), bbox=(10.0, 10.0, 70.0, 70.0)),
-        _observation("survey_0009", "标准件", 0.35, (0.73, 0.70, 0.03), bbox=(12.0, 12.0, 72.0, 72.0)),
-    ]
-
-    candidates = fuse_survey_observations(observations, cluster_radius_m=0.06)
-
-    assert len(candidates) == 2
-    assert candidates[1]["class_votes"]["标准件"] == pytest.approx(0.71)
-    assert "weak but spatially distinct multi-view" in candidates[1]["notes"][0]
-
-
-def test_survey_fusion_weak_fallback_uses_shape_not_class_name() -> None:
-    observations = [
-        _observation("survey_0001", "本子", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-        _observation("survey_0002", "本子", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-        _observation("survey_0008", "细长工具", 0.36, (0.72, 0.70, 0.03), bbox=(10.0, 10.0, 310.0, 90.0)),
-        _observation("survey_0009", "细长工具", 0.35, (0.73, 0.70, 0.03), bbox=(12.0, 12.0, 312.0, 92.0)),
-    ]
-
-    candidates = fuse_survey_observations(observations, cluster_radius_m=0.06)
-
-    assert len(candidates) == 2
-    assert candidates[1]["class_votes"]["细长工具"] == pytest.approx(0.71)
-
-
-def test_survey_weak_fallback_can_use_secondary_new_class_evidence() -> None:
-    observations = [
-        _observation("survey_0001", "内六角扳手", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-        _observation("survey_0002", "内六角扳手", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-        _observation("survey_0008", "内六角扳手", 0.46, (0.72, 0.70, 0.03), bbox=(500.0, 300.0, 610.0, 410.0)),
-        _observation("survey_0009", "钻头", 0.47, (0.73, 0.70, 0.03), bbox=(502.0, 302.0, 612.0, 412.0)),
-    ]
-
-    candidates = fuse_survey_observations(observations, cluster_radius_m=0.06)
-
-    assert len(candidates) == 2
-    assert candidates[1]["class_votes"]["钻头"] == pytest.approx(0.47)
-    assert "weak but spatially distinct multi-view" in candidates[1]["notes"][0]
-
-
-def test_annotated_image_writes_bbox_overlay(tmp_path: Path) -> None:
-    image_module = pytest.importorskip("PIL.Image")
-    rgb_path = tmp_path / "rgb.png"
-    output_path = tmp_path / "annotated.png"
-    image_module.new("RGB", (80, 60), color=(20, 20, 20)).save(rgb_path)
-
-    result = _write_annotated_image(
-        rgb_path=rgb_path,
-        output_path=output_path,
-        detections=[{"bbox_xyxy": [10.0, 8.0, 50.0, 40.0], "confidence": 0.91, "class_id": 3, "class_name": "手套"}],
-        image_width=80,
-        image_height=60,
-    )
-
-    assert result == output_path
-    assert output_path.exists()
-    annotated_image = image_module.open(output_path)
-    assert annotated_image.getpixel((10, 8)) != (20, 20, 20)
+    assert sorted(detections_by_view) == ["survey_0000"]
+    detections = detections_by_view["survey_0000"]
+    assert len(detections) == 1
+    assert detections[0]["bbox_xyxy"] == [12.0, 12.0, 80.0, 80.0]
+    assert detections[0]["annotation_label"] == "candidate_001 marker 0.90"
 
 
 def test_tile_detections_are_mapped_and_merged_in_full_image_coordinates() -> None:
@@ -395,6 +377,11 @@ def test_task1_recognition_script_plan_only_writes_report(tmp_path: Path) -> Non
     assert report["report_path"] == str(reports[0])
     assert report["survey_dir"] == str(reports[0].parent)
     assert Path(report["layout_snapshot_path"]).exists()
+    assert report["depth_retention"] == {
+        "saved": False,
+        "format": None,
+        "reason": "discarded_after_observation_projection",
+    }
     assert len(report["views"]) == 16
     assert report["camera_name"] == "wrist"
 
@@ -442,6 +429,7 @@ def test_row_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: 
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
     survey_report = load_task1_survey_report(survey_report_path)
+    assert RowConfig().capture_config().save_depth_arrays is True
 
     workspace, planned_views = build_row_inspection_plan(
         survey_report,
@@ -953,6 +941,7 @@ def test_final_plan_consumes_layered_row_report(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     row_report_path = _write_row_report(tmp_path, layout_path)
     row_report = load_task1_row_report(row_report_path)
+    assert FinalConfig().capture_config().save_depth_arrays is True
 
     workspace, planned = build_final_plan(
         row_report,

@@ -251,6 +251,7 @@ class FinalConfig:
             depth_sample_stride_px=self.depth_sample_stride_px,
             depth_component_min_pixels=self.depth_component_min_pixels,
             depth_component_split_distance_m=self.depth_component_split_distance_m,
+            save_depth_arrays=True,
             run_yolo=self.run_yolo,
             plan_only=self.plan_only,
             strict_yolo=self.strict_yolo,
