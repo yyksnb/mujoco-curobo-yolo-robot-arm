@@ -13,6 +13,7 @@ from robot_arm_pipeline.task1.survey import (
     DEFAULT_IMAGE_WIDTH,
     DEFAULT_OPENING_CLEARANCE_M,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS,
     DEFAULT_SCENE_MODEL,
     DEFAULT_TANK_OPENING_Z_M,
     DEFAULT_YOLO_PROFILE,
@@ -29,18 +30,17 @@ from robot_arm_pipeline.task1.survey import (
 )
 
 
-DEFAULT_ROW_CAMERA_Z_M = 0.34
-DEFAULT_ROW_STANDOFF_M = 0.18
-DEFAULT_ROW_VIEWS_PER_CANDIDATE = 3
-DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD = math.radians(45.0)
-DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M = 0.08
-DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M = 0.02
-DEFAULT_ROW_ENTRY_SIDE = "survey-best"
-DEFAULT_ROW_CLUSTER_RADIUS_M = 0.055
-DEFAULT_ROW_VIEW_COLLISION_SEARCH = True
-DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5)
-DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M = (0.0, -0.04, -0.08, -0.12, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12)
-DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD = (
+DEFAULT_ROUGH_CAMERA_Z_M = 0.34
+DEFAULT_ROUGH_STANDOFF_M = 0.18
+DEFAULT_ROUGH_VIEWS_PER_CANDIDATE = 3
+DEFAULT_ROUGH_VIEW_ANGLE_SPREAD_RAD = math.radians(45.0)
+DEFAULT_ROUGH_MIN_OBLIQUE_DISTANCE_M = 0.08
+DEFAULT_ROUGH_LOOK_AT_HEIGHT_OFFSET_M = 0.02
+DEFAULT_ROUGH_ENTRY_SIDE = "survey-best"
+DEFAULT_ROUGH_CLUSTER_RADIUS_M = 0.055
+DEFAULT_ROUGH_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5)
+DEFAULT_ROUGH_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M = (0.0, -0.04, -0.08, -0.12, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12)
+DEFAULT_ROUGH_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD = (
     0.0,
     math.radians(22.5),
     -math.radians(22.5),
@@ -54,16 +54,16 @@ DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD = (
     -math.radians(135.0),
     math.pi,
 )
-DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD = (0.0, math.radians(90.0), -math.radians(90.0), math.pi)
-DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS: int | None = None
-ROW_REACHABLE_CAPTURE_FIXED_POSE_SOURCE = "row_reachable_capture_plan_v1"
-DEFAULT_ROW_YOLO_CONFIDENCE = 0.20
-DEFAULT_ROW_YOLO_MAX_DETECTIONS = 20
-DEFAULT_ROW_YOLO_TILE_GRID_SIZE = 1
-DEFAULT_ROW_DEPTH_SAMPLE_STRIDE_PX = 6
-DEFAULT_ROW_DEPTH_COMPONENT_MIN_PIXELS = 24
-DEFAULT_ROW_POSE_MIN_PIXELS = 36
-DEFAULT_ROW_YAW_MIN_EIGEN_RATIO = 1.6
+DEFAULT_ROUGH_VIEW_CANDIDATE_ROLL_OFFSETS_RAD = (0.0, math.radians(90.0), -math.radians(90.0), math.pi)
+ROUGH_REACHABLE_CAPTURE_FIXED_POSE_SOURCE = "rough_reachable_capture_plan_v1"
+DEFAULT_ROUGH_YOLO_CONFIDENCE = 0.20
+DEFAULT_ROUGH_YOLO_MAX_DETECTIONS = 20
+DEFAULT_ROUGH_YOLO_TILE_GRID_SIZE = 1
+DEFAULT_ROUGH_DEPTH_SAMPLE_STRIDE_PX = 6
+DEFAULT_ROUGH_DEPTH_COMPONENT_MIN_PIXELS = 24
+DEFAULT_ROUGH_POSE_MIN_PIXELS = 36
+DEFAULT_ROUGH_YAW_MIN_EIGEN_RATIO = 1.6
+DEFAULT_ROUGH_SAVE_DEPTH_ARRAYS = False
 DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE = 0.50
 DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT = 2
 DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE = 1.25
@@ -76,6 +76,7 @@ DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M = 0.045
 DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO = 0.80
 DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO = 1.35
 DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE = 0.50
+DEFAULT_SAVE_ROUGH_FILTERED_ANNOTATIONS = True
 
 
 @dataclass(frozen=True)
@@ -124,41 +125,40 @@ class Task1SurveyReport:
 
 
 @dataclass(frozen=True)
-class RowConfig:
+class RoughConfig:
     scene_model_path: Path = DEFAULT_SCENE_MODEL
     yolo_profile_path: Path = DEFAULT_YOLO_PROFILE
     output_dir: Path = DEFAULT_OUTPUT_DIR
     camera_name: str = DEFAULT_CAMERA_NAME
     image_width: int = DEFAULT_IMAGE_WIDTH
     image_height: int = DEFAULT_IMAGE_HEIGHT
-    camera_z_m: float = DEFAULT_ROW_CAMERA_Z_M
+    camera_z_m: float = DEFAULT_ROUGH_CAMERA_Z_M
     tank_opening_z_m: float = DEFAULT_TANK_OPENING_Z_M
     opening_clearance_m: float = DEFAULT_OPENING_CLEARANCE_M
-    row_standoff_m: float = DEFAULT_ROW_STANDOFF_M
-    row_views_per_candidate: int = DEFAULT_ROW_VIEWS_PER_CANDIDATE
-    row_view_angle_spread_rad: float = DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD
-    row_min_oblique_distance_m: float = DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M
-    look_at_height_offset_m: float = DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M
-    entry_side: str = DEFAULT_ROW_ENTRY_SIDE
-    row_cluster_radius_m: float = DEFAULT_ROW_CLUSTER_RADIUS_M
-    row_view_collision_search: bool = DEFAULT_ROW_VIEW_COLLISION_SEARCH
-    row_view_candidate_standoff_multipliers: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS
-    row_view_candidate_camera_z_offsets_m: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M
-    row_view_candidate_angle_offsets_rad: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD
-    row_view_candidate_roll_offsets_rad: tuple[float, ...] = DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD
-    row_view_candidate_max_attempts: int | None = DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS
-    yolo_confidence: float = DEFAULT_ROW_YOLO_CONFIDENCE
+    rough_standoff_m: float = DEFAULT_ROUGH_STANDOFF_M
+    rough_views_per_candidate: int = DEFAULT_ROUGH_VIEWS_PER_CANDIDATE
+    rough_view_angle_spread_rad: float = DEFAULT_ROUGH_VIEW_ANGLE_SPREAD_RAD
+    rough_min_oblique_distance_m: float = DEFAULT_ROUGH_MIN_OBLIQUE_DISTANCE_M
+    look_at_height_offset_m: float = DEFAULT_ROUGH_LOOK_AT_HEIGHT_OFFSET_M
+    entry_side: str = DEFAULT_ROUGH_ENTRY_SIDE
+    rough_cluster_radius_m: float = DEFAULT_ROUGH_CLUSTER_RADIUS_M
+    rough_view_candidate_standoff_multipliers: tuple[float, ...] = DEFAULT_ROUGH_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS
+    rough_view_candidate_camera_z_offsets_m: tuple[float, ...] = DEFAULT_ROUGH_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M
+    rough_view_candidate_angle_offsets_rad: tuple[float, ...] = DEFAULT_ROUGH_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD
+    rough_view_candidate_roll_offsets_rad: tuple[float, ...] = DEFAULT_ROUGH_VIEW_CANDIDATE_ROLL_OFFSETS_RAD
+    yolo_confidence: float = DEFAULT_ROUGH_YOLO_CONFIDENCE
     yolo_iou: float | None = None
     yolo_image_size: int | None = None
     yolo_device: str | None = None
-    yolo_max_detections: int | None = DEFAULT_ROW_YOLO_MAX_DETECTIONS
-    yolo_tile_grid_size: int = DEFAULT_ROW_YOLO_TILE_GRID_SIZE
+    yolo_max_detections: int | None = DEFAULT_ROUGH_YOLO_MAX_DETECTIONS
+    yolo_tile_grid_size: int = DEFAULT_ROUGH_YOLO_TILE_GRID_SIZE
     yolo_tile_overlap: float = 0.0
     yolo_tile_nms_iou: float = 0.45
-    depth_sample_stride_px: int = DEFAULT_ROW_DEPTH_SAMPLE_STRIDE_PX
-    depth_component_min_pixels: int = DEFAULT_ROW_DEPTH_COMPONENT_MIN_PIXELS
-    pose_min_pixels: int = DEFAULT_ROW_POSE_MIN_PIXELS
-    yaw_min_eigen_ratio: float = DEFAULT_ROW_YAW_MIN_EIGEN_RATIO
+    depth_sample_stride_px: int = DEFAULT_ROUGH_DEPTH_SAMPLE_STRIDE_PX
+    depth_component_min_pixels: int = DEFAULT_ROUGH_DEPTH_COMPONENT_MIN_PIXELS
+    pose_min_pixels: int = DEFAULT_ROUGH_POSE_MIN_PIXELS
+    yaw_min_eigen_ratio: float = DEFAULT_ROUGH_YAW_MIN_EIGEN_RATIO
+    save_depth_arrays: bool = DEFAULT_ROUGH_SAVE_DEPTH_ARRAYS
     stable_object_min_confidence: float = DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE
     stable_object_min_support_count: int = DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT
     stable_object_min_evidence_score: float = DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE
@@ -171,6 +171,8 @@ class RowConfig:
     cross_class_ambiguity_score_ratio: float = DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO
     class_vote_ambiguity_top_to_second_ratio: float = DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO
     class_vote_ambiguity_min_secondary_vote: float = DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE
+    save_filtered_annotations: bool = DEFAULT_SAVE_ROUGH_FILTERED_ANNOTATIONS
+    save_raw_yolo_annotations: bool = DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS
     run_yolo: bool = True
     plan_only: bool = False
     strict_yolo: bool = False
@@ -184,38 +186,36 @@ class RowConfig:
             raise ValueError("image dimensions must be positive")
         if self.camera_z_m >= self.tank_opening_z_m:
             raise ValueError(
-                "row wrist camera z must be below the tank upper opening height: "
+                "rough wrist camera z must be below the tank upper opening height: "
                 f"camera_z={self.camera_z_m:.4f}, tank_opening_z={self.tank_opening_z_m:.4f}"
             )
         if self.camera_z_m > self.tank_opening_z_m - self.opening_clearance_m:
             raise ValueError(
-                "row wrist camera must keep clearance below the tank opening: "
+                "rough wrist camera must keep clearance below the tank opening: "
                 f"camera_z={self.camera_z_m:.4f}, max_camera_z={self.tank_opening_z_m - self.opening_clearance_m:.4f}"
             )
-        if self.row_standoff_m <= 0.0:
-            raise ValueError("row_standoff_m must be positive")
-        if self.row_views_per_candidate <= 0:
-            raise ValueError("row_views_per_candidate must be positive")
-        if self.row_min_oblique_distance_m < 0.0:
-            raise ValueError("row_min_oblique_distance_m must be non-negative")
+        if self.rough_standoff_m <= 0.0:
+            raise ValueError("rough_standoff_m must be positive")
+        if self.rough_views_per_candidate <= 0:
+            raise ValueError("rough_views_per_candidate must be positive")
+        if self.rough_min_oblique_distance_m < 0.0:
+            raise ValueError("rough_min_oblique_distance_m must be non-negative")
         if self.look_at_height_offset_m < 0.0:
             raise ValueError("look_at_height_offset_m must be non-negative")
         if self.entry_side not in {"y-max", "y-min", "x-min", "x-max", "center", "survey-best"}:
             raise ValueError("entry_side must be one of y-max, y-min, x-min, x-max, center, or survey-best")
-        if self.row_cluster_radius_m <= 0.0:
-            raise ValueError("row_cluster_radius_m must be positive")
-        if not self.row_view_candidate_standoff_multipliers:
-            raise ValueError("row_view_candidate_standoff_multipliers must not be empty")
-        if any(value <= 0.0 for value in self.row_view_candidate_standoff_multipliers):
-            raise ValueError("row_view_candidate_standoff_multipliers must be positive")
-        if not self.row_view_candidate_camera_z_offsets_m:
-            raise ValueError("row_view_candidate_camera_z_offsets_m must not be empty")
-        if not self.row_view_candidate_angle_offsets_rad:
-            raise ValueError("row_view_candidate_angle_offsets_rad must not be empty")
-        if not self.row_view_candidate_roll_offsets_rad:
-            raise ValueError("row_view_candidate_roll_offsets_rad must not be empty")
-        if self.row_view_candidate_max_attempts is not None and self.row_view_candidate_max_attempts <= 0:
-            raise ValueError("row_view_candidate_max_attempts must be positive when set")
+        if self.rough_cluster_radius_m <= 0.0:
+            raise ValueError("rough_cluster_radius_m must be positive")
+        if not self.rough_view_candidate_standoff_multipliers:
+            raise ValueError("rough_view_candidate_standoff_multipliers must not be empty")
+        if any(value <= 0.0 for value in self.rough_view_candidate_standoff_multipliers):
+            raise ValueError("rough_view_candidate_standoff_multipliers must be positive")
+        if not self.rough_view_candidate_camera_z_offsets_m:
+            raise ValueError("rough_view_candidate_camera_z_offsets_m must not be empty")
+        if not self.rough_view_candidate_angle_offsets_rad:
+            raise ValueError("rough_view_candidate_angle_offsets_rad must not be empty")
+        if not self.rough_view_candidate_roll_offsets_rad:
+            raise ValueError("rough_view_candidate_roll_offsets_rad must not be empty")
         if not 0.0 <= self.yolo_confidence <= 1.0:
             raise ValueError("yolo_confidence must be between 0 and 1")
         if self.yolo_tile_grid_size <= 0:
@@ -275,7 +275,8 @@ class RowConfig:
             yolo_tile_nms_iou=self.yolo_tile_nms_iou,
             depth_sample_stride_px=self.depth_sample_stride_px,
             depth_component_min_pixels=self.depth_component_min_pixels,
-            save_depth_arrays=True,
+            save_raw_yolo_annotations=self.save_raw_yolo_annotations,
+            save_depth_arrays=self.save_depth_arrays,
             run_yolo=self.run_yolo,
             plan_only=self.plan_only,
             strict_yolo=self.strict_yolo,
@@ -287,7 +288,7 @@ class RowConfig:
 
 
 @dataclass(frozen=True)
-class RowPlannedView:
+class RoughPlannedView:
     candidate_id: str
     candidate_rough_position_world: tuple[float, float, float]
     approach_angle_rad: float
@@ -308,10 +309,10 @@ class RowPlannedView:
 
 
 @dataclass(frozen=True)
-class RowObservation:
+class RoughObservation:
     observation_id: str
     candidate_id: str
-    row_view_id: str
+    rough_view_id: str
     image_path: str | None
     depth_path: str | None
     yolo_raw_path: str | None
@@ -330,7 +331,7 @@ class RowObservation:
         return {
             "observation_id": self.observation_id,
             "candidate_id": self.candidate_id,
-            "row_view_id": self.row_view_id,
+            "rough_view_id": self.rough_view_id,
             "image_path": self.image_path,
             "depth_path": self.depth_path,
             "yolo_raw_path": self.yolo_raw_path,
@@ -342,7 +343,7 @@ class RowObservation:
             "yaw_rad": _round(self.yaw_rad) if self.yaw_rad is not None else None,
             "yaw_confidence": _round(self.yaw_confidence),
             "extent_xy_m": [_round(value) for value in self.extent_xy_m] if self.extent_xy_m else None,
-            "T_world_object": [list(row) for row in self.T_world_object],
+            "T_world_object": [list(rough) for rough in self.T_world_object],
             "position_source": self.position_source,
         }
 
@@ -389,10 +390,10 @@ def load_task1_survey_report(path: Path | str) -> Task1SurveyReport:
     )
 
 
-def build_row_inspection_plan(
+def build_rough_inspection_plan(
     survey_report: Task1SurveyReport | Path | str,
-    config: RowConfig = RowConfig(),
-) -> tuple[SurveyWorkspace, tuple[RowPlannedView, ...]]:
+    config: RoughConfig = RoughConfig(),
+) -> tuple[SurveyWorkspace, tuple[RoughPlannedView, ...]]:
     config.validate()
     report = load_task1_survey_report(survey_report) if not isinstance(survey_report, Task1SurveyReport) else survey_report
     layout = load_stage0_layout(report.layout_snapshot_path)
@@ -401,12 +402,12 @@ def build_row_inspection_plan(
         tank_opening_z_m=config.tank_opening_z_m,
         opening_clearance_m=config.opening_clearance_m,
     )
-    return _build_row_inspection_plan_for_scene(report, scene=scene, config=config)
+    return _build_rough_inspection_plan_for_scene(report, scene=scene, config=config)
 
 
-def run_task1_row(
+def run_task1_rough(
     survey_report_path: Path | str,
-    config: RowConfig = RowConfig(),
+    config: RoughConfig = RoughConfig(),
     *,
     detector: SurveyDetector | None = None,
 ) -> dict[str, Any]:
@@ -418,23 +419,24 @@ def run_task1_row(
         tank_opening_z_m=config.tank_opening_z_m,
         opening_clearance_m=config.opening_clearance_m,
     )
-    workspace, planned_views = _build_row_inspection_plan_for_scene(survey_report, scene=scene, config=config)
+    workspace, planned_views = _build_rough_inspection_plan_for_scene(survey_report, scene=scene, config=config)
     created_utc = datetime.now(timezone.utc).isoformat()
     run_dir = survey_report.task1_run_dir
-    row_dir = run_dir / "row"
-    images_dir = row_dir / "images"
-    depth_dir = row_dir / "depth"
-    yolo_dir = row_dir / "yolo_raw"
-    annotated_dir = row_dir / "annotated"
-    tiles_dir = row_dir / "tiles"
-    plan_path = row_dir / "row_plan.json"
-    report_path = row_dir / "row_report.json"
+    rough_dir = run_dir / "rough"
+    images_dir = rough_dir / "images"
+    depth_dir = rough_dir / "depth"
+    yolo_dir = rough_dir / "yolo_raw"
+    annotated_dir = rough_dir / "annotated"
+    raw_annotated_dir = rough_dir / "raw_annotated"
+    tiles_dir = rough_dir / "tiles"
+    plan_path = rough_dir / "rough_plan.json"
+    report_path = rough_dir / "rough_report.json"
     plan_payload = _plan_payload(
         created_utc=created_utc,
         survey_report=survey_report,
         scene=scene,
         config=config,
-        row_dir=row_dir,
+        rough_dir=rough_dir,
         plan_path=plan_path,
         report_path=report_path,
         planned_views=planned_views,
@@ -445,17 +447,17 @@ def run_task1_row(
         report = _report_payload(
             created_utc=created_utc,
             status="plan_only",
-            message="Generated the task1 row close-inspection plan without MuJoCo rendering or YOLO inference.",
+            message="Generated the task1 rough close-inspection plan without MuJoCo rendering or YOLO inference.",
             survey_report=survey_report,
             scene=scene,
             config=config,
             workspace=workspace,
-            row_dir=row_dir,
+            rough_dir=rough_dir,
             plan_path=plan_path,
             report_path=report_path,
             planned_views=planned_views,
-            view_results=[_planned_row_view_result(planned) for planned in planned_views],
-            row_observations=[],
+            view_results=[_planned_rough_view_result(planned) for planned in planned_views],
+            rough_observations=[],
             object_hypotheses=[],
             stable_objects=[],
             tentative_objects=[],
@@ -476,12 +478,12 @@ def run_task1_row(
             scene=scene,
             config=config,
             workspace=workspace,
-            row_dir=row_dir,
+            rough_dir=rough_dir,
             plan_path=plan_path,
             report_path=report_path,
             planned_views=planned_views,
-            view_results=[_planned_row_view_result(planned) for planned in planned_views],
-            row_observations=[],
+            view_results=[_planned_rough_view_result(planned) for planned in planned_views],
+            rough_observations=[],
             object_hypotheses=[],
             stable_objects=[],
             tentative_objects=[],
@@ -494,12 +496,14 @@ def run_task1_row(
 
     backend = MujocoSurveyBackend(config=config.capture_config(), scene=scene, detector=detector)
     view_results: list[dict[str, Any]] = []
-    row_observations: list[RowObservation] = []
-    row_reachable_planning_summary: dict[str, Any] | None = None
+    rough_observations: list[RoughObservation] = []
+    rough_reachable_planning_summary: dict[str, Any] | None = None
+    if not config.save_depth_arrays:
+        _clear_depth_arrays(depth_dir)
     try:
         backend.load()
         backend.apply_scene_objects()
-        planned_views, row_view_selections, row_reachable_planning_summary = _select_reachable_row_capture_plan(
+        planned_views, rough_view_selections, rough_reachable_planning_summary = _select_reachable_rough_capture_plan(
             backend=backend,
             planned_views=planned_views,
             workspace=workspace,
@@ -510,7 +514,7 @@ def run_task1_row(
             survey_report=survey_report,
             scene=scene,
             config=config,
-            row_dir=row_dir,
+            rough_dir=rough_dir,
             plan_path=plan_path,
             report_path=report_path,
             planned_views=planned_views,
@@ -522,15 +526,18 @@ def run_task1_row(
                 depth_dir=depth_dir,
                 yolo_dir=yolo_dir,
                 annotated_dir=annotated_dir,
+                raw_annotated_dir=raw_annotated_dir,
                 tiles_dir=tiles_dir,
+                include_depth_array=True,
             )
-            view_result["row_view_selection"] = row_view_selections.get(
+            depth_array = view_result.pop("_transient_depth_array", None)
+            view_result["rough_view_selection"] = rough_view_selections.get(
                 planned.view.view_id,
                 {
                     "status": "missing_selection_record",
-                    "strategy": "candidate_level_reachable_row_capture_plan_v1",
+                    "strategy": "candidate_level_reachable_rough_capture_plan_v1",
                     "planned_view_id": planned.view.view_id,
-                    "notes": ["Internal row planner did not provide a selection record for this reachable view."],
+                    "notes": ["Internal rough planner did not provide a selection record for this reachable view."],
                 },
             )
             view_result["candidate_id"] = planned.candidate_id
@@ -538,14 +545,15 @@ def run_task1_row(
                 _round(value) for value in planned.candidate_rough_position_world
             ]
             view_results.append(view_result)
-            row_observations.extend(
-                _row_observations_from_capture(
+            rough_observations.extend(
+                _rough_observations_from_capture(
                     planned=planned,
                     view_result=view_result,
                     survey_observations=survey_observations,
                     config=config,
                     workspace=workspace,
-                    observation_offset=len(row_observations),
+                    observation_offset=len(rough_observations),
+                    depth_array=depth_array,
                 )
             )
     except Exception as exc:
@@ -558,30 +566,30 @@ def run_task1_row(
             scene=scene,
             config=config,
             workspace=workspace,
-            row_dir=row_dir,
+            rough_dir=rough_dir,
             plan_path=plan_path,
             report_path=report_path,
             planned_views=planned_views,
-            view_results=view_results or [_planned_row_view_result(planned) for planned in planned_views],
-            row_observations=[],
+            view_results=view_results or [_planned_rough_view_result(planned) for planned in planned_views],
+            rough_observations=[],
             object_hypotheses=[],
             stable_objects=[],
             tentative_objects=[],
             ambiguous_objects=[],
             rejected_hypotheses=[],
             object_selection_summary=_stable_selection_empty_metadata(config),
-            row_reachable_planning_summary=row_reachable_planning_summary,
+            rough_reachable_planning_summary=rough_reachable_planning_summary,
         )
         _write_json(report_path, report)
         return report
     finally:
         backend.close()
 
-    object_hypotheses = fuse_row_observations(
-        row_observations,
-        cluster_radius_m=config.row_cluster_radius_m,
+    object_hypotheses = fuse_rough_observations(
+        rough_observations,
+        cluster_radius_m=config.rough_cluster_radius_m,
     )
-    object_selection = select_row_objects_with_policy(
+    object_selection = select_rough_objects_with_policy(
         object_hypotheses,
         workspace=workspace,
         min_confidence=config.stable_object_min_confidence,
@@ -602,10 +610,26 @@ def run_task1_row(
     ambiguous_objects = object_selection["ambiguous_objects"]
     rejected_hypotheses = object_selection["rejected_hypotheses"]
     object_selection_summary = object_selection["object_selection_summary"]
+    rough_observation_payloads = [observation.to_dict() for observation in rough_observations]
+    if config.save_filtered_annotations:
+        rough_annotation_detections = _rough_filtered_annotation_detections_by_view(
+            object_hypotheses=object_hypotheses,
+            rough_observations=rough_observation_payloads,
+            stable_objects=stable_objects,
+            tentative_objects=tentative_objects,
+            ambiguous_objects=ambiguous_objects,
+        )
+        _write_rough_filtered_annotated_images(
+            view_results=view_results,
+            annotated_dir=annotated_dir,
+            detections_by_view=rough_annotation_detections,
+            image_width=config.image_width,
+            image_height=config.image_height,
+        )
     success_count = sum(1 for view in view_results if view.get("status") == "success")
     planning_shortfall = (
-        row_reachable_planning_summary is not None
-        and int(row_reachable_planning_summary.get("insufficient_candidate_count", 0)) > 0
+        rough_reachable_planning_summary is not None
+        and int(rough_reachable_planning_summary.get("insufficient_candidate_count", 0)) > 0
     )
     if view_results and success_count == len(view_results) and not planning_shortfall:
         status = "success"
@@ -618,8 +642,8 @@ def run_task1_row(
         created_utc=created_utc,
         status=status,
         message=(
-            f"Captured {success_count}/{len(view_results)} task1 row close-inspection views "
-            f"from {row_reachable_planning_summary.get('requested_view_count') if row_reachable_planning_summary else len(view_results)} requested reachable slots "
+            f"Captured {success_count}/{len(view_results)} task1 rough close-inspection views "
+            f"from {rough_reachable_planning_summary.get('requested_view_count') if rough_reachable_planning_summary else len(view_results)} requested reachable slots "
             f"and selected {len(stable_objects)} stable, {len(tentative_objects)} tentative, "
             f"{len(ambiguous_objects)} ambiguous objects from {len(object_hypotheses)} hypotheses."
         ),
@@ -627,38 +651,38 @@ def run_task1_row(
         scene=scene,
         config=config,
         workspace=workspace,
-        row_dir=row_dir,
+        rough_dir=rough_dir,
         plan_path=plan_path,
         report_path=report_path,
         planned_views=planned_views,
         view_results=view_results,
-        row_observations=[observation.to_dict() for observation in row_observations],
+        rough_observations=rough_observation_payloads,
         object_hypotheses=object_hypotheses,
         stable_objects=stable_objects,
         tentative_objects=tentative_objects,
         ambiguous_objects=ambiguous_objects,
         rejected_hypotheses=rejected_hypotheses,
         object_selection_summary=object_selection_summary,
-        row_reachable_planning_summary=row_reachable_planning_summary,
+        rough_reachable_planning_summary=rough_reachable_planning_summary,
     )
     _write_json(report_path, report)
     return report
 
 
-def fuse_row_observations(
-    observations: list[RowObservation],
+def fuse_rough_observations(
+    observations: list[RoughObservation],
     *,
-    cluster_radius_m: float = DEFAULT_ROW_CLUSTER_RADIUS_M,
+    cluster_radius_m: float = DEFAULT_ROUGH_CLUSTER_RADIUS_M,
 ) -> list[dict[str, Any]]:
     if cluster_radius_m <= 0.0:
         raise ValueError("cluster_radius_m must be positive")
 
-    clusters: list[list[RowObservation]] = []
+    clusters: list[list[RoughObservation]] = []
     for observation in observations:
-        best_cluster: list[RowObservation] | None = None
+        best_cluster: list[RoughObservation] | None = None
         best_distance = float("inf")
         for cluster in clusters:
-            distance = _xy_distance(observation.position_world, _row_cluster_center(cluster))
+            distance = _xy_distance(observation.position_world, _rough_cluster_center(cluster))
             if distance <= cluster_radius_m and distance < best_distance:
                 best_cluster = cluster
                 best_distance = distance
@@ -667,45 +691,11 @@ def fuse_row_observations(
         else:
             best_cluster.append(observation)
 
-    clusters.sort(key=lambda cluster: (_row_cluster_center(cluster)[0], _row_cluster_center(cluster)[1]))
-    return [_row_hypothesis_payload(index, cluster) for index, cluster in enumerate(clusters)]
+    clusters.sort(key=lambda cluster: (_rough_cluster_center(cluster)[0], _rough_cluster_center(cluster)[1]))
+    return [_rough_hypothesis_payload(index, cluster) for index, cluster in enumerate(clusters)]
 
 
-def select_row_objects(
-    object_hypotheses: list[dict[str, Any]],
-    *,
-    workspace: SurveyWorkspace | dict[str, float],
-    min_confidence: float = DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
-    min_support_count: int = DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
-    min_evidence_score: float = DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
-    same_class_nms_radius_m: float = DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
-    workspace_margin_m: float = DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
-) -> dict[str, Any]:
-    if not 0.0 <= min_confidence <= 1.0:
-        raise ValueError("min_confidence must be between 0 and 1")
-    if min_support_count <= 0:
-        raise ValueError("min_support_count must be positive")
-    if same_class_nms_radius_m <= 0.0:
-        raise ValueError("same_class_nms_radius_m must be positive")
-    return select_row_objects_with_policy(
-        object_hypotheses,
-        workspace=workspace,
-        min_confidence=min_confidence,
-        min_support_count=min_support_count,
-        min_evidence_score=min_evidence_score,
-        same_class_nms_radius_m=same_class_nms_radius_m,
-        workspace_margin_m=workspace_margin_m,
-        tentative_min_confidence=DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
-        tentative_min_support_count=DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
-        tentative_small_bbox_area_px=DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
-        cross_class_conflict_radius_m=DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M,
-        cross_class_ambiguity_score_ratio=DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO,
-        class_vote_ambiguity_top_to_second_ratio=DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO,
-        class_vote_ambiguity_min_secondary_vote=DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE,
-    )
-
-
-def select_row_objects_with_policy(
+def select_rough_objects_with_policy(
     object_hypotheses: list[dict[str, Any]],
     *,
     workspace: SurveyWorkspace | dict[str, float],
@@ -942,7 +932,7 @@ def select_row_objects_with_policy(
     rejected_hypotheses = [_rejected_hypothesis_payload(record) for record in final_rejections]
     metadata = {
         "status": "success",
-        "policy_version": "row_object_selection_policy_v2",
+        "policy_version": "rough_object_selection_policy_v2",
         "input_hypothesis_count": len(object_hypotheses),
         "candidate_after_filter_count": len(candidates),
         "same_class_representative_count": len(representatives),
@@ -970,7 +960,7 @@ def select_row_objects_with_policy(
             "workspace_filter": True,
         },
         "notes": [
-            "Stable objects are selected from close RGB-D row hypotheses, not copied from survey candidates.",
+            "Stable objects are selected from close RGB-D rough hypotheses, not copied from survey candidates.",
             "Lower-scoring same-class hypotheses within the merge radius are treated as duplicate close-view fragments.",
             "Small low-evidence hypotheses are retained as tentative objects instead of being silently dropped.",
             "Nearby cross-class hypotheses with similar evidence are reported as ambiguous objects instead of forced labels.",
@@ -986,44 +976,14 @@ def select_row_objects_with_policy(
     }
 
 
-def select_stable_row_objects(
-    object_hypotheses: list[dict[str, Any]],
-    *,
-    workspace: SurveyWorkspace | dict[str, float],
-    min_confidence: float = DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
-    min_support_count: int = DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
-    same_class_nms_radius_m: float = DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    selection = select_row_objects(
-        object_hypotheses,
-        workspace=workspace,
-        min_confidence=min_confidence,
-        min_support_count=min_support_count,
-        same_class_nms_radius_m=same_class_nms_radius_m,
-    )
-    return selection["stable_objects"], selection["object_selection_summary"]
-
-
-def _select_row_capture_view(
+def _select_rough_capture_view(
     *,
     backend: MujocoSurveyBackend,
-    planned: RowPlannedView,
+    planned: RoughPlannedView,
     workspace: SurveyWorkspace,
-    config: RowConfig,
+    config: RoughConfig,
 ) -> tuple[SurveyView | None, dict[str, Any]]:
-    if not config.row_view_collision_search:
-        return planned.view, {
-            "status": "disabled",
-            "strategy": "nominal_row_view_without_candidate_search",
-            "planned_view_id": planned.view.view_id,
-            "selected_candidate_index": 0,
-            "attempt_count": 0,
-            "notes": [
-                "Row view collision-aware candidate search was disabled by configuration.",
-            ],
-        }
-
-    candidate_views, candidate_limit_reached = _row_view_candidate_views(planned, workspace=workspace, config=config)
+    candidate_views = _rough_view_candidate_views(planned, workspace=workspace, config=config)
     attempts: list[dict[str, Any]] = []
     rejected_counts = {
         "ik_failed": 0,
@@ -1033,7 +993,7 @@ def _select_row_capture_view(
     }
     for candidate_index, (candidate_view, candidate_metadata) in enumerate(candidate_views):
         validation = backend.validate_view_pose(candidate_view)
-        attempt = _row_view_validation_attempt_summary(
+        attempt = _rough_view_validation_attempt_summary(
             candidate_index=candidate_index,
             metadata=candidate_metadata,
             validation=validation,
@@ -1042,73 +1002,45 @@ def _select_row_capture_view(
         if validation.get("status") == "success":
             return candidate_view, {
                 "status": "selected",
-                "strategy": "ik_collision_checked_row_view_candidates_v1",
+                "strategy": "ik_collision_checked_rough_view_candidates_v1",
                 "planned_view_id": planned.view.view_id,
                 "selected_candidate_index": candidate_index,
                 "attempt_count": len(attempts),
-                "candidate_limit_reached": candidate_limit_reached,
                 "rejected_counts": rejected_counts,
                 "selected_candidate": candidate_metadata,
                 "attempts": attempts,
                 "notes": [
-                    "Row chose the first candidate whose full MuJoCo IK pose passed robot collision checks.",
+                    "Rough chose the first candidate whose full MuJoCo IK pose passed robot collision checks.",
                 ],
             }
-        _accumulate_row_view_rejection(rejected_counts, validation)
+        _accumulate_rough_view_rejection(rejected_counts, validation)
 
     return None, {
         "status": "failed_no_collision_free_candidate",
-        "strategy": "ik_collision_checked_row_view_candidates_v1",
+        "strategy": "ik_collision_checked_rough_view_candidates_v1",
         "planned_view_id": planned.view.view_id,
         "selected_candidate_index": None,
         "attempt_count": len(attempts),
-        "candidate_limit_reached": candidate_limit_reached,
         "rejected_counts": rejected_counts,
         "attempts": attempts,
         "notes": [
-            "No row view candidate passed IK and full robot collision checks; this planned view was not rendered.",
+            "No rough view candidate passed IK and full robot collision checks; this planned view was not rendered.",
         ],
     }
 
 
-def _select_reachable_row_capture_plan(
+def _select_reachable_rough_capture_plan(
     *,
     backend: MujocoSurveyBackend,
-    planned_views: tuple[RowPlannedView, ...],
+    planned_views: tuple[RoughPlannedView, ...],
     workspace: SurveyWorkspace,
-    config: RowConfig,
-) -> tuple[tuple[RowPlannedView, ...], dict[str, dict[str, Any]], dict[str, Any]]:
-    if not config.row_view_collision_search:
-        selections = {
-            planned.view.view_id: {
-                "status": "disabled",
-                "strategy": "nominal_row_view_without_candidate_search",
-                "planned_view_id": planned.view.view_id,
-                "selected_candidate_index": 0,
-                "attempt_count": 0,
-                "notes": [
-                    "Debug-only row view collision-aware planning was disabled; reachability is not guaranteed.",
-                ],
-            }
-            for planned in planned_views
-        }
-        return planned_views, selections, {
-            "strategy": "candidate_level_reachable_row_capture_plan_v1",
-            "enabled": False,
-            "requested_view_count": len(planned_views),
-            "selected_view_count": len(planned_views),
-            "insufficient_candidate_count": 0,
-            "candidate_summaries": [],
-            "notes": [
-                "Reachable row capture planning was disabled by configuration.",
-            ],
-        }
-
-    selected_views: list[RowPlannedView] = []
+    config: RoughConfig,
+) -> tuple[tuple[RoughPlannedView, ...], dict[str, dict[str, Any]], dict[str, Any]]:
+    selected_views: list[RoughPlannedView] = []
     selections: dict[str, dict[str, Any]] = {}
     candidate_summaries: list[dict[str, Any]] = []
-    for candidate_id, candidate_plans in _group_row_plans_by_candidate(planned_views):
-        selected_for_candidate: list[RowPlannedView] = []
+    for candidate_id, candidate_plans in _group_rough_plans_by_candidate(planned_views):
+        selected_for_candidate: list[RoughPlannedView] = []
         rejected_counts = {
             "ik_failed": 0,
             "collision": 0,
@@ -1118,7 +1050,6 @@ def _select_reachable_row_capture_plan(
         }
         failed_attempt_samples: list[dict[str, Any]] = []
         attempted_pose_keys: set[tuple[float, ...]] = set()
-        candidate_limit_reached = False
         duplicate_success_count = 0
         attempt_count = 0
         requested_count = len(candidate_plans)
@@ -1128,20 +1059,20 @@ def _select_reachable_row_capture_plan(
 
         def try_select_candidate_view(
             *,
-            source_planned: RowPlannedView,
+            source_planned: RoughPlannedView,
             candidate_index: int,
             candidate_view: SurveyView,
             metadata: dict[str, Any],
             planning_pass: str,
         ) -> bool:
             nonlocal attempt_count, duplicate_success_count, primary_selected_count, secondary_selected_count
-            pose_key = _row_view_pose_key(candidate_view)
+            pose_key = _rough_view_pose_key(candidate_view)
             if pose_key in attempted_pose_keys:
                 return False
             attempted_pose_keys.add(pose_key)
             validation = backend.validate_view_pose(candidate_view)
             attempt_count += 1
-            attempt = _row_view_validation_attempt_summary(
+            attempt = _rough_view_validation_attempt_summary(
                 candidate_index=attempt_count - 1,
                 metadata={
                     **metadata,
@@ -1152,7 +1083,7 @@ def _select_reachable_row_capture_plan(
                 validation=validation,
             )
             if validation.get("status") != "success":
-                _accumulate_row_view_rejection(rejected_counts, validation)
+                _accumulate_rough_view_rejection(rejected_counts, validation)
                 if len(failed_attempt_samples) < 8:
                     failed_attempt_samples.append(attempt)
                 return False
@@ -1160,7 +1091,7 @@ def _select_reachable_row_capture_plan(
             if not isinstance(actual_qpos, list) or not actual_qpos:
                 rejected_counts["missing_validated_qpos"] += 1
                 attempt["status"] = "failed"
-                attempt["message"] = "Validated row candidate did not include actual_qpos for reproducible capture."
+                attempt["message"] = "Validated rough candidate did not include actual_qpos for reproducible capture."
                 if len(failed_attempt_samples) < 8:
                     failed_attempt_samples.append(attempt)
                 return False
@@ -1169,16 +1100,16 @@ def _select_reachable_row_capture_plan(
                 return False
 
             local_index = len(selected_for_candidate)
-            selected_view_id = f"row_{candidate_id}_{local_index:02d}"
-            selected_view = _copy_row_survey_view(
+            selected_view_id = f"rough_{candidate_id}_{local_index:02d}"
+            selected_view = _copy_rough_survey_view(
                 candidate_view,
                 view_id=selected_view_id,
                 grid_row=source_planned.view.grid_row,
                 grid_col=local_index,
-                fixed_pose_source=ROW_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
+                fixed_pose_source=ROUGH_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
                 fixed_qpos=tuple(float(value) for value in actual_qpos),
             )
-            selected_planned = RowPlannedView(
+            selected_planned = RoughPlannedView(
                 candidate_id=candidate_id,
                 candidate_rough_position_world=source_planned.candidate_rough_position_world,
                 approach_angle_rad=float(metadata["approach_angle_rad"]),
@@ -1191,12 +1122,11 @@ def _select_reachable_row_capture_plan(
                 secondary_selected_count += 1
             selections[selected_view_id] = {
                 "status": "selected",
-                "strategy": "candidate_level_reachable_row_capture_plan_v1",
+                "strategy": "candidate_level_reachable_rough_capture_plan_v1",
                 "planned_view_id": selected_view_id,
                 "source_planned_view_id": source_planned.view.view_id,
                 "selected_candidate_index": attempt_count - 1,
                 "attempt_count": attempt_count,
-                "candidate_limit_reached": candidate_limit_reached,
                 "planning_pass": planning_pass,
                 "selected_candidate": {
                     **metadata,
@@ -1206,18 +1136,17 @@ def _select_reachable_row_capture_plan(
                 },
                 "validation": attempt,
                 "notes": [
-                    "Row planned this capture only after the full MuJoCo IK pose passed robot collision checks.",
+                    "Rough planned this capture only after the full MuJoCo IK pose passed robot collision checks.",
                 ],
             }
             return True
 
         for source_planned in candidate_plans:
-            candidate_views, limit_reached = _row_view_candidate_views(
+            candidate_views = _rough_view_candidate_views(
                 source_planned,
                 workspace=workspace,
                 config=config,
             )
-            candidate_limit_reached = candidate_limit_reached or limit_reached
             slot_selected = False
             for candidate_index, (candidate_view, metadata) in enumerate(candidate_views):
                 slot_selected = try_select_candidate_view(
@@ -1236,12 +1165,11 @@ def _select_reachable_row_capture_plan(
 
         if len(selected_for_candidate) < requested_count:
             for source_planned in candidate_plans:
-                candidate_views, limit_reached = _row_view_candidate_views(
+                candidate_views = _rough_view_candidate_views(
                     source_planned,
                     workspace=workspace,
                     config=config,
                 )
-                candidate_limit_reached = candidate_limit_reached or limit_reached
                 for candidate_index, (candidate_view, metadata) in enumerate(candidate_views):
                     selected = try_select_candidate_view(
                         source_planned=source_planned,
@@ -1272,7 +1200,6 @@ def _select_reachable_row_capture_plan(
                 "attempt_count": attempt_count,
                 "unique_pose_attempt_count": len(attempted_pose_keys),
                 "duplicate_success_count": duplicate_success_count,
-                "candidate_limit_reached": candidate_limit_reached,
                 "rejected_counts": rejected_counts,
                 "selected_view_ids": [planned.view.view_id for planned in selected_for_candidate],
                 "failed_attempt_samples": failed_attempt_samples,
@@ -1283,27 +1210,26 @@ def _select_reachable_row_capture_plan(
         1 for summary in candidate_summaries if summary["status"] == "insufficient_reachable_views"
     )
     return tuple(selected_views), selections, {
-        "strategy": "candidate_level_reachable_row_capture_plan_v1",
+        "strategy": "candidate_level_reachable_rough_capture_plan_v1",
         "enabled": True,
         "requested_view_count": len(planned_views),
         "selected_view_count": len(selected_views),
         "candidate_count": len(candidate_summaries),
         "insufficient_candidate_count": insufficient_count,
-        "candidate_limit_reached_count": sum(1 for summary in candidate_summaries if summary["candidate_limit_reached"]),
         "candidate_summaries": candidate_summaries,
         "notes": [
-            "Only IK/collision-validated row views are included in planned_views and rendered.",
-            "If selected_view_count is lower than requested_view_count, the report is partial instead of rendering an unreachable row view.",
+            "Only IK/collision-validated rough views are included in planned_views and rendered.",
+            "If selected_view_count is lower than requested_view_count, the report is partial instead of rendering an unreachable rough view.",
         ],
     }
 
 
-def _row_view_candidate_views(
-    planned: RowPlannedView,
+def _rough_view_candidate_views(
+    planned: RoughPlannedView,
     *,
     workspace: SurveyWorkspace,
-    config: RowConfig,
-) -> tuple[list[tuple[SurveyView, dict[str, Any]]], bool]:
+    config: RoughConfig,
+) -> list[tuple[SurveyView, dict[str, Any]]]:
     target = planned.candidate_rough_position_world
     look_at = (
         target[0],
@@ -1312,12 +1238,12 @@ def _row_view_candidate_views(
     )
     candidates: list[tuple[SurveyView, dict[str, Any]]] = []
     seen: set[tuple[float, float, float, float]] = set()
-    for angle_offset in config.row_view_candidate_angle_offsets_rad:
+    for angle_offset in config.rough_view_candidate_angle_offsets_rad:
         angle = _normalize_angle(planned.approach_angle_rad + angle_offset)
-        for z_offset in config.row_view_candidate_camera_z_offsets_m:
+        for z_offset in config.rough_view_candidate_camera_z_offsets_m:
             camera_z = config.camera_z_m + z_offset
-            for standoff_multiplier in config.row_view_candidate_standoff_multipliers:
-                standoff = config.row_standoff_m * standoff_multiplier
+            for standoff_multiplier in config.rough_view_candidate_standoff_multipliers:
+                standoff = config.rough_standoff_m * standoff_multiplier
                 camera_position = (
                     target[0] + math.cos(angle) * standoff,
                     target[1] + math.sin(angle) * standoff,
@@ -1335,7 +1261,7 @@ def _row_view_candidate_views(
                     continue
                 seen.add(key)
                 base_transform = _make_look_at_transform(camera_position, look_at)
-                for roll_offset in config.row_view_candidate_roll_offsets_rad:
+                for roll_offset in config.rough_view_candidate_roll_offsets_rad:
                     view = SurveyView(
                         view_id=planned.view.view_id,
                         grid_row=planned.view.grid_row,
@@ -1359,19 +1285,14 @@ def _row_view_candidate_views(
                         "look_at_world": [_round(value) for value in view.look_at_world],
                     }
                     candidates.append((view, metadata))
-                    if (
-                        config.row_view_candidate_max_attempts is not None
-                        and len(candidates) >= config.row_view_candidate_max_attempts
-                    ):
-                        return candidates, True
-    return candidates, False
+    return candidates
 
 
-def _group_row_plans_by_candidate(
-    planned_views: tuple[RowPlannedView, ...],
-) -> list[tuple[str, list[RowPlannedView]]]:
-    groups: list[tuple[str, list[RowPlannedView]]] = []
-    by_id: dict[str, list[RowPlannedView]] = {}
+def _group_rough_plans_by_candidate(
+    planned_views: tuple[RoughPlannedView, ...],
+) -> list[tuple[str, list[RoughPlannedView]]]:
+    groups: list[tuple[str, list[RoughPlannedView]]] = []
+    by_id: dict[str, list[RoughPlannedView]] = {}
     for planned in planned_views:
         if planned.candidate_id not in by_id:
             by_id[planned.candidate_id] = []
@@ -1380,19 +1301,19 @@ def _group_row_plans_by_candidate(
     return groups
 
 
-def _row_view_pose_key(view: SurveyView) -> tuple[float, ...]:
+def _rough_view_pose_key(view: SurveyView) -> tuple[float, ...]:
     return tuple(
         _round(value)
         for value in (
             *view.desired_camera_position_world,
-            *(component for row in view.T_world_camera[:3] for component in row[:3]),
+            *(component for rough in view.T_world_camera[:3] for component in rough[:3]),
         )
     )
 
 
 def _duplicates_selected_camera_position(
     view: SurveyView,
-    selected_plans: list[RowPlannedView],
+    selected_plans: list[RoughPlannedView],
     *,
     min_distance_m: float = 0.025,
 ) -> bool:
@@ -1402,7 +1323,7 @@ def _duplicates_selected_camera_position(
     )
 
 
-def _copy_row_survey_view(
+def _copy_rough_survey_view(
     view: SurveyView,
     *,
     view_id: str,
@@ -1426,7 +1347,7 @@ def _copy_row_survey_view(
     )
 
 
-def _row_view_validation_attempt_summary(
+def _rough_view_validation_attempt_summary(
     *,
     candidate_index: int,
     metadata: dict[str, Any],
@@ -1458,7 +1379,7 @@ def _row_view_validation_attempt_summary(
     }
 
 
-def _accumulate_row_view_rejection(rejected_counts: dict[str, int], validation: dict[str, Any]) -> None:
+def _accumulate_rough_view_rejection(rejected_counts: dict[str, int], validation: dict[str, Any]) -> None:
     ik = validation.get("ik") if isinstance(validation.get("ik"), dict) else {}
     collision = validation.get("collision") if isinstance(validation.get("collision"), dict) else {}
     message = str(validation.get("message") or "")
@@ -1472,15 +1393,15 @@ def _accumulate_row_view_rejection(rejected_counts: dict[str, int], validation: 
         rejected_counts["other_failed"] += 1
 
 
-def _row_view_selection_failed_result(planned: RowPlannedView, row_view_selection: dict[str, Any]) -> dict[str, Any]:
-    result = _planned_row_view_result(planned)
+def _rough_view_selection_failed_result(planned: RoughPlannedView, rough_view_selection: dict[str, Any]) -> dict[str, Any]:
+    result = _planned_rough_view_result(planned)
     result["status"] = "failed"
-    result["message"] = "No IK/collision-safe row view candidate was available; row capture was not rendered."
+    result["message"] = "No IK/collision-safe rough view candidate was available; rough capture was not rendered."
     result["candidate_id"] = planned.candidate_id
     result["candidate_rough_position_world"] = [
         _round(value) for value in planned.candidate_rough_position_world
     ]
-    result["row_view_selection"] = row_view_selection
+    result["rough_view_selection"] = rough_view_selection
     return result
 
 
@@ -1700,12 +1621,12 @@ def _ambiguous_object_payload(
     else:
         class_candidates = [_class_candidate_payload(record) for record in representatives]
     return {
-        "object_id": f"row_ambiguous_{index + 1:03d}",
+        "object_id": f"rough_ambiguous_{index + 1:03d}",
         "status": "ambiguous",
         "position_world": [_round(value) for value in center],
         "class_candidates": class_candidates,
         "selection": {
-            "source": "row_object_selection_policy_v2",
+            "source": "rough_object_selection_policy_v2",
             "reason": group["reason"],
             "cross_class_conflict_radius_m": _round(conflict_radius_m),
             "ambiguity_score_ratio": _round(ambiguity_score_ratio),
@@ -1742,7 +1663,7 @@ def _class_candidate_payload(record: dict[str, Any]) -> dict[str, Any]:
         "evidence_score": _round(float(record["evidence_score"])),
         "support_count": int(hypothesis.get("support_count", 0)),
         "source_candidate_ids": _string_list(hypothesis.get("source_candidate_ids", [])),
-        "supporting_row_views": _string_list(hypothesis.get("supporting_row_views", [])),
+        "supporting_rough_views": _string_list(hypothesis.get("supporting_rough_views", [])),
         "position_world": [_round(value) for value in _representative_position(record)],
         "best_image_path": hypothesis.get("best_image_path"),
         "best_bbox_xyxy": hypothesis.get("best_bbox_xyxy"),
@@ -1763,7 +1684,7 @@ def _tentative_object_payload(
     if position is None:
         raise ValueError("tentative object hypothesis must contain position_world")
     return {
-        "object_id": f"row_tentative_{index + 1:03d}",
+        "object_id": f"rough_tentative_{index + 1:03d}",
         "status": "tentative",
         "source_hypothesis_id": hypothesis.get("hypothesis_id"),
         "class_name": str(hypothesis.get("class_name") or ""),
@@ -1771,7 +1692,7 @@ def _tentative_object_payload(
         "evidence_score": _round(evidence_score),
         "support_count": int(hypothesis.get("support_count", 0)),
         "source_candidate_ids": _string_list(hypothesis.get("source_candidate_ids", [])),
-        "supporting_row_views": _string_list(hypothesis.get("supporting_row_views", [])),
+        "supporting_rough_views": _string_list(hypothesis.get("supporting_rough_views", [])),
         "position_world": [_round(value) for value in position],
         "yaw_rad": hypothesis.get("yaw_rad"),
         "T_world_object": hypothesis.get("T_world_object"),
@@ -1779,7 +1700,7 @@ def _tentative_object_payload(
         "best_bbox_xyxy": hypothesis.get("best_bbox_xyxy"),
         "best_bbox_area_px": _round(_hypothesis_bbox_area(hypothesis) or 0.0),
         "selection": {
-            "source": "row_object_selection_policy_v2",
+            "source": "rough_object_selection_policy_v2",
             "quality": "tentative",
             "evidence_gaps": evidence_gaps,
             "recovery_gate": "small_bbox_low_evidence",
@@ -1823,19 +1744,19 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value if item is not None]
 
 
-def _build_row_inspection_plan_for_scene(
+def _build_rough_inspection_plan_for_scene(
     report: Task1SurveyReport,
     *,
     scene: SurveySceneInput,
-    config: RowConfig,
-) -> tuple[SurveyWorkspace, tuple[RowPlannedView, ...]]:
+    config: RoughConfig,
+) -> tuple[SurveyWorkspace, tuple[RoughPlannedView, ...]]:
     workspace = scene.workspace
     if config.camera_z_m <= workspace.bottom_z_m:
         raise ValueError(
-            "row wrist camera z must be above the tank bottom/object base plane: "
+            "rough wrist camera z must be above the tank bottom/object base plane: "
             f"camera_z={config.camera_z_m:.4f}, bottom_z={workspace.bottom_z_m:.4f}"
         )
-    planned_views: list[RowPlannedView] = []
+    planned_views: list[RoughPlannedView] = []
     for candidate_index, candidate in enumerate(report.candidates):
         target = (
             _clamp(candidate.rough_position_world[0], workspace.x_min, workspace.x_max),
@@ -1843,7 +1764,7 @@ def _build_row_inspection_plan_for_scene(
             workspace.bottom_z_m,
         )
         primary_angle = _candidate_primary_angle(candidate, report.views_by_id, workspace, config=config)
-        for local_index, offset in enumerate(_view_angle_offsets(config.row_views_per_candidate, config.row_view_angle_spread_rad)):
+        for local_index, offset in enumerate(_view_angle_offsets(config.rough_views_per_candidate, config.rough_view_angle_spread_rad)):
             approach_angle = primary_angle + offset
             camera_position, resolved_angle = _select_camera_position(
                 target,
@@ -1857,7 +1778,7 @@ def _build_row_inspection_plan_for_scene(
                 min(workspace.max_camera_z_m, workspace.bottom_z_m + config.look_at_height_offset_m),
             )
             workspace.validate_camera_position(camera_position)
-            view_id = f"row_{candidate.candidate_id}_{local_index:02d}"
+            view_id = f"rough_{candidate.candidate_id}_{local_index:02d}"
             view = SurveyView(
                 view_id=view_id,
                 grid_row=candidate_index,
@@ -1868,7 +1789,7 @@ def _build_row_inspection_plan_for_scene(
                 T_world_camera=_make_look_at_transform(camera_position, look_at),
             )
             planned_views.append(
-                RowPlannedView(
+                RoughPlannedView(
                     candidate_id=candidate.candidate_id,
                     candidate_rough_position_world=target,
                     approach_angle_rad=resolved_angle,
@@ -1883,7 +1804,7 @@ def _candidate_primary_angle(
     survey_views_by_id: dict[str, dict[str, Any]],
     workspace: SurveyWorkspace,
     *,
-    config: RowConfig,
+    config: RoughConfig,
 ) -> float:
     target = candidate.rough_position_world
     if config.entry_side != "survey-best":
@@ -1930,7 +1851,7 @@ def _entry_side_angle(
     elif entry_side == "center":
         reference = (center_x, center_y)
     else:
-        raise ValueError(f"unsupported row entry_side: {entry_side}")
+        raise ValueError(f"unsupported rough entry_side: {entry_side}")
     dx = reference[0] - target[0]
     dy = reference[1] - target[1]
     if math.hypot(dx, dy) < 1e-6:
@@ -1943,7 +1864,7 @@ def _select_camera_position(
     *,
     requested_angle_rad: float,
     workspace: SurveyWorkspace,
-    config: RowConfig,
+    config: RoughConfig,
 ) -> tuple[tuple[float, float, float], float]:
     center_angle = math.atan2(
         (workspace.y_min + workspace.y_max) / 2.0 - target[1],
@@ -1951,19 +1872,19 @@ def _select_camera_position(
     )
     candidates = (
         requested_angle_rad,
-        requested_angle_rad + config.row_view_angle_spread_rad / 2.0,
-        requested_angle_rad - config.row_view_angle_spread_rad / 2.0,
-        requested_angle_rad + config.row_view_angle_spread_rad,
-        requested_angle_rad - config.row_view_angle_spread_rad,
+        requested_angle_rad + config.rough_view_angle_spread_rad / 2.0,
+        requested_angle_rad - config.rough_view_angle_spread_rad / 2.0,
+        requested_angle_rad + config.rough_view_angle_spread_rad,
+        requested_angle_rad - config.rough_view_angle_spread_rad,
         center_angle,
-        center_angle + config.row_view_angle_spread_rad,
-        center_angle - config.row_view_angle_spread_rad,
+        center_angle + config.rough_view_angle_spread_rad,
+        center_angle - config.rough_view_angle_spread_rad,
         requested_angle_rad + math.pi,
     )
     for angle in candidates:
         position = (
-            target[0] + math.cos(angle) * config.row_standoff_m,
-            target[1] + math.sin(angle) * config.row_standoff_m,
+            target[0] + math.cos(angle) * config.rough_standoff_m,
+            target[1] + math.sin(angle) * config.rough_standoff_m,
             config.camera_z_m,
         )
         if _camera_position_is_valid(position, target, workspace=workspace, config=config):
@@ -1971,7 +1892,7 @@ def _select_camera_position(
 
     fallback = _clamped_camera_position(target, center_angle, workspace=workspace, config=config)
     if not _camera_position_is_valid(fallback, target, workspace=workspace, config=config):
-        raise ValueError(f"could not place row camera inside tank for candidate near {target}")
+        raise ValueError(f"could not place rough camera inside tank for candidate near {target}")
     return (_round_vector(fallback), _normalize_angle(center_angle))
 
 
@@ -1980,9 +1901,9 @@ def _camera_position_is_valid(
     target: tuple[float, float, float],
     *,
     workspace: SurveyWorkspace,
-    config: RowConfig,
+    config: RoughConfig,
 ) -> bool:
-    if math.hypot(position[0] - target[0], position[1] - target[1]) < config.row_min_oblique_distance_m:
+    if math.hypot(position[0] - target[0], position[1] - target[1]) < config.rough_min_oblique_distance_m:
         return False
     try:
         workspace.validate_camera_position(position)
@@ -1996,11 +1917,11 @@ def _clamped_camera_position(
     angle: float,
     *,
     workspace: SurveyWorkspace,
-    config: RowConfig,
+    config: RoughConfig,
 ) -> tuple[float, float, float]:
-    margin = min(config.row_min_oblique_distance_m / 2.0, 0.02)
-    x = target[0] + math.cos(angle) * config.row_standoff_m
-    y = target[1] + math.sin(angle) * config.row_standoff_m
+    margin = min(config.rough_min_oblique_distance_m / 2.0, 0.02)
+    x = target[0] + math.cos(angle) * config.rough_standoff_m
+    y = target[1] + math.sin(angle) * config.rough_standoff_m
     return (
         _clamp(x, workspace.x_min + margin, workspace.x_max - margin),
         _clamp(y, workspace.y_min + margin, workspace.y_max - margin),
@@ -2021,15 +1942,16 @@ def _view_angle_offsets(count: int, spread_rad: float) -> tuple[float, ...]:
     return tuple(offsets)
 
 
-def _row_observations_from_capture(
+def _rough_observations_from_capture(
     *,
-    planned: RowPlannedView,
+    planned: RoughPlannedView,
     view_result: dict[str, Any],
     survey_observations: list[SurveyObservation],
-    config: RowConfig,
+    config: RoughConfig,
     workspace: SurveyWorkspace,
     observation_offset: int,
-) -> list[RowObservation]:
+    depth_array: Any | None = None,
+) -> list[RoughObservation]:
     if view_result.get("status") != "success":
         return []
     depth_path = view_result.get("depth_path")
@@ -2037,8 +1959,8 @@ def _row_observations_from_capture(
     image_path = view_result.get("rgb_image_path")
     camera_transform = _transform_or_none(view_result.get("actual_T_world_camera")) or planned.view.T_world_camera
     fovy_rad = float(view_result.get("camera_fovy_rad") or _default_fovy_rad())
-    depth = _load_depth(Path(str(depth_path))) if depth_path else None
-    observations: list[RowObservation] = []
+    depth = depth_array if depth_array is not None else (_load_depth(Path(str(depth_path))) if depth_path else None)
+    observations: list[RoughObservation] = []
     for local_index, survey_observation in enumerate(survey_observations):
         if survey_observation.rough_position_world is None:
             continue
@@ -2070,10 +1992,10 @@ def _row_observations_from_capture(
         )
         yaw_for_transform = yaw_rad if yaw_rad is not None else 0.0
         observations.append(
-            RowObservation(
-                observation_id=f"row_obs_{observation_offset + local_index + 1:04d}",
+            RoughObservation(
+                observation_id=f"rough_obs_{observation_offset + local_index + 1:04d}",
                 candidate_id=planned.candidate_id,
-                row_view_id=planned.view.view_id,
+                rough_view_id=planned.view.view_id,
                 image_path=str(image_path) if image_path else survey_observation.image_path,
                 depth_path=str(depth_path) if depth_path else None,
                 yolo_raw_path=str(yolo_raw_path) if yolo_raw_path else None,
@@ -2177,55 +2099,336 @@ def _project_pixels_to_world(
     camera_y = (image_height / 2.0 - pixel_y.astype(float)) / fy * depth_values
     camera_z = -depth_values
     points_camera = np.stack((camera_x, camera_y, camera_z), axis=1)
-    rotation = np.asarray([row[:3] for row in T_world_camera[:3]], dtype=float)
+    rotation = np.asarray([rough[:3] for rough in T_world_camera[:3]], dtype=float)
     position = np.asarray((T_world_camera[0][3], T_world_camera[1][3], T_world_camera[2][3]), dtype=float)
     return points_camera @ rotation.T + position
 
 
-def _row_hypothesis_payload(index: int, cluster: list[RowObservation]) -> dict[str, Any]:
-    center = _row_cluster_center(cluster)
-    class_votes = _row_class_votes(cluster)
+def _rough_hypothesis_payload(index: int, cluster: list[RoughObservation]) -> dict[str, Any]:
+    center = _rough_cluster_center(cluster)
+    class_votes = _rough_class_votes(cluster)
     class_name = max(class_votes, key=class_votes.get) if class_votes else None
     yaw_rad, yaw_confidence = _average_yaw(cluster)
     yaw_for_transform = yaw_rad if yaw_rad is not None else 0.0
     best = max(cluster, key=lambda observation: (_bbox_area(observation.bbox_xyxy) * observation.confidence, observation.confidence))
-    supporting_views = sorted({observation.row_view_id for observation in cluster})
+    supporting_views = sorted({observation.rough_view_id for observation in cluster})
     source_candidates = sorted({observation.candidate_id for observation in cluster})
     average_confidence = sum(observation.confidence for observation in cluster) / len(cluster)
     fused_confidence = min(1.0, average_confidence + 0.10 * max(0, len(supporting_views) - 1))
     return {
         "hypothesis_id": f"object_hypothesis_{index + 1:03d}",
         "source_candidate_ids": source_candidates,
-        "supporting_row_views": supporting_views,
+        "source_observation_ids": sorted(observation.observation_id for observation in cluster),
+        "supporting_rough_views": supporting_views,
         "support_count": len(cluster),
         "class_name": class_name,
         "class_votes": {key: _round(value) for key, value in sorted(class_votes.items())},
         "confidence": _round(fused_confidence),
         "position_world": [_round(value) for value in center],
         "yaw_rad": _round(yaw_rad) if yaw_rad is not None else None,
-        "T_world_object": [list(row) for row in _make_yaw_transform(center, yaw_for_transform)],
+        "T_world_object": [list(rough) for rough in _make_yaw_transform(center, yaw_for_transform)],
         "best_image_path": best.image_path,
         "best_bbox_xyxy": [_round(value) for value in best.bbox_xyxy],
         "pose_quality": {
-            "position_source": _row_position_source(cluster),
+            "position_source": _rough_position_source(cluster),
             "yaw_source": "depth_pca" if yaw_rad is not None else "unresolved_fallback_zero_in_T_world_object",
             "yaw_confidence": _round(yaw_confidence),
             "multi_candidate_merge": len(source_candidates) > 1,
         },
         "notes": [
-            "Row hypothesis re-estimated from close RGB-D views; survey class votes are not inherited as final labels.",
+            "Rough hypothesis re-estimated from close RGB-D views; survey class votes are not inherited as final labels.",
             "Yaw is estimated from depth PCA when the local point cloud is elongated; otherwise T_world_object uses zero yaw as a placeholder.",
         ],
     }
 
 
-def _row_position_source(cluster: list[RowObservation]) -> str:
+def _rough_position_source(cluster: list[RoughObservation]) -> str:
     sources = sorted({observation.position_source for observation in cluster if observation.position_source})
     if not sources:
         return "unknown"
     if len(sources) == 1:
         return sources[0]
     return "mixed: " + ", ".join(sources)
+
+
+def _rough_filtered_annotation_detections_by_view(
+    *,
+    object_hypotheses: list[dict[str, Any]],
+    rough_observations: list[dict[str, Any]],
+    stable_objects: list[dict[str, Any]],
+    tentative_objects: list[dict[str, Any]],
+    ambiguous_objects: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    observations_by_id = {
+        str(observation["observation_id"]): observation
+        for observation in rough_observations
+        if isinstance(observation, dict) and observation.get("observation_id") is not None
+    }
+    hypotheses_by_id = {
+        str(hypothesis["hypothesis_id"]): hypothesis
+        for hypothesis in object_hypotheses
+        if isinstance(hypothesis, dict) and hypothesis.get("hypothesis_id") is not None
+    }
+    selected: dict[tuple[int, str], tuple[tuple[float, float], dict[str, Any], dict[str, Any]]] = {}
+    for target in _rough_annotation_targets(
+        stable_objects=stable_objects,
+        tentative_objects=tentative_objects,
+        ambiguous_objects=ambiguous_objects,
+    ):
+        for hypothesis_id in target["hypothesis_ids"]:
+            hypothesis = hypotheses_by_id.get(hypothesis_id)
+            if hypothesis is None:
+                continue
+            for observation_id in _string_list(hypothesis.get("source_observation_ids", [])):
+                observation = observations_by_id.get(observation_id)
+                if observation is None:
+                    continue
+                view_id = str(observation.get("rough_view_id") or "")
+                if not view_id or _rough_observation_bbox(observation) is None:
+                    continue
+                score = _rough_observation_annotation_score(observation)
+                key = (int(target["order"]), view_id)
+                previous = selected.get(key)
+                if previous is None or score > previous[0]:
+                    selected[key] = (score, observation, target)
+
+    by_view: dict[str, list[dict[str, Any]]] = {}
+    for (order, view_id), (_, observation, target) in sorted(selected.items()):
+        detection = _rough_annotation_detection(target, observation)
+        detection["_rough_annotation_order"] = order
+        by_view.setdefault(view_id, []).append(detection)
+    for detections in by_view.values():
+        detections.sort(key=lambda item: int(item.get("_rough_annotation_order", 0)))
+        for detection in detections:
+            detection.pop("_rough_annotation_order", None)
+    return by_view
+
+
+def _rough_annotation_targets(
+    *,
+    stable_objects: list[dict[str, Any]],
+    tentative_objects: list[dict[str, Any]],
+    ambiguous_objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for stable in stable_objects:
+        _append_rough_annotation_target(targets, stable, status="stable")
+    for tentative in tentative_objects:
+        _append_rough_annotation_target(targets, tentative, status="tentative")
+    for ambiguous in ambiguous_objects:
+        hypothesis_ids = _ambiguous_annotation_hypothesis_ids(ambiguous)
+        if not hypothesis_ids:
+            continue
+        class_names = _ambiguous_annotation_class_names(ambiguous)
+        targets.append(
+            {
+                "order": len(targets),
+                "object_id": str(ambiguous.get("object_id") or f"rough_ambiguous_{len(targets) + 1:03d}"),
+                "status": "ambiguous",
+                "class_name": "/".join(class_names) if class_names else "ambiguous",
+                "confidence": max(
+                    (
+                        float(candidate.get("confidence", 0.0))
+                        for candidate in ambiguous.get("class_candidates", [])
+                        if isinstance(candidate, dict)
+                    ),
+                    default=0.0,
+                ),
+                "hypothesis_ids": hypothesis_ids,
+            }
+        )
+    return targets
+
+
+def _append_rough_annotation_target(
+    targets: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    status: str,
+) -> None:
+    hypothesis_id = payload.get("source_hypothesis_id")
+    if hypothesis_id is None:
+        return
+    targets.append(
+        {
+            "order": len(targets),
+            "object_id": str(payload.get("object_id") or f"rough_{status}_{len(targets) + 1:03d}"),
+            "status": status,
+            "class_name": str(payload.get("class_name") or ""),
+            "confidence": float(payload.get("confidence", 0.0)),
+            "hypothesis_ids": [str(hypothesis_id)],
+        }
+    )
+
+
+def _ambiguous_annotation_hypothesis_ids(ambiguous: dict[str, Any]) -> list[str]:
+    hypothesis_ids: list[str] = []
+    for candidate in ambiguous.get("class_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        hypothesis_id = candidate.get("source_hypothesis_id")
+        if hypothesis_id is None:
+            continue
+        hypothesis_id_string = str(hypothesis_id)
+        if hypothesis_id_string not in hypothesis_ids:
+            hypothesis_ids.append(hypothesis_id_string)
+    return hypothesis_ids
+
+
+def _ambiguous_annotation_class_names(ambiguous: dict[str, Any]) -> list[str]:
+    class_names: list[str] = []
+    for candidate in ambiguous.get("class_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        class_name = str(candidate.get("class_name") or "").strip()
+        if class_name and class_name not in class_names:
+            class_names.append(class_name)
+    return class_names
+
+
+def _rough_annotation_detection(target: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
+    bbox = _rough_observation_bbox(observation)
+    if bbox is None:
+        raise ValueError("rough annotation observation must include bbox_xyxy")
+    confidence = float(observation.get("confidence", target.get("confidence", 0.0)))
+    class_name = str(target.get("class_name") or observation.get("class_name") or "object")
+    status = str(target.get("status") or "")
+    object_id = str(target.get("object_id") or "rough_object")
+    if status == "stable":
+        label = f"{object_id} {class_name} {confidence:.2f}"
+    else:
+        label = f"{object_id} {status} {class_name} {confidence:.2f}"
+    return {
+        "bbox_xyxy": list(bbox),
+        "confidence": confidence,
+        "class_id": observation.get("class_id"),
+        "class_name": class_name,
+        "annotation_label": label,
+        "source_object_id": object_id,
+        "source_status": status,
+        "source_observation_id": observation.get("observation_id"),
+    }
+
+
+def _rough_observation_annotation_score(observation: dict[str, Any]) -> tuple[float, float]:
+    bbox = _rough_observation_bbox(observation)
+    if bbox is None:
+        return (0.0, 0.0)
+    confidence = max(float(observation.get("confidence", 0.0)), 0.0)
+    return (_bbox_area(bbox) * confidence, confidence)
+
+
+def _rough_observation_bbox(observation: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    bbox = observation.get("bbox_xyxy")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    return (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+
+
+def _write_rough_filtered_annotated_images(
+    *,
+    view_results: list[dict[str, Any]],
+    annotated_dir: Path,
+    detections_by_view: dict[str, list[dict[str, Any]]],
+    image_width: int,
+    image_height: int,
+) -> None:
+    for view_result in view_results:
+        view_id = str(view_result.get("view_id", ""))
+        rgb_image_path = view_result.get("rgb_image_path")
+        if not view_id or not rgb_image_path:
+            continue
+        detections = detections_by_view.get(view_id, [])
+        annotated_path, annotation_error = _write_rough_annotated_image(
+            rgb_path=Path(str(rgb_image_path)),
+            output_path=annotated_dir / f"{view_id}_yolo.png",
+            detections=detections,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        view_result["annotated_image_path"] = str(annotated_path) if annotated_path is not None else None
+        view_result["annotation"] = {
+            "source": "rough_object_selection_outputs",
+            "included_statuses": ["stable", "tentative", "ambiguous"],
+            "detections": len(detections),
+            "status": "written" if annotated_path is not None else "unavailable",
+            "error": annotation_error,
+        }
+
+
+def _write_rough_annotated_image(
+    *,
+    rgb_path: Path,
+    output_path: Path,
+    detections: list[dict[str, Any]],
+    image_width: int,
+    image_height: int,
+) -> tuple[Path | None, str | None]:
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return (None, "pillow_not_available")
+
+    try:
+        image = Image.open(rgb_path).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        font = _rough_annotation_font(ImageFont)
+        for index, detection in enumerate(detections):
+            bbox = _rough_observation_bbox(detection)
+            if bbox is None:
+                continue
+            left, top, right, bottom = _bbox_pixel_bounds(
+                bbox,
+                image_width=image_width,
+                image_height=image_height,
+            )
+            color = _rough_annotation_box_color(index)
+            draw.rectangle((left, top, right, bottom), outline=color, width=4)
+            label = str(detection.get("annotation_label") or "").strip()
+            if not label:
+                continue
+            text_bbox = draw.textbbox((left, top), label, font=font)
+            text_height = text_bbox[3] - text_bbox[1]
+            label_top = max(0.0, float(top) - text_height - 6.0)
+            label_bbox = (
+                float(left),
+                label_top,
+                float(left) + text_bbox[2] - text_bbox[0] + 8.0,
+                label_top + text_height + 6.0,
+            )
+            draw.rectangle(label_bbox, fill=color)
+            draw.text((float(left) + 4.0, label_top + 3.0), label, fill=(0, 0, 0), font=font)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path)
+        return (output_path, None)
+    except Exception as exc:
+        return (None, f"{type(exc).__name__}: {exc}")
+
+
+def _rough_annotation_font(image_font_module: Any) -> Any:
+    for font_path in (
+        Path("/home/yoda/.local/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+    ):
+        if font_path.exists():
+            return image_font_module.truetype(str(font_path), size=24)
+    return image_font_module.load_default()
+
+
+def _rough_annotation_box_color(index: int) -> tuple[int, int, int]:
+    colors = (
+        (52, 199, 89),
+        (0, 122, 255),
+        (255, 204, 0),
+        (175, 82, 222),
+        (255, 149, 0),
+        (90, 200, 250),
+        (255, 45, 85),
+    )
+    return colors[index % len(colors)]
 
 
 def _stable_object_payload(
@@ -2248,24 +2451,24 @@ def _stable_object_payload(
         for candidate_id in hypothesis.get("source_candidate_ids", [])
         if candidate_id is not None
     ]
-    supporting_row_views = [
+    supporting_rough_views = [
         str(view_id)
-        for view_id in hypothesis.get("supporting_row_views", [])
+        for view_id in hypothesis.get("supporting_rough_views", [])
         if view_id is not None
     ]
     within_nominal_workspace = _position_inside_workspace(position, workspace_bounds, margin_m=0.0)
     pose_quality = dict(hypothesis.get("pose_quality", {}))
     notes = [
-        "Stable object selected from close RGB-D row hypotheses after evidence filtering, same-class merging, and cross-class ambiguity checks.",
+        "Stable object selected from close RGB-D rough hypotheses after evidence filtering, same-class merging, and cross-class ambiguity checks.",
     ]
     if not within_nominal_workspace:
         pose_quality["workspace_bounds_status"] = "within_configured_selection_margin"
         pose_quality["workspace_margin_m"] = _round(workspace_margin_m)
         notes.append(
-            "Position is outside nominal tank XY bounds but within the configured row selection margin; raw RGB-D estimate is retained."
+            "Position is outside nominal tank XY bounds but within the configured rough selection margin; raw RGB-D estimate is retained."
         )
     return {
-        "object_id": f"row_object_{index + 1:03d}",
+        "object_id": f"rough_object_{index + 1:03d}",
         "source_hypothesis_id": hypothesis.get("hypothesis_id"),
         "suppressed_duplicate_hypothesis_ids": duplicate_hypothesis_ids,
         "class_name": class_name,
@@ -2273,14 +2476,14 @@ def _stable_object_payload(
         "evidence_score": _round(evidence_score),
         "support_count": support_count,
         "source_candidate_ids": source_candidate_ids,
-        "supporting_row_views": supporting_row_views,
+        "supporting_rough_views": supporting_rough_views,
         "position_world": [_round(value) for value in position],
         "yaw_rad": hypothesis.get("yaw_rad"),
         "T_world_object": hypothesis.get("T_world_object"),
         "best_image_path": hypothesis.get("best_image_path"),
         "best_bbox_xyxy": hypothesis.get("best_bbox_xyxy"),
         "selection": {
-            "source": "row_object_selection_policy_v2",
+            "source": "rough_object_selection_policy_v2",
             "quality": "stable",
             "from_close_rgbd": True,
             "same_class_duplicates_suppressed": len(duplicate_hypothesis_ids),
@@ -2298,10 +2501,10 @@ def _stable_evidence_score(hypothesis: dict[str, Any]) -> float:
     confidence = float(hypothesis.get("confidence", 0.0))
     support_count = max(0, int(hypothesis.get("support_count", 0)))
     source_candidate_count = len(hypothesis.get("source_candidate_ids", []) or [])
-    row_view_count = len(hypothesis.get("supporting_row_views", []) or [])
+    rough_view_count = len(hypothesis.get("supporting_rough_views", []) or [])
     yaw_bonus = 1.05 if hypothesis.get("yaw_rad") is not None else 1.0
     candidate_bonus = 1.0 + 0.04 * max(0, source_candidate_count - 1)
-    view_bonus = 1.0 + 0.02 * max(0, row_view_count - 1)
+    view_bonus = 1.0 + 0.02 * max(0, rough_view_count - 1)
     return confidence * math.log1p(support_count) * candidate_bonus * view_bonus * yaw_bonus
 
 
@@ -2351,10 +2554,10 @@ def _position_inside_workspace(
     )
 
 
-def _stable_selection_empty_metadata(config: RowConfig) -> dict[str, Any]:
+def _stable_selection_empty_metadata(config: RoughConfig) -> dict[str, Any]:
     return {
         "status": "not_run",
-        "policy_version": "row_object_selection_policy_v2",
+        "policy_version": "rough_object_selection_policy_v2",
         "input_hypothesis_count": 0,
         "candidate_after_filter_count": 0,
         "same_class_representative_count": 0,
@@ -2384,7 +2587,7 @@ def _stable_selection_empty_metadata(config: RowConfig) -> dict[str, Any]:
     }
 
 
-def _row_cluster_center(cluster: list[RowObservation]) -> tuple[float, float, float]:
+def _rough_cluster_center(cluster: list[RoughObservation]) -> tuple[float, float, float]:
     total_weight = sum(max(observation.confidence, 0.05) for observation in cluster)
     if total_weight <= 0.0:
         total_weight = float(len(cluster))
@@ -2395,7 +2598,7 @@ def _row_cluster_center(cluster: list[RowObservation]) -> tuple[float, float, fl
     )
 
 
-def _average_yaw(cluster: list[RowObservation]) -> tuple[float | None, float]:
+def _average_yaw(cluster: list[RoughObservation]) -> tuple[float | None, float]:
     weighted_sin = 0.0
     weighted_cos = 0.0
     total_weight = 0.0
@@ -2411,7 +2614,7 @@ def _average_yaw(cluster: list[RowObservation]) -> tuple[float | None, float]:
     return (_round(math.atan2(weighted_sin, weighted_cos)), _round(min(1.0, total_weight / len(cluster))))
 
 
-def _row_class_votes(cluster: list[RowObservation]) -> dict[str, float]:
+def _rough_class_votes(cluster: list[RoughObservation]) -> dict[str, float]:
     votes: dict[str, float] = {}
     for observation in cluster:
         if not observation.class_name:
@@ -2425,20 +2628,20 @@ def _plan_payload(
     created_utc: str,
     survey_report: Task1SurveyReport,
     scene: SurveySceneInput,
-    config: RowConfig,
-    row_dir: Path,
+    config: RoughConfig,
+    rough_dir: Path,
     plan_path: Path,
     report_path: Path,
-    planned_views: tuple[RowPlannedView, ...],
+    planned_views: tuple[RoughPlannedView, ...],
 ) -> dict[str, Any]:
     return {
-        "schema_version": "task1_row_plan_v1",
-        "stage": "row",
+        "schema_version": "task1_rough_plan_v1",
+        "stage": "rough",
         "created_utc": created_utc,
         "source_survey_report_path": str(survey_report.path),
         "layout_snapshot_path": str(survey_report.layout_snapshot_path),
         "task1_run_dir": str(survey_report.task1_run_dir),
-        "row_dir": str(row_dir),
+        "rough_dir": str(rough_dir),
         "plan_path": str(plan_path),
         "report_path": str(report_path),
         "scene_model_path": str(config.scene_model_path),
@@ -2453,7 +2656,7 @@ def _plan_payload(
             "camera_must_be_inside_tank": True,
             "camera_z_must_be_below_tank_opening": True,
             "arm_entry": "from top square opening",
-            "pose_validation": "MuJoCo IK plus robot collision check before rendering each row view.",
+            "pose_validation": "MuJoCo IK plus robot collision check before rendering each rough view.",
             "survey_candidates_are_recall_first": True,
         },
         "workspace": scene.workspace.to_dict(),
@@ -2469,25 +2672,25 @@ def _report_payload(
     message: str,
     survey_report: Task1SurveyReport,
     scene: SurveySceneInput,
-    config: RowConfig,
+    config: RoughConfig,
     workspace: SurveyWorkspace,
-    row_dir: Path,
+    rough_dir: Path,
     plan_path: Path,
     report_path: Path,
-    planned_views: tuple[RowPlannedView, ...],
+    planned_views: tuple[RoughPlannedView, ...],
     view_results: list[dict[str, Any]],
-    row_observations: list[dict[str, Any]],
+    rough_observations: list[dict[str, Any]],
     object_hypotheses: list[dict[str, Any]],
     stable_objects: list[dict[str, Any]],
     tentative_objects: list[dict[str, Any]],
     ambiguous_objects: list[dict[str, Any]],
     rejected_hypotheses: list[dict[str, Any]],
     object_selection_summary: dict[str, Any],
-    row_reachable_planning_summary: dict[str, Any] | None = None,
+    rough_reachable_planning_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
-        "schema_version": "task1_row_report_v1",
-        "stage": "row",
+        "schema_version": "task1_rough_report_v1",
+        "stage": "rough",
         "status": status,
         "created_utc": created_utc,
         "message": message,
@@ -2495,7 +2698,7 @@ def _report_payload(
         "source_survey_status": survey_report.status,
         "layout_snapshot_path": str(survey_report.layout_snapshot_path),
         "task1_run_dir": str(survey_report.task1_run_dir),
-        "row_dir": str(row_dir),
+        "rough_dir": str(rough_dir),
         "plan_path": str(plan_path),
         "report_path": str(report_path),
         "scene_model_path": str(config.scene_model_path),
@@ -2504,14 +2707,23 @@ def _report_payload(
         "image_size": [config.image_width, config.image_height],
         "run_yolo": config.run_yolo,
         "yolo_profile_path": str(config.yolo_profile_path),
-        "row_config": _row_config_payload(config),
+        "rough_config": _rough_config_payload(config),
+        "annotation_policy": {
+            "save_filtered_annotations": config.save_filtered_annotations,
+            "filtered_annotation_dir": str(rough_dir / "annotated"),
+            "filtered_annotation_source": "rough_object_selection_outputs",
+            "filtered_annotation_included_statuses": ["stable", "tentative", "ambiguous"],
+            "save_raw_yolo_annotations": config.save_raw_yolo_annotations,
+            "raw_yolo_annotation_dir": str(rough_dir / "raw_annotated"),
+        },
+        "depth_retention": _rough_depth_retention_payload(config),
         "selected_objects": [obj.to_dict() for obj in scene.objects],
         "survey_candidates": [candidate.to_dict() for candidate in survey_report.candidates],
         "planned_views": [planned.to_dict() for planned in planned_views],
         "views": view_results,
-        "row_reachable_planning_summary": row_reachable_planning_summary,
-        "row_view_selection_summary": _row_view_selection_summary(view_results),
-        "row_observations": row_observations,
+        "rough_reachable_planning_summary": rough_reachable_planning_summary,
+        "rough_view_selection_summary": _rough_view_selection_summary(view_results),
+        "rough_observations": rough_observations,
         "object_hypotheses": object_hypotheses,
         "stable_objects": stable_objects,
         "tentative_objects": tentative_objects,
@@ -2520,7 +2732,7 @@ def _report_payload(
         "object_selection_summary": object_selection_summary,
         "stable_object_selection": object_selection_summary,
         "notes": [
-            "Row consumes survey candidates as proposal points; candidate count is intentionally not assumed to be five.",
+            "Rough consumes survey candidates as proposal points; candidate count is intentionally not assumed to be five.",
             "Close views are planned inside the tank, below the tank opening, then accepted only after IK and collision checks.",
             "Stable objects are the recommended input for later final-photo targeting.",
             "Tentative and ambiguous objects are retained for explicit follow-up instead of being silently filtered.",
@@ -2530,16 +2742,15 @@ def _report_payload(
     return payload
 
 
-def _row_view_selection_summary(view_results: list[dict[str, Any]]) -> dict[str, Any]:
+def _rough_view_selection_summary(view_results: list[dict[str, Any]]) -> dict[str, Any]:
     selected_count = 0
     selected_alternative_count = 0
     failed_no_safe_candidate_count = 0
     total_attempt_count = 0
     collision_rejection_count = 0
     ik_rejection_count = 0
-    candidate_limit_reached_count = 0
     for view_result in view_results:
-        selection = view_result.get("row_view_selection")
+        selection = view_result.get("rough_view_selection")
         if not isinstance(selection, dict):
             continue
         total_attempt_count += int(selection.get("attempt_count", 0))
@@ -2547,8 +2758,6 @@ def _row_view_selection_summary(view_results: list[dict[str, Any]]) -> dict[str,
         if isinstance(rejected, dict):
             collision_rejection_count += int(rejected.get("collision", 0))
             ik_rejection_count += int(rejected.get("ik_failed", 0))
-        if selection.get("candidate_limit_reached"):
-            candidate_limit_reached_count += 1
         if selection.get("status") == "selected":
             selected_count += 1
             if int(selection.get("selected_candidate_index") or 0) > 0:
@@ -2556,10 +2765,10 @@ def _row_view_selection_summary(view_results: list[dict[str, Any]]) -> dict[str,
         elif selection.get("status") == "failed_no_collision_free_candidate":
             failed_no_safe_candidate_count += 1
     return {
-        "strategy": "ik_collision_checked_row_view_candidates_v1",
+        "strategy": "ik_collision_checked_rough_view_candidates_v1",
         "enabled": any(
-            isinstance(view.get("row_view_selection"), dict)
-            and view["row_view_selection"].get("status") != "disabled"
+            isinstance(view.get("rough_view_selection"), dict)
+            and view["rough_view_selection"].get("status") != "disabled"
             for view in view_results
         ),
         "selected_count": selected_count,
@@ -2568,11 +2777,10 @@ def _row_view_selection_summary(view_results: list[dict[str, Any]]) -> dict[str,
         "total_attempt_count": total_attempt_count,
         "collision_rejection_count": collision_rejection_count,
         "ik_rejection_count": ik_rejection_count,
-        "candidate_limit_reached_count": candidate_limit_reached_count,
     }
 
 
-def _row_config_payload(config: RowConfig) -> dict[str, Any]:
+def _rough_config_payload(config: RoughConfig) -> dict[str, Any]:
     payload = asdict(config)
     for key, value in list(payload.items()):
         if isinstance(value, Path):
@@ -2580,7 +2788,19 @@ def _row_config_payload(config: RowConfig) -> dict[str, Any]:
     return payload
 
 
-def _planned_row_view_result(planned: RowPlannedView) -> dict[str, Any]:
+def _rough_depth_retention_payload(config: RoughConfig) -> dict[str, Any]:
+    return {
+        "saved": bool(config.save_depth_arrays),
+        "format": "npy_float32" if config.save_depth_arrays else None,
+        "reason": (
+            "retained_for_downstream_pose_debug"
+            if config.save_depth_arrays
+            else "used_in_memory_for_rough_pose_estimation"
+        ),
+    }
+
+
+def _planned_rough_view_result(planned: RoughPlannedView) -> dict[str, Any]:
     payload = planned.to_dict()
     payload["status"] = "planned"
     return payload
@@ -2667,12 +2887,12 @@ def _float_tuple_from_value(value: Any, length: int) -> tuple[float, ...]:
 def _transform_or_none(value: Any) -> tuple[tuple[float, float, float, float], ...] | None:
     if not isinstance(value, list) or len(value) != 4:
         return None
-    rows = []
-    for row in value:
-        if not isinstance(row, list) or len(row) != 4:
+    roughs = []
+    for rough in value:
+        if not isinstance(rough, list) or len(rough) != 4:
             return None
-        rows.append(tuple(float(item) for item in row))
-    return tuple(rows)
+        roughs.append(tuple(float(item) for item in rough))
+    return tuple(roughs)
 
 
 def _load_depth(path: Path) -> Any | None:
@@ -2680,6 +2900,14 @@ def _load_depth(path: Path) -> Any | None:
         return None
     np = _import_numpy()
     return np.load(path)
+
+
+def _clear_depth_arrays(depth_dir: Path) -> None:
+    if not depth_dir.exists():
+        return
+    for path in depth_dir.glob("*.npy"):
+        if path.is_file():
+            path.unlink()
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -2831,5 +3059,5 @@ def _import_numpy() -> Any:
     try:
         import numpy as np  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:
-        raise RuntimeError("numpy is required for task1 row RGB-D pose estimation.") from exc
+        raise RuntimeError("numpy is required for task1 rough RGB-D pose estimation.") from exc
     return np

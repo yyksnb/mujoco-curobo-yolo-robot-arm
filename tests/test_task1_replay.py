@@ -28,16 +28,16 @@ def test_task1_replay_manifest_collects_recorded_robot_poses(tmp_path: Path) -> 
     assert manifest["schema_version"] == TASK1_REPLAY_SCHEMA_VERSION
     assert manifest["status"] == "success"
     assert manifest["frame_count"] == 3
-    assert [frame["phase"] for frame in manifest["frames"]] == ["survey", "row", "final"]
+    assert [frame["phase"] for frame in manifest["frames"]] == ["survey", "rough", "final"]
     assert [frame["view_role"] for frame in manifest["frames"]] == [
         "survey_capture",
-        "row_capture",
+        "rough_capture",
         "final_photo",
     ]
     assert manifest["frames"][0]["qpos_source"] == "actual_qpos"
     assert manifest["frames"][1]["qpos_source"] == "fixed_qpos"
-    assert manifest["frames"][-1]["target_id"] == "row_object_001"
-    assert manifest["frames"][-1]["rgb_image_path"].endswith("final_row_object_001_rgb.png")
+    assert manifest["frames"][-1]["target_id"] == "rough_object_001"
+    assert manifest["frames"][-1]["rgb_image_path"].endswith("final_rough_object_001_rgb.png")
 
 
 def test_task1_replay_manifest_writer_and_latest_run(tmp_path: Path) -> None:
@@ -123,15 +123,15 @@ def test_replay_global_camera_uses_survey_external_overview_for_survey_frames() 
     }
 
     survey_params = module._global_camera_params_for_frame(model, manifest, {"phase": "survey"})
-    row_params = module._global_camera_params_for_frame(model, manifest, {"phase": "row"})
+    rough_params = module._global_camera_params_for_frame(model, manifest, {"phase": "rough"})
 
     assert survey_params["lookat"] == pytest.approx((0.5, 0.5, 0.4))
     assert survey_params["distance"] == pytest.approx(1.0)
     assert survey_params["azimuth"] == pytest.approx(135.0)
     assert survey_params["elevation"] == pytest.approx(-30.0)
-    assert row_params["lookat"] == pytest.approx((0.5, 0.5, 0.15))
-    assert row_params["distance"] == pytest.approx(0.75)
-    assert row_params["elevation"] == pytest.approx(-20.0)
+    assert rough_params["lookat"] == pytest.approx((0.5, 0.5, 0.15))
+    assert rough_params["distance"] == pytest.approx(0.75)
+    assert rough_params["elevation"] == pytest.approx(-20.0)
 
 
 def test_replay_survey_global_camera_pose_can_be_overridden() -> None:
@@ -261,7 +261,7 @@ def test_replay_global_fovy_uses_survey_override_only_for_survey_frames() -> Non
         survey_global_fovy_deg=92.0,
     ) == pytest.approx(92.0)
     assert module._global_fovy_for_frame(
-        {"phase": "row"},
+        {"phase": "rough"},
         global_fovy_deg=75.0,
         survey_global_fovy_deg=92.0,
     ) == pytest.approx(75.0)
@@ -326,14 +326,14 @@ def test_replay_motion_interpolates_display_frames_without_changing_manifest_fra
     assert display_frames[-1]["frame_id"] == "b"
 
 
-def test_replay_motion_plans_between_row_target_groups() -> None:
+def test_replay_motion_plans_between_rough_target_groups() -> None:
     module = _load_replay_script_module()
     mujoco = _FakeMujoco()
     model = _FakeMotionModel(nq=1)
     data = _FakeMotionData(nq=1)
     frames = [
-        {"frame_id": "row/a", "phase": "row", "target_id": "candidate_a", "qpos": [0.0]},
-        {"frame_id": "row/b", "phase": "row", "target_id": "candidate_b", "qpos": [0.24]},
+        {"frame_id": "rough/a", "phase": "rough", "target_id": "candidate_a", "qpos": [0.0]},
+        {"frame_id": "rough/b", "phase": "rough", "target_id": "candidate_b", "qpos": [0.24]},
     ]
 
     display_frames, summary = module._build_collision_checked_replay_motion(
@@ -353,22 +353,22 @@ def test_replay_motion_plans_between_row_target_groups() -> None:
     assert "replay_cut_after" not in display_frames[0]
 
 
-def test_replay_motion_plans_row_to_final_photo_boundary() -> None:
+def test_replay_motion_plans_rough_to_final_photo_boundary() -> None:
     module = _load_replay_script_module()
     mujoco = _FakeMujoco()
     model = _FakeMotionModel(nq=1)
     data = _FakeMotionData(nq=1)
     frames = [
         {
-            "frame_id": "row/row_candidate_005_02",
-            "phase": "row",
-            "target_id": "row_candidate_005",
+            "frame_id": "rough/rough_candidate_005_02",
+            "phase": "rough",
+            "target_id": "rough_candidate_005",
             "qpos": [0.0],
         },
         {
-            "frame_id": "final/row_object_001/photo",
+            "frame_id": "final/rough_object_001/photo",
             "phase": "final",
-            "target_id": "row_object_001",
+            "target_id": "rough_object_001",
             "qpos": [0.24],
         },
     ]
@@ -386,11 +386,11 @@ def test_replay_motion_plans_row_to_final_photo_boundary() -> None:
     assert summary.planned_boundary_connector_count == 1
     assert summary.interpolated_frame_count == 2
     assert len(display_frames) == 4
-    assert display_frames[0]["replay_planned_boundary"] == "row_to_final_boundary"
+    assert display_frames[0]["replay_planned_boundary"] == "rough_to_final_boundary"
     assert "replay_cut_after" not in display_frames[0]
 
 
-def test_replay_motion_keeps_survey_to_row_phase_boundary_cut() -> None:
+def test_replay_motion_keeps_survey_to_rough_phase_boundary_cut() -> None:
     module = _load_replay_script_module()
     mujoco = _FakeMujoco()
     model = _FakeMotionModel(nq=1)
@@ -398,9 +398,9 @@ def test_replay_motion_keeps_survey_to_row_phase_boundary_cut() -> None:
     frames = [
         {"frame_id": "survey/survey_04", "phase": "survey", "qpos": [0.0]},
         {
-            "frame_id": "row/row_candidate_001_00",
-            "phase": "row",
-            "target_id": "row_candidate_001",
+            "frame_id": "rough/rough_candidate_001_00",
+            "phase": "rough",
+            "target_id": "rough_candidate_001",
             "qpos": [0.24],
         },
     ]
@@ -715,7 +715,7 @@ def test_replay_video_phase_labels_ignore_generated_motion_frames() -> None:
         {"frame_id": "survey_0000", "phase": "survey"},
         {"frame_id": "motion_0", "phase": "survey", "replay_generated": True},
         {"frame_id": "survey_0001", "phase": "survey"},
-        {"frame_id": "row_0000", "phase": "row"},
+        {"frame_id": "rough_0000", "phase": "rough"},
         {"frame_id": "final_0000", "phase": "final"},
         {"frame_id": "final_0001", "phase": "final"},
     ]
@@ -725,7 +725,7 @@ def test_replay_video_phase_labels_ignore_generated_motion_frames() -> None:
     assert labels == {
         0: "survey 1/2",
         2: "survey 2/2",
-        3: "row 1/1",
+        3: "rough 1/1",
         4: "final 1/2",
         5: "final 2/2",
     }
@@ -747,7 +747,7 @@ def test_replay_video_loads_final_zoom_photo_pairs(tmp_path: Path) -> None:
             "schema_version": "task1_final_report_v1",
             "stable_objects": [
                 {
-                    "object_id": "row_object_001",
+                    "object_id": "rough_object_001",
                     "final_image_path": str(final_image),
                 }
             ],
@@ -759,7 +759,7 @@ def test_replay_video_loads_final_zoom_photo_pairs(tmp_path: Path) -> None:
             "schema_version": "task1_zoom_report_v1",
             "zoomed_objects": [
                 {
-                    "object_id": "row_object_001",
+                    "object_id": "rough_object_001",
                     "source_final_image_path": str(final_image),
                     "selected_zoom": {"selected_image_path": str(zoom_image)},
                 }
@@ -775,7 +775,7 @@ def test_replay_video_loads_final_zoom_photo_pairs(tmp_path: Path) -> None:
     )
 
     assert len(specs) == 1
-    assert specs[0].object_id == "row_object_001"
+    assert specs[0].object_id == "rough_object_001"
     assert specs[0].final_image_path == final_image
     assert specs[0].zoom_image_path == zoom_image
     assert specs[0].ordinal == 1
@@ -792,7 +792,7 @@ def test_replay_video_composes_final_zoom_photo_frame(tmp_path: Path) -> None:
 
     frame = module._compose_final_zoom_photo_frame(
         module._FinalZoomPhotoSpec(
-            object_id="row_object_001",
+            object_id="rough_object_001",
             final_image_path=final_image,
             zoom_image_path=zoom_image,
             ordinal=1,
@@ -957,7 +957,7 @@ def test_replay_motion_fails_when_collision_check_finds_robot_contact() -> None:
     )
     frames = [
         {"frame_id": "a", "phase": "survey", "qpos": [0.0]},
-        {"frame_id": "b", "phase": "row", "qpos": [0.1]},
+        {"frame_id": "b", "phase": "rough", "qpos": [0.1]},
     ]
 
     with pytest.raises(SystemExit, match="collision check failed"):
@@ -1024,21 +1024,21 @@ def _write_task1_run(tmp_path: Path) -> Path:
         },
     )
     _write_report(
-        run_dir / "row" / "row_report.json",
+        run_dir / "rough" / "rough_report.json",
         {
             **common,
-            "schema_version": "task1_row_report_v1",
-            "stage": "row",
+            "schema_version": "task1_rough_report_v1",
+            "stage": "rough",
             "status": "success",
-            "report_path": str(run_dir / "row" / "row_report.json"),
+            "report_path": str(run_dir / "rough" / "rough_report.json"),
             "views": [
                 {
-                    "view_id": "row_candidate_001_00",
+                    "view_id": "rough_candidate_001_00",
                     "status": "success",
                     "fixed_qpos": [0.4, 0.5, 0.6],
                     "candidate_id": "candidate_001",
                     "candidate_rough_position_world": [0.31, 0.32, 0.03],
-                    "rgb_image_path": str(run_dir / "row" / "images" / "row_candidate_001_00_rgb.png"),
+                    "rgb_image_path": str(run_dir / "rough" / "images" / "rough_candidate_001_00_rgb.png"),
                 }
             ],
         },
@@ -1055,7 +1055,7 @@ def _write_task1_run(tmp_path: Path) -> Path:
                 {
                     "status": "confirmed",
                     "target": {
-                        "object_id": "row_object_001",
+                        "object_id": "rough_object_001",
                         "target_role": "primary",
                         "source_status": "stable",
                         "class_name": "notebook",
@@ -1063,18 +1063,18 @@ def _write_task1_run(tmp_path: Path) -> Path:
                     },
                     "entry_validation": [
                         {
-                            "view_id": "final_row_object_001_entry_00",
+                            "view_id": "final_rough_object_001_entry_00",
                             "status": "success",
                             "actual_qpos": [0.7, 0.8, 0.9],
                         }
                     ],
                     "view": {
-                        "view_id": "final_row_object_001",
+                        "view_id": "final_rough_object_001",
                         "status": "success",
                         "actual_qpos": [1.0, 1.1, 1.2],
-                        "rgb_image_path": str(run_dir / "final" / "images" / "final_row_object_001_rgb.png"),
+                        "rgb_image_path": str(run_dir / "final" / "images" / "final_rough_object_001_rgb.png"),
                     },
-                    "final_image_path": str(run_dir / "final" / "images" / "final_row_object_001_rgb.png"),
+                    "final_image_path": str(run_dir / "final" / "images" / "final_rough_object_001_rgb.png"),
                 }
             ],
         },

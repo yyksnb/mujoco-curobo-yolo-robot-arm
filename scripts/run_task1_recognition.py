@@ -28,36 +28,10 @@ from robot_arm_pipeline.scene.target_object_layout import (  # noqa: E402
     PlacementBounds,
     make_random_target_object_pose_payload,
 )
-from robot_arm_pipeline.task1.row import (  # noqa: E402
-    DEFAULT_ROW_CAMERA_Z_M,
-    DEFAULT_ROW_CLUSTER_RADIUS_M,
-    DEFAULT_ROW_ENTRY_SIDE,
-    DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M,
-    DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M,
-    DEFAULT_ROW_STANDOFF_M,
-    DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD,
-    DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD,
-    DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M,
-    DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS,
-    DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD,
-    DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS,
-    DEFAULT_ROW_VIEW_COLLISION_SEARCH,
-    DEFAULT_ROW_VIEWS_PER_CANDIDATE,
-    DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
-    DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
-    DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
-    DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
-    DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
-    DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
-    DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
-    DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
-    DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M,
-    DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO,
-    DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO,
-    DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE,
-    RowConfig,
+from robot_arm_pipeline.task1.rough import (  # noqa: E402
+    RoughConfig,
     find_latest_survey_report,
-    run_task1_row,
+    run_task1_rough,
 )
 from robot_arm_pipeline.task1.final import (  # noqa: E402
     DEFAULT_FINAL_CAMERA_Z_M,
@@ -79,7 +53,7 @@ from robot_arm_pipeline.task1.final import (  # noqa: E402
     DEFAULT_FINAL_STANDOFF_M,
     DEFAULT_FINAL_TARGET_MATCH_RADIUS_M,
     FinalConfig,
-    find_latest_row_report,
+    find_latest_rough_report,
     run_task1_final,
 )
 from robot_arm_pipeline.task1.zoom import (  # noqa: E402
@@ -164,7 +138,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
         "--stage",
-        choices=("survey", "row", "final", "zoom"),
+        choices=("survey", "rough", "final", "zoom"),
         default="survey",
         help="Recognition stage to run.",
     )
@@ -207,13 +181,13 @@ def main() -> None:
         "--survey-report",
         type=Path,
         default=None,
-        help="Survey report JSON for --stage row. Defaults to the latest outputs/task1/*/survey/survey_report.json.",
+        help="Survey report JSON for --stage rough. Defaults to the latest outputs/task1/*/survey/survey_report.json.",
     )
     parser.add_argument(
-        "--row-report",
+        "--rough-report",
         type=Path,
         default=None,
-        help="Row report JSON for --stage final. Defaults to the latest outputs/task1/*/row/row_report.json.",
+        help="Rough report JSON for --stage final. Defaults to the latest outputs/task1/*/rough/rough_report.json.",
     )
     parser.add_argument(
         "--final-report",
@@ -232,7 +206,7 @@ def main() -> None:
         "--save-raw-yolo-annotations",
         action="store_true",
         default=DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS,
-        help="Also save raw YOLO annotated survey images under survey/raw_annotated.",
+        help="Also save raw YOLO annotated survey/rough images under the stage's raw_annotated directory.",
     )
     parser.add_argument("--yolo-config", type=Path, default=DEFAULT_YOLO_PROFILE, help="YOLO Stage3 profile YAML/JSON.")
     parser.add_argument("--yolo-conf", type=float, default=0.15, help="YOLO confidence threshold for the active stage.")
@@ -279,152 +253,6 @@ def main() -> None:
         default=None,
         help="IK camera orientation tolerance in radians. Defaults are stage-specific.",
     )
-    parser.add_argument("--row-camera-z", type=float, default=DEFAULT_ROW_CAMERA_Z_M, help="Desired row-stage wrist camera world z inside the tank.")
-    parser.add_argument("--row-standoff", type=float, default=DEFAULT_ROW_STANDOFF_M, help="Row-stage lateral standoff from candidate rough position.")
-    parser.add_argument(
-        "--row-views-per-candidate",
-        type=int,
-        default=DEFAULT_ROW_VIEWS_PER_CANDIDATE,
-        help="Number of close-inspection views to plan for each survey candidate.",
-    )
-    parser.add_argument(
-        "--row-view-angle-spread-deg",
-        type=float,
-        default=DEFAULT_ROW_VIEW_ANGLE_SPREAD_RAD * 180.0 / 3.141592653589793,
-        help="Angular spread between row close-inspection views.",
-    )
-    parser.add_argument(
-        "--row-min-oblique-distance",
-        type=float,
-        default=DEFAULT_ROW_MIN_OBLIQUE_DISTANCE_M,
-        help="Minimum row-stage horizontal camera offset from the candidate, preventing pure top-down shots.",
-    )
-    parser.add_argument(
-        "--row-look-at-height-offset",
-        type=float,
-        default=DEFAULT_ROW_LOOK_AT_HEIGHT_OFFSET_M,
-        help="Height above the tank bottom/object base plane used as the row view look-at target.",
-    )
-    parser.add_argument(
-        "--row-entry-side",
-        choices=("y-max", "y-min", "x-min", "x-max", "center", "survey-best"),
-        default=DEFAULT_ROW_ENTRY_SIDE,
-        help="Preferred tank-side reference for row camera placement. survey-best uses the old survey-image direction.",
-    )
-    parser.add_argument(
-        "--row-cluster-radius",
-        type=float,
-        default=DEFAULT_ROW_CLUSTER_RADIUS_M,
-        help="World XY radius for fusing close RGB-D row observations into object hypotheses.",
-    )
-    parser.add_argument(
-        "--disable-row-view-collision-search",
-        action="store_true",
-        default=not DEFAULT_ROW_VIEW_COLLISION_SEARCH,
-        help="Debug only: render nominal row views without row-stage IK/collision-checked candidate selection.",
-    )
-    parser.add_argument(
-        "--row-view-candidate-standoff-multipliers",
-        type=_parse_float_tuple,
-        default=DEFAULT_ROW_VIEW_CANDIDATE_STANDOFF_MULTIPLIERS,
-        help="Comma-separated standoff multipliers tried by row-stage collision-safe view selection.",
-    )
-    parser.add_argument(
-        "--row-view-candidate-camera-z-offsets",
-        type=_parse_float_tuple,
-        default=DEFAULT_ROW_VIEW_CANDIDATE_CAMERA_Z_OFFSETS_M,
-        help="Comma-separated camera-z offsets tried by row-stage collision-safe view selection.",
-    )
-    parser.add_argument(
-        "--row-view-candidate-angle-offsets-deg",
-        type=_parse_float_tuple,
-        default=tuple(value * 180.0 / 3.141592653589793 for value in DEFAULT_ROW_VIEW_CANDIDATE_ANGLE_OFFSETS_RAD),
-        help="Comma-separated angle offsets in degrees tried by row-stage collision-safe view selection.",
-    )
-    parser.add_argument(
-        "--row-view-candidate-roll-offsets-deg",
-        type=_parse_float_tuple,
-        default=tuple(value * 180.0 / 3.141592653589793 for value in DEFAULT_ROW_VIEW_CANDIDATE_ROLL_OFFSETS_RAD),
-        help="Comma-separated camera roll offsets in degrees tried by row-stage collision-safe view selection.",
-    )
-    parser.add_argument(
-        "--row-view-candidate-max-attempts",
-        type=int,
-        default=DEFAULT_ROW_VIEW_CANDIDATE_MAX_ATTEMPTS,
-        help="Maximum IK/collision validation attempts per planned row view.",
-    )
-    parser.add_argument(
-        "--stable-object-min-confidence",
-        type=float,
-        default=DEFAULT_STABLE_OBJECT_MIN_CONFIDENCE,
-        help="Minimum fused confidence for a row hypothesis to enter stable_objects.",
-    )
-    parser.add_argument(
-        "--stable-object-min-support-count",
-        type=int,
-        default=DEFAULT_STABLE_OBJECT_MIN_SUPPORT_COUNT,
-        help="Minimum close-view observation support count for a row hypothesis to enter stable_objects.",
-    )
-    parser.add_argument(
-        "--stable-object-min-evidence-score",
-        type=float,
-        default=DEFAULT_STABLE_OBJECT_MIN_EVIDENCE_SCORE,
-        help="Minimum multi-view evidence score that can compensate for slightly low row confidence.",
-    )
-    parser.add_argument(
-        "--stable-object-same-class-nms-radius",
-        type=float,
-        default=DEFAULT_STABLE_OBJECT_SAME_CLASS_NMS_RADIUS_M,
-        help="World XY same-class suppression radius for stable row objects.",
-    )
-    parser.add_argument(
-        "--stable-object-workspace-margin",
-        type=float,
-        default=DEFAULT_STABLE_OBJECT_WORKSPACE_MARGIN_M,
-        help="XY tolerance for accepting close RGB-D row object estimates near tank workspace bounds.",
-    )
-    parser.add_argument(
-        "--tentative-object-min-confidence",
-        type=float,
-        default=DEFAULT_TENTATIVE_OBJECT_MIN_CONFIDENCE,
-        help="Minimum fused confidence for a low-evidence small row hypothesis to enter tentative_objects.",
-    )
-    parser.add_argument(
-        "--tentative-object-min-support-count",
-        type=int,
-        default=DEFAULT_TENTATIVE_OBJECT_MIN_SUPPORT_COUNT,
-        help="Minimum close-view support count for a low-evidence small row hypothesis to enter tentative_objects.",
-    )
-    parser.add_argument(
-        "--tentative-object-small-bbox-area",
-        type=float,
-        default=DEFAULT_TENTATIVE_OBJECT_SMALL_BBOX_AREA_PX,
-        help="Maximum best bbox pixel area for class-agnostic small-object tentative recovery.",
-    )
-    parser.add_argument(
-        "--cross-class-conflict-radius",
-        type=float,
-        default=DEFAULT_CROSS_CLASS_CONFLICT_RADIUS_M,
-        help="World XY radius for treating nearby different-class row hypotheses as a conflict.",
-    )
-    parser.add_argument(
-        "--cross-class-ambiguity-score-ratio",
-        type=float,
-        default=DEFAULT_CROSS_CLASS_AMBIGUITY_SCORE_RATIO,
-        help="Minimum weaker/stronger score ratio that reports a cross-class conflict as ambiguous.",
-    )
-    parser.add_argument(
-        "--class-vote-ambiguity-top-to-second-ratio",
-        type=float,
-        default=DEFAULT_CLASS_VOTE_AMBIGUITY_TOP_TO_SECOND_RATIO,
-        help="Maximum top/second class-vote ratio that reports one row hypothesis as ambiguous.",
-    )
-    parser.add_argument(
-        "--class-vote-ambiguity-min-secondary-vote",
-        type=float,
-        default=DEFAULT_CLASS_VOTE_AMBIGUITY_MIN_SECONDARY_VOTE,
-        help="Minimum secondary class-vote evidence before top-two class votes can mark a row hypothesis ambiguous.",
-    )
     parser.add_argument(
         "--final-camera-z",
         type=float,
@@ -435,7 +263,7 @@ def main() -> None:
         "--final-standoff",
         type=float,
         default=DEFAULT_FINAL_STANDOFF_M,
-        help="Horizontal standoff from each row target for final capture.",
+        help="Horizontal standoff from each rough target for final capture.",
     )
     parser.add_argument(
         "--final-min-oblique-distance",
@@ -453,7 +281,7 @@ def main() -> None:
         "--final-entry-side",
         choices=("y-max", "y-min", "x-min", "x-max", "center"),
         default=DEFAULT_FINAL_ENTRY_SIDE,
-        help="Preferred tank-side reference when row report evidence does not provide a previous view direction.",
+        help="Preferred tank-side reference when rough report evidence does not provide a previous view direction.",
     )
     parser.add_argument(
         "--final-target-match-radius",
@@ -507,7 +335,7 @@ def main() -> None:
         "--final-view-angle-offsets-deg",
         type=_parse_float_tuple,
         default=DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG,
-        help="Comma-separated final-view angle offsets around the row-evidence direction.",
+        help="Comma-separated final-view angle offsets around the rough-evidence direction.",
     )
     parser.add_argument(
         "--final-view-standoff-multipliers",
@@ -613,50 +441,21 @@ def main() -> None:
         )
         detector = _build_yolo_detector(config)
         report = run_task1_survey(layout_path, config, detector=detector)
-    elif args.stage == "row":
+    elif args.stage == "rough":
         try:
             survey_report_path = args.survey_report or find_latest_survey_report(args.output_dir)
         except FileNotFoundError as exc:
             raise SystemExit(str(exc)) from exc
-        config = RowConfig(
+        config = RoughConfig(
             scene_model_path=args.scene_model,
             yolo_profile_path=args.yolo_config,
             output_dir=args.output_dir,
             camera_name=args.camera_name,
             image_width=args.image_width,
             image_height=args.image_height,
-            camera_z_m=args.row_camera_z,
             tank_opening_z_m=args.tank_opening_z,
             opening_clearance_m=args.opening_clearance,
-            row_standoff_m=args.row_standoff,
-            row_views_per_candidate=args.row_views_per_candidate,
-            row_view_angle_spread_rad=args.row_view_angle_spread_deg * 3.141592653589793 / 180.0,
-            row_min_oblique_distance_m=args.row_min_oblique_distance,
-            look_at_height_offset_m=args.row_look_at_height_offset,
-            entry_side=args.row_entry_side,
-            row_cluster_radius_m=args.row_cluster_radius,
-            row_view_collision_search=not args.disable_row_view_collision_search,
-            row_view_candidate_standoff_multipliers=args.row_view_candidate_standoff_multipliers,
-            row_view_candidate_camera_z_offsets_m=args.row_view_candidate_camera_z_offsets,
-            row_view_candidate_angle_offsets_rad=tuple(
-                value * 3.141592653589793 / 180.0 for value in args.row_view_candidate_angle_offsets_deg
-            ),
-            row_view_candidate_roll_offsets_rad=tuple(
-                value * 3.141592653589793 / 180.0 for value in args.row_view_candidate_roll_offsets_deg
-            ),
-            row_view_candidate_max_attempts=args.row_view_candidate_max_attempts,
-            stable_object_min_confidence=args.stable_object_min_confidence,
-            stable_object_min_support_count=args.stable_object_min_support_count,
-            stable_object_min_evidence_score=args.stable_object_min_evidence_score,
-            stable_object_same_class_nms_radius_m=args.stable_object_same_class_nms_radius,
-            stable_object_workspace_margin_m=args.stable_object_workspace_margin,
-            tentative_object_min_confidence=args.tentative_object_min_confidence,
-            tentative_object_min_support_count=args.tentative_object_min_support_count,
-            tentative_object_small_bbox_area_px=args.tentative_object_small_bbox_area,
-            cross_class_conflict_radius_m=args.cross_class_conflict_radius,
-            cross_class_ambiguity_score_ratio=args.cross_class_ambiguity_score_ratio,
-            class_vote_ambiguity_top_to_second_ratio=args.class_vote_ambiguity_top_to_second_ratio,
-            class_vote_ambiguity_min_secondary_vote=args.class_vote_ambiguity_min_secondary_vote,
+            save_raw_yolo_annotations=args.save_raw_yolo_annotations,
             yolo_confidence=args.yolo_conf,
             yolo_iou=args.yolo_iou,
             yolo_image_size=args.yolo_imgsz,
@@ -668,21 +467,21 @@ def main() -> None:
             run_yolo=not args.skip_yolo,
             plan_only=args.plan_only,
             strict_yolo=args.strict_yolo,
-            max_ik_iterations=_value_or_default(args.max_ik_iterations, RowConfig().max_ik_iterations),
+            max_ik_iterations=_value_or_default(args.max_ik_iterations, RoughConfig().max_ik_iterations),
             ik_position_tolerance_m=_value_or_default(
                 args.ik_position_tolerance,
-                RowConfig().ik_position_tolerance_m,
+                RoughConfig().ik_position_tolerance_m,
             ),
             ik_orientation_tolerance_rad=_value_or_default(
                 args.ik_orientation_tolerance,
-                RowConfig().ik_orientation_tolerance_rad,
+                RoughConfig().ik_orientation_tolerance_rad,
             ),
         )
         detector = _build_yolo_detector(config)
-        report = run_task1_row(survey_report_path, config, detector=detector)
+        report = run_task1_rough(survey_report_path, config, detector=detector)
     elif args.stage == "final":
         try:
-            row_report_path = args.row_report or find_latest_row_report(args.output_dir)
+            rough_report_path = args.rough_report or find_latest_rough_report(args.output_dir)
         except FileNotFoundError as exc:
             raise SystemExit(str(exc)) from exc
         config = FinalConfig(
@@ -736,7 +535,7 @@ def main() -> None:
             ),
         )
         detector = _build_yolo_detector(config)
-        report = run_task1_final(row_report_path, config, detector=detector)
+        report = run_task1_final(rough_report_path, config, detector=detector)
     else:
         try:
             final_report_path = args.final_report or find_latest_final_report(args.output_dir)

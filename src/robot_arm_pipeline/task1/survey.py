@@ -1076,6 +1076,7 @@ class MujocoSurveyBackend:
         annotated_dir: Path,
         tiles_dir: Path,
         raw_annotated_dir: Path | None = None,
+        include_depth_array: bool = False,
     ) -> tuple[dict[str, Any], list[SurveyObservation]]:
         result = _planned_view_result(view)
         try:
@@ -1088,6 +1089,8 @@ class MujocoSurveyBackend:
             result["rgb_image_path"] = str(rgb_path)
             result["depth_path"] = str(depth_path) if depth_path is not None else None
             result["depth_retention"] = _depth_retention_payload(self.config)
+            if include_depth_array:
+                result["_transient_depth_array"] = depth
             raw_yolo_payload = self._run_yolo(view, rgb_path, yolo_dir, tiles_dir=tiles_dir)
             result["yolo_raw_path"] = raw_yolo_payload.get("_path")
             if self.config.save_raw_yolo_annotations:

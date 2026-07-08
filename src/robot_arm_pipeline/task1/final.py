@@ -76,13 +76,13 @@ DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT = 5
 
 
 @dataclass(frozen=True)
-class Task1RowReport:
+class Task1RoughReport:
     path: Path
     schema_version: str
     status: str
     layout_snapshot_path: Path
     task1_run_dir: Path
-    row_dir: Path
+    rough_dir: Path
     camera_name: str
     workspace: SurveyWorkspace
     image_size: tuple[int, int]
@@ -353,42 +353,42 @@ class FinalPlannedCapture:
         }
 
 
-def find_latest_row_report(output_dir: Path | str = DEFAULT_OUTPUT_DIR) -> Path:
+def find_latest_rough_report(output_dir: Path | str = DEFAULT_OUTPUT_DIR) -> Path:
     root = Path(output_dir)
-    candidates = sorted(root.glob("*/row/row_report.json"), key=lambda path: path.stat().st_mtime)
+    candidates = sorted(root.glob("*/rough/rough_report.json"), key=lambda path: path.stat().st_mtime)
     if not candidates:
-        raise FileNotFoundError(f"no task1 row_report.json files found under {root}")
+        raise FileNotFoundError(f"no task1 rough_report.json files found under {root}")
     return candidates[-1]
 
 
-def load_task1_row_report(path: Path | str) -> Task1RowReport:
+def load_task1_rough_report(path: Path | str) -> Task1RoughReport:
     report_path = Path(path)
     payload = json.loads(report_path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "task1_row_report_v1":
-        raise ValueError(f"unsupported task1 row report schema_version: {payload.get('schema_version')}")
+    if payload.get("schema_version") != "task1_rough_report_v1":
+        raise ValueError(f"unsupported task1 rough report schema_version: {payload.get('schema_version')}")
     workspace = _workspace_from_payload(_required(payload, "workspace"))
     views_payload = payload.get("views", [])
     if not isinstance(views_payload, list):
-        raise ValueError("task1 row report views must be a list")
+        raise ValueError("task1 rough report views must be a list")
     stable_objects = payload.get("stable_objects")
     tentative_objects = payload.get("tentative_objects")
     ambiguous_objects = payload.get("ambiguous_objects")
     if not isinstance(stable_objects, list):
-        raise ValueError("task1 row report must contain stable_objects list")
+        raise ValueError("task1 rough report must contain stable_objects list")
     if not isinstance(tentative_objects, list):
-        raise ValueError("task1 row report must contain tentative_objects list")
+        raise ValueError("task1 rough report must contain tentative_objects list")
     if not isinstance(ambiguous_objects, list):
-        raise ValueError("task1 row report must contain ambiguous_objects list")
+        raise ValueError("task1 rough report must contain ambiguous_objects list")
     object_selection_summary = payload.get("object_selection_summary", {})
     if not isinstance(object_selection_summary, dict):
-        raise ValueError("task1 row report object_selection_summary must be a dict when present")
-    return Task1RowReport(
+        raise ValueError("task1 rough report object_selection_summary must be a dict when present")
+    return Task1RoughReport(
         path=report_path,
         schema_version=str(payload["schema_version"]),
         status=str(payload.get("status", "")),
         layout_snapshot_path=_required_path(payload, "layout_snapshot_path"),
         task1_run_dir=Path(str(payload.get("task1_run_dir") or report_path.parent.parent)),
-        row_dir=Path(str(payload.get("row_dir") or report_path.parent)),
+        rough_dir=Path(str(payload.get("rough_dir") or report_path.parent)),
         camera_name=str(payload.get("camera_name") or DEFAULT_CAMERA_NAME),
         workspace=workspace,
         image_size=_image_size_from_payload(payload.get("image_size")),
@@ -403,18 +403,18 @@ def load_task1_row_report(path: Path | str) -> Task1RowReport:
 
 
 def build_final_plan(
-    row_report: Task1RowReport | Path | str,
+    rough_report: Task1RoughReport | Path | str,
     config: FinalConfig = FinalConfig(),
 ) -> tuple[SurveyWorkspace, tuple[FinalPlannedCapture, ...]]:
     config.validate()
-    report = load_task1_row_report(row_report) if not isinstance(row_report, Task1RowReport) else row_report
+    report = load_task1_rough_report(rough_report) if not isinstance(rough_report, Task1RoughReport) else rough_report
     workspace = report.workspace
     if config.camera_z_m <= workspace.bottom_z_m:
         raise ValueError(
             "final wrist camera z must be above the tank bottom/object base plane: "
             f"camera_z={config.camera_z_m:.4f}, bottom_z={workspace.bottom_z_m:.4f}"
         )
-    targets = _targets_from_row_report(report)
+    targets = _targets_from_rough_report(report)
     planned: list[FinalPlannedCapture] = []
     for target_index, target in enumerate(targets):
         _validate_target_position(target, workspace)
@@ -458,16 +458,16 @@ def build_final_plan(
 
 
 def run_task1_final(
-    row_report_path: Path | str,
+    rough_report_path: Path | str,
     config: FinalConfig = FinalConfig(),
     *,
     detector: SurveyDetector | None = None,
 ) -> dict[str, Any]:
     config.validate()
-    row_report = load_task1_row_report(row_report_path)
-    workspace, planned_captures = build_final_plan(row_report, config)
+    rough_report = load_task1_rough_report(rough_report_path)
+    workspace, planned_captures = build_final_plan(rough_report, config)
     created_utc = datetime.now(timezone.utc).isoformat()
-    capture_dir = row_report.task1_run_dir / "final"
+    capture_dir = rough_report.task1_run_dir / "final"
     images_dir = capture_dir / "images"
     depth_dir = capture_dir / "depth"
     yolo_dir = capture_dir / "yolo_raw"
@@ -477,7 +477,7 @@ def run_task1_final(
     report_path = capture_dir / "final_report.json"
     plan_payload = _plan_payload(
         created_utc=created_utc,
-        row_report=row_report,
+        rough_report=rough_report,
         workspace=workspace,
         config=config,
         capture_dir=capture_dir,
@@ -490,8 +490,8 @@ def run_task1_final(
         report = _report_payload(
             created_utc=created_utc,
             status="failed",
-            message="No stable, tentative, or ambiguous row targets were available for final capture.",
-            row_report=row_report,
+            message="No stable, tentative, or ambiguous rough targets were available for final capture.",
+            rough_report=rough_report,
             workspace=workspace,
             config=config,
             capture_dir=capture_dir,
@@ -513,7 +513,7 @@ def run_task1_final(
                 f"Generated final capture plan for {len(planned_captures)} targets "
                 "without MuJoCo rendering or YOLO inference."
             ),
-            row_report=row_report,
+            rough_report=rough_report,
             workspace=workspace,
             config=config,
             capture_dir=capture_dir,
@@ -532,7 +532,7 @@ def run_task1_final(
             created_utc=created_utc,
             status="failed",
             message="run_yolo=True requires a SurveyDetector; pass one from the task1 entrypoint or set run_yolo=False.",
-            row_report=row_report,
+            rough_report=rough_report,
             workspace=workspace,
             config=config,
             capture_dir=capture_dir,
@@ -545,7 +545,7 @@ def run_task1_final(
         _write_json(report_path, report)
         return report
 
-    layout = load_stage0_layout(row_report.layout_snapshot_path)
+    layout = load_stage0_layout(rough_report.layout_snapshot_path)
     scene = survey_scene_from_stage0_layout(
         layout,
         tank_opening_z_m=config.tank_opening_z_m,
@@ -595,7 +595,7 @@ def run_task1_final(
             created_utc=created_utc,
             status="failed",
             message=str(exc),
-            row_report=row_report,
+            rough_report=rough_report,
             workspace=workspace,
             config=config,
             capture_dir=capture_dir,
@@ -616,7 +616,7 @@ def run_task1_final(
         created_utc=created_utc,
         status=status,
         message=message,
-        row_report=row_report,
+        rough_report=rough_report,
         workspace=workspace,
         config=config,
         capture_dir=capture_dir,
@@ -817,7 +817,7 @@ def _candidate_attempt_payload(
     }
 
 
-def _targets_from_row_report(report: Task1RowReport) -> tuple[FinalTarget, ...]:
+def _targets_from_rough_report(report: Task1RoughReport) -> tuple[FinalTarget, ...]:
     targets: list[FinalTarget] = []
     for payload in report.stable_objects:
         targets.append(_target_from_stable_payload(payload))
@@ -842,7 +842,7 @@ def _target_from_stable_payload(payload: dict[str, Any]) -> FinalTarget:
         T_world_object=transform,
         best_image_path=_optional_text(payload.get("best_image_path")),
         best_bbox_xyxy=_optional_bbox(payload.get("best_bbox_xyxy")),
-        supporting_views=_string_tuple(payload.get("supporting_row_views", [])),
+        supporting_views=_string_tuple(payload.get("supporting_rough_views", [])),
         candidate_class_names=(class_name,),
         source_payload=dict(payload),
     )
@@ -861,7 +861,7 @@ def _target_from_tentative_payload(payload: dict[str, Any]) -> FinalTarget:
         T_world_object=_optional_transform(payload.get("T_world_object")),
         best_image_path=_optional_text(payload.get("best_image_path")),
         best_bbox_xyxy=_optional_bbox(payload.get("best_bbox_xyxy")),
-        supporting_views=_string_tuple(payload.get("supporting_row_views", [])),
+        supporting_views=_string_tuple(payload.get("supporting_rough_views", [])),
         candidate_class_names=(class_name,) if class_name else (),
         source_payload=dict(payload),
     )
@@ -878,7 +878,7 @@ def _target_from_ambiguous_payload(payload: dict[str, Any]) -> FinalTarget:
         view_id
         for candidate in class_candidates
         if isinstance(candidate, dict)
-        for view_id in candidate.get("supporting_row_views", [])
+        for view_id in candidate.get("supporting_rough_views", [])
     )
     return FinalTarget(
         object_id=object_id,
@@ -935,7 +935,7 @@ def _look_at_for_target(
 
 def _target_primary_angle(
     target: FinalTarget,
-    report: Task1RowReport,
+    report: Task1RoughReport,
     *,
     config: FinalConfig,
 ) -> tuple[float, str]:
@@ -943,13 +943,13 @@ def _target_primary_angle(
         view_payload = _view_for_image_path(target.best_image_path, report.views)
         angle = _angle_from_view_to_target(view_payload, target.position_world) if view_payload is not None else None
         if angle is not None:
-            return angle, "best_row_image_view"
+            return angle, "best_rough_image_view"
 
     for view_id in target.supporting_views:
         view_payload = report.views_by_id.get(view_id)
         angle = _angle_from_view_to_target(view_payload, target.position_world) if view_payload is not None else None
         if angle is not None:
-            return angle, "supporting_row_view"
+            return angle, "supporting_rough_view"
 
     return _entry_side_angle(target.position_world, workspace=report.workspace, entry_side=config.entry_side), "entry_side_policy"
 
@@ -1021,7 +1021,7 @@ def _select_camera_position_candidates(
         [
             {
                 "angle_rad": requested_angle_rad + math.radians(offset_deg),
-                "angle_source": "row_evidence_offset",
+                "angle_source": "rough_evidence_offset",
                 "angle_offset_deg": float(offset_deg),
             }
             for offset_deg in config.final_view_angle_offsets_deg
@@ -1697,7 +1697,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
             "pose_quality": {
                 "position_source": "final_close_yolo_depth_observation",
                 "orientation_source": (
-                    "source_row_T_world_object"
+                    "source_rough_T_world_object"
                     if source_transform is not None
                     else "identity_orientation_no_source_pose"
                 ),
@@ -1839,7 +1839,7 @@ def _stable_selection_payload(
             "follow_up_duplicate_radius_m": _round(DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M),
             "follow_up_promotion_min_confidence": _round(DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE),
             "rules": [
-                "Primary row-stable targets enter stable_objects only when close capture confirms the same class.",
+                "Primary rough-stable targets enter stable_objects only when close capture confirms the same class.",
                 "Follow-up targets are promotion candidates only while the stable object list is below the configured desired count.",
                 "Follow-up targets are not rendered once the configured desired stable count has already been reached.",
                 "Tentative targets enter stable_objects only when close capture observes the same class with enough confidence, or when no tentative class was supplied.",
@@ -1885,7 +1885,7 @@ def _stable_object_notes(
             "No source object orientation was available, so T_world_object uses identity orientation and should not be treated as final yaw."
         )
     else:
-        notes.append("The orientation in T_world_object is inherited from the row-stage source pose.")
+        notes.append("The orientation in T_world_object is inherited from the rough-stage source pose.")
     return notes
 
 
@@ -2180,13 +2180,13 @@ def _continue_after_capture_message(capture: dict[str, Any]) -> str:
 
 def _capture_notes(target: FinalTarget, status: str) -> list[str]:
     notes = [
-        "Single-object capture used row report target positions as formal inputs and did not assume a fixed object count.",
+        "Single-object capture used rough report target positions as formal inputs and did not assume a fixed object count.",
         "The final photo was rendered only after top-opening entry waypoints and the final wrist-camera pose passed whole-arm IK and collision checks.",
         "The rendered pose reused the validated fixed qpos recorded in selected_view_candidate.view.",
         "If a collision-safe capture does not confirm the target, final continues trying later collision-safe candidates before returning an unresolved result.",
     ]
     if target.source_status != "stable":
-        notes.append("This target came from tentative or ambiguous row evidence and remains a follow-up result, not a stable object promotion.")
+        notes.append("This target came from tentative or ambiguous rough evidence and remains a follow-up result, not a stable object promotion.")
     if status == "class_conflict":
         notes.append("The closest close-view YOLO observation did not match the source stable class name.")
     if status == "quality_limited":
@@ -2312,7 +2312,7 @@ def _accumulate_final_validation_rejection(
 def _plan_payload(
     *,
     created_utc: str,
-    row_report: Task1RowReport,
+    rough_report: Task1RoughReport,
     workspace: SurveyWorkspace,
     config: FinalConfig,
     capture_dir: Path,
@@ -2324,10 +2324,10 @@ def _plan_payload(
         "schema_version": "task1_final_plan_v1",
         "stage": "final",
         "created_utc": created_utc,
-        "source_row_report_path": str(row_report.path),
-        "source_row_status": row_report.status,
-        "layout_snapshot_path": str(row_report.layout_snapshot_path),
-        "task1_run_dir": str(row_report.task1_run_dir),
+        "source_rough_report_path": str(rough_report.path),
+        "source_rough_status": rough_report.status,
+        "layout_snapshot_path": str(rough_report.layout_snapshot_path),
+        "task1_run_dir": str(rough_report.task1_run_dir),
         "capture_dir": str(capture_dir),
         "plan_path": str(plan_path),
         "report_path": str(report_path),
@@ -2372,13 +2372,13 @@ def _plan_payload(
                 "MuJoCo IK plus robot body collision checks for every entry waypoint and the final photo pose."
             ),
             "render_pose_reuse": "selected final captures are rendered with fixed_qpos from the validated final pose",
-            "row_report_is_layered_input": True,
+            "rough_report_is_layered_input": True,
         },
         "workspace": workspace.to_dict(),
         "target_policy": {
-            "primary_objects": "row_report.stable_objects",
-            "follow_up_targets": "row_report.tentative_objects + row_report.ambiguous_objects",
-            "quality_source": "row_report.object_selection_summary",
+            "primary_objects": "rough_report.stable_objects",
+            "follow_up_targets": "rough_report.tentative_objects + rough_report.ambiguous_objects",
+            "quality_source": "rough_report.object_selection_summary",
             "fixed_object_count_assumption": False,
         },
         "planned_captures": [planned.to_dict() for planned in planned_captures],
@@ -2390,7 +2390,7 @@ def _report_payload(
     created_utc: str,
     status: str,
     message: str,
-    row_report: Task1RowReport,
+    rough_report: Task1RoughReport,
     workspace: SurveyWorkspace,
     config: FinalConfig,
     capture_dir: Path,
@@ -2415,10 +2415,10 @@ def _report_payload(
         "status": status,
         "created_utc": created_utc,
         "message": message,
-        "source_row_report_path": str(row_report.path),
-        "source_row_status": row_report.status,
-        "layout_snapshot_path": str(row_report.layout_snapshot_path),
-        "task1_run_dir": str(row_report.task1_run_dir),
+        "source_rough_report_path": str(rough_report.path),
+        "source_rough_status": rough_report.status,
+        "layout_snapshot_path": str(rough_report.layout_snapshot_path),
+        "task1_run_dir": str(rough_report.task1_run_dir),
         "capture_dir": str(capture_dir),
         "plan_path": str(plan_path),
         "report_path": str(report_path),
@@ -2434,17 +2434,17 @@ def _report_payload(
         "stable_objects": stable_selection["stable_objects"],
         "unstable_objects": stable_selection["unstable_objects"],
         "stable_object_selection": stable_selection["stable_object_selection"],
-        "quality": row_report.object_selection_summary,
-        "object_selection_summary": row_report.object_selection_summary,
+        "quality": rough_report.object_selection_summary,
+        "object_selection_summary": rough_report.object_selection_summary,
         "final_reachable_planning_summary": reachable_planning_summary,
         "planned_captures": [planned.to_dict() for planned in planned_captures],
         "object_captures": object_captures,
         "notes": [
-            "Stable row objects are consumed as primary final capture targets.",
-            "Tentative and ambiguous row objects are consumed as explicit follow-up targets only when the configured desired stable count still needs rescue candidates.",
+            "Stable rough objects are consumed as primary final capture targets.",
+            "Tentative and ambiguous rough objects are consumed as explicit follow-up targets only when the configured desired stable count still needs rescue candidates.",
             "Each target keeps its own capture status; unconfirmed and class-conflict results are kept out of stable_objects.",
             "Final capture views are rendered only from fixed qpos values produced by successful whole-arm IK and collision validation.",
-            "The report intentionally supports any number of row targets.",
+            "The report intentionally supports any number of rough targets.",
         ],
     }
 

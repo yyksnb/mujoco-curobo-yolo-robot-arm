@@ -20,17 +20,17 @@ from robot_arm_pipeline.task1.survey import (
     load_stage0_layout,
     survey_scene_from_stage0_layout,
 )
-from robot_arm_pipeline.task1.row import (
-    RowConfig,
-    RowObservation,
-    build_row_inspection_plan,
-    fuse_row_observations,
+from robot_arm_pipeline.task1.rough import (
+    RoughConfig,
+    RoughObservation,
+    build_rough_inspection_plan,
+    fuse_rough_observations,
     load_task1_survey_report,
-    select_row_objects_with_policy,
-    select_stable_row_objects,
-    _row_view_selection_summary,
-    _select_reachable_row_capture_plan,
-    _select_row_capture_view,
+    select_rough_objects_with_policy,
+    _rough_filtered_annotation_detections_by_view,
+    _rough_view_selection_summary,
+    _select_reachable_rough_capture_plan,
+    _select_rough_capture_view,
 )
 from robot_arm_pipeline.task1.final import (
     DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
@@ -48,7 +48,7 @@ from robot_arm_pipeline.task1.final import (
     _final_reachable_planning_summary,
     _matched_observations,
     build_final_plan,
-    load_task1_row_report,
+    load_task1_rough_report,
     select_stable_final_objects,
 )
 
@@ -425,15 +425,16 @@ def test_task1_recognition_script_seeded_layout_stays_under_task1_output(tmp_pat
     assert not (tmp_path / "object_poses").exists()
 
 
-def test_row_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: Path) -> None:
+def test_rough_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
     survey_report = load_task1_survey_report(survey_report_path)
-    assert RowConfig().capture_config().save_depth_arrays is True
+    assert RoughConfig().capture_config().save_depth_arrays is False
+    assert RoughConfig(save_raw_yolo_annotations=True).capture_config().save_raw_yolo_annotations is True
 
-    workspace, planned_views = build_row_inspection_plan(
+    workspace, planned_views = build_rough_inspection_plan(
         survey_report,
-        RowConfig(plan_only=True, row_views_per_candidate=3, camera_z_m=0.34, row_standoff_m=0.16),
+        RoughConfig(plan_only=True, rough_views_per_candidate=3, camera_z_m=0.34, rough_standoff_m=0.16),
     )
 
     assert len(planned_views) == 6
@@ -452,7 +453,7 @@ def test_row_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: 
     assert candidate_002.view.desired_camera_position_world[1] < candidate_002.candidate_rough_position_world[1]
 
 
-def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) -> None:
+def test_task1_recognition_script_rough_plan_only_writes_report(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
 
@@ -461,7 +462,7 @@ def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) ->
             sys.executable,
             str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
             "--stage",
-            "row",
+            "rough",
             "--survey-report",
             str(survey_report_path),
             "--plan-only",
@@ -473,10 +474,10 @@ def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) ->
     )
 
     assert '"status": "plan_only"' in result.stdout
-    row_report_path = survey_report_path.parent.parent / "row" / "row_report.json"
-    report = json.loads(row_report_path.read_text(encoding="utf-8"))
-    assert report["schema_version"] == "task1_row_report_v1"
-    assert report["stage"] == "row"
+    rough_report_path = survey_report_path.parent.parent / "rough" / "rough_report.json"
+    report = json.loads(rough_report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == "task1_rough_report_v1"
+    assert report["stage"] == "rough"
     assert report["status"] == "plan_only"
     assert report["source_survey_report_path"] == str(survey_report_path)
     assert len(report["survey_candidates"]) == 2
@@ -485,75 +486,29 @@ def test_task1_recognition_script_row_plan_only_writes_report(tmp_path: Path) ->
     assert report["tentative_objects"] == []
     assert report["ambiguous_objects"] == []
     assert report["rejected_hypotheses"] == []
-    assert report["row_view_selection_summary"]["enabled"] is False
+    assert report["rough_view_selection_summary"]["enabled"] is False
     assert report["object_selection_summary"]["status"] == "not_run"
     assert report["stable_object_selection"]["status"] == "not_run"
 
 
-def test_row_view_collision_search_selects_later_safe_candidate(tmp_path: Path) -> None:
+def test_reachable_rough_capture_plan_only_returns_validated_views(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
     survey_report = load_task1_survey_report(survey_report_path)
-    workspace, planned_views = build_row_inspection_plan(
-        survey_report,
-        RowConfig(
-            plan_only=True,
-            row_views_per_candidate=1,
-            camera_z_m=0.34,
-            row_standoff_m=0.16,
-            row_view_candidate_angle_offsets_rad=(0.0,),
-            row_view_candidate_roll_offsets_rad=(0.0,),
-            row_view_candidate_standoff_multipliers=(1.0,),
-            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-        ),
-    )
-    backend = _FakeRowValidationBackend(("collision", "success"))
-
-    selected_view, selection = _select_row_capture_view(
-        backend=backend,
-        planned=planned_views[0],
-        workspace=workspace,
-        config=RowConfig(
-            plan_only=True,
-            row_views_per_candidate=1,
-            camera_z_m=0.34,
-            row_standoff_m=0.16,
-            row_view_candidate_angle_offsets_rad=(0.0,),
-            row_view_candidate_roll_offsets_rad=(0.0,),
-            row_view_candidate_standoff_multipliers=(1.0,),
-            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-        ),
-    )
-
-    assert selected_view is not None
-    assert selected_view.desired_camera_position_world[2] == pytest.approx(0.38)
-    assert selection["status"] == "selected"
-    assert selection["selected_candidate_index"] == 1
-    assert selection["rejected_counts"]["collision"] == 1
-    summary = _row_view_selection_summary([{"row_view_selection": selection}])
-    assert summary["selected_count"] == 1
-    assert summary["selected_alternative_count"] == 1
-    assert summary["collision_rejection_count"] == 1
-
-
-def test_reachable_row_capture_plan_only_returns_validated_views(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-    survey_report = load_task1_survey_report(survey_report_path)
-    config = RowConfig(
+    config = RoughConfig(
         plan_only=True,
-        row_views_per_candidate=2,
+        rough_views_per_candidate=2,
         camera_z_m=0.34,
-        row_standoff_m=0.16,
-        row_view_candidate_angle_offsets_rad=(0.0,),
-        row_view_candidate_roll_offsets_rad=(0.0,),
-        row_view_candidate_standoff_multipliers=(1.0,),
-        row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
+        rough_standoff_m=0.16,
+        rough_view_candidate_angle_offsets_rad=(0.0,),
+        rough_view_candidate_roll_offsets_rad=(0.0,),
+        rough_view_candidate_standoff_multipliers=(1.0,),
+        rough_view_candidate_camera_z_offsets_m=(0.0, 0.04),
     )
-    workspace, planned_views = build_row_inspection_plan(survey_report, config)
+    workspace, planned_views = build_rough_inspection_plan(survey_report, config)
 
-    selected_views, selections, summary = _select_reachable_row_capture_plan(
-        backend=_FakeRowValidationBackend(("collision", "success", "success", "success", "success")),
+    selected_views, selections, summary = _select_reachable_rough_capture_plan(
+        backend=_FakeRoughValidationBackend(("collision", "success", "success", "success", "success")),
         planned_views=planned_views,
         workspace=workspace,
         config=config,
@@ -565,30 +520,30 @@ def test_reachable_row_capture_plan_only_returns_validated_views(tmp_path: Path)
     assert summary["selected_view_count"] == 4
     assert summary["insufficient_candidate_count"] == 0
     assert all(selections[planned.view.view_id]["status"] == "selected" for planned in selected_views)
-    assert all(planned.view.fixed_pose_source == "row_reachable_capture_plan_v1" for planned in selected_views)
+    assert all(planned.view.fixed_pose_source == "rough_reachable_capture_plan_v1" for planned in selected_views)
     assert all(planned.view.fixed_qpos is not None for planned in selected_views)
-    assert selected_views[0].view.view_id == "row_candidate_001_00"
+    assert selected_views[0].view.view_id == "rough_candidate_001_00"
     assert selections[selected_views[0].view.view_id]["selected_candidate"]["camera_z_offset_m"] == pytest.approx(0.04)
 
 
-def test_reachable_row_capture_plan_rejects_validation_without_qpos(tmp_path: Path) -> None:
+def test_reachable_rough_capture_plan_rejects_invalid_candidates(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
     survey_report = load_task1_survey_report(survey_report_path)
-    config = RowConfig(
+    config = RoughConfig(
         plan_only=True,
-        row_views_per_candidate=1,
+        rough_views_per_candidate=1,
         camera_z_m=0.34,
-        row_standoff_m=0.16,
-        row_view_candidate_angle_offsets_rad=(0.0,),
-        row_view_candidate_roll_offsets_rad=(0.0,),
-        row_view_candidate_standoff_multipliers=(1.0,),
-        row_view_candidate_camera_z_offsets_m=(0.0,),
+        rough_standoff_m=0.16,
+        rough_view_candidate_angle_offsets_rad=(0.0,),
+        rough_view_candidate_roll_offsets_rad=(0.0,),
+        rough_view_candidate_standoff_multipliers=(1.0,),
+        rough_view_candidate_camera_z_offsets_m=(0.0,),
     )
-    workspace, planned_views = build_row_inspection_plan(survey_report, config)
+    workspace, planned_views = build_rough_inspection_plan(survey_report, config)
 
-    selected_views, selections, summary = _select_reachable_row_capture_plan(
-        backend=_FakeRowValidationBackend(("success_no_qpos",)),
+    selected_views, selections, summary = _select_reachable_rough_capture_plan(
+        backend=_FakeRoughValidationBackend(("success_no_qpos",)),
         planned_views=(planned_views[0],),
         workspace=workspace,
         config=config,
@@ -601,126 +556,21 @@ def test_reachable_row_capture_plan_rejects_validation_without_qpos(tmp_path: Pa
     assert summary["insufficient_candidate_count"] == 1
     assert summary["candidate_summaries"][0]["rejected_counts"]["missing_validated_qpos"] == 1
 
-
-def test_row_view_collision_search_can_select_alternate_camera_roll(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-    survey_report = load_task1_survey_report(survey_report_path)
-    workspace, planned_views = build_row_inspection_plan(
-        survey_report,
-        RowConfig(
-            plan_only=True,
-            row_views_per_candidate=1,
-            camera_z_m=0.34,
-            row_standoff_m=0.16,
-            row_view_candidate_angle_offsets_rad=(0.0,),
-            row_view_candidate_roll_offsets_rad=(0.0, math.pi / 2.0),
-            row_view_candidate_standoff_multipliers=(1.0,),
-            row_view_candidate_camera_z_offsets_m=(0.0,),
-        ),
-    )
-    config = RowConfig(
+    no_safe_config = RoughConfig(
         plan_only=True,
-        row_views_per_candidate=1,
+        rough_views_per_candidate=1,
         camera_z_m=0.34,
-        row_standoff_m=0.16,
-        row_view_candidate_angle_offsets_rad=(0.0,),
-        row_view_candidate_roll_offsets_rad=(0.0, math.pi / 2.0),
-        row_view_candidate_standoff_multipliers=(1.0,),
-        row_view_candidate_camera_z_offsets_m=(0.0,),
+        rough_standoff_m=0.16,
+        rough_view_candidate_angle_offsets_rad=(0.0,),
+        rough_view_candidate_roll_offsets_rad=(0.0,),
+        rough_view_candidate_standoff_multipliers=(1.0,),
+        rough_view_candidate_camera_z_offsets_m=(0.0, 0.04),
     )
-
-    selected_view, selection = _select_row_capture_view(
-        backend=_FakeRowValidationBackend(("collision", "success")),
+    selected_view, selection = _select_rough_capture_view(
+        backend=_FakeRoughValidationBackend(("collision", "ik_failed")),
         planned=planned_views[0],
         workspace=workspace,
-        config=config,
-    )
-
-    assert selected_view is not None
-    assert selection["status"] == "selected"
-    assert selection["selected_candidate_index"] == 1
-    assert selection["selected_candidate"]["roll_offset_rad"] == pytest.approx(math.pi / 2.0)
-    assert selection["rejected_counts"]["collision"] == 1
-    summary = _row_view_selection_summary([{"row_view_selection": selection}])
-    assert summary["selected_alternative_count"] == 1
-
-
-def test_row_view_collision_search_can_select_lower_camera_z(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-    survey_report = load_task1_survey_report(survey_report_path)
-    workspace, planned_views = build_row_inspection_plan(
-        survey_report,
-        RowConfig(
-            plan_only=True,
-            row_views_per_candidate=1,
-            camera_z_m=0.34,
-            row_standoff_m=0.16,
-            row_view_candidate_angle_offsets_rad=(0.0,),
-            row_view_candidate_roll_offsets_rad=(0.0,),
-            row_view_candidate_standoff_multipliers=(1.0,),
-            row_view_candidate_camera_z_offsets_m=(0.0, -0.04),
-        ),
-    )
-    config = RowConfig(
-        plan_only=True,
-        row_views_per_candidate=1,
-        camera_z_m=0.34,
-        row_standoff_m=0.16,
-        row_view_candidate_angle_offsets_rad=(0.0,),
-        row_view_candidate_roll_offsets_rad=(0.0,),
-        row_view_candidate_standoff_multipliers=(1.0,),
-        row_view_candidate_camera_z_offsets_m=(0.0, -0.04),
-    )
-
-    selected_view, selection = _select_row_capture_view(
-        backend=_FakeRowValidationBackend(("collision", "success")),
-        planned=planned_views[0],
-        workspace=workspace,
-        config=config,
-    )
-
-    assert selected_view is not None
-    assert selected_view.desired_camera_position_world[2] == pytest.approx(0.30)
-    assert selection["status"] == "selected"
-    assert selection["selected_candidate"]["camera_z_offset_m"] == pytest.approx(-0.04)
-    assert selection["rejected_counts"]["collision"] == 1
-
-
-def test_row_view_collision_search_fails_when_no_candidate_is_safe(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-    survey_report = load_task1_survey_report(survey_report_path)
-    workspace, planned_views = build_row_inspection_plan(
-        survey_report,
-        RowConfig(
-            plan_only=True,
-            row_views_per_candidate=1,
-            camera_z_m=0.34,
-            row_standoff_m=0.16,
-            row_view_candidate_angle_offsets_rad=(0.0,),
-            row_view_candidate_roll_offsets_rad=(0.0,),
-            row_view_candidate_standoff_multipliers=(1.0,),
-            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-        ),
-    )
-    config = RowConfig(
-        plan_only=True,
-        row_views_per_candidate=1,
-        camera_z_m=0.34,
-        row_standoff_m=0.16,
-        row_view_candidate_angle_offsets_rad=(0.0,),
-        row_view_candidate_roll_offsets_rad=(0.0,),
-        row_view_candidate_standoff_multipliers=(1.0,),
-        row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-    )
-
-    selected_view, selection = _select_row_capture_view(
-        backend=_FakeRowValidationBackend(("collision", "ik_failed")),
-        planned=planned_views[0],
-        workspace=workspace,
-        config=config,
+        config=no_safe_config,
     )
 
     assert selected_view is None
@@ -728,223 +578,159 @@ def test_row_view_collision_search_fails_when_no_candidate_is_safe(tmp_path: Pat
     assert selection["attempt_count"] == 2
     assert selection["rejected_counts"]["collision"] == 1
     assert selection["rejected_counts"]["ik_failed"] == 1
-    summary = _row_view_selection_summary([{"row_view_selection": selection}])
+    summary = _rough_view_selection_summary([{"rough_view_selection": selection}])
     assert summary["failed_no_safe_candidate_count"] == 1
 
 
-def test_row_view_collision_search_reports_explicit_candidate_limit(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-    survey_report = load_task1_survey_report(survey_report_path)
-    workspace, planned_views = build_row_inspection_plan(
-        survey_report,
-        RowConfig(
-            plan_only=True,
-            row_views_per_candidate=1,
-            camera_z_m=0.34,
-            row_standoff_m=0.16,
-            row_view_candidate_angle_offsets_rad=(0.0,),
-            row_view_candidate_roll_offsets_rad=(0.0,),
-            row_view_candidate_standoff_multipliers=(1.0,),
-            row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-            row_view_candidate_max_attempts=1,
-        ),
-    )
-    config = RowConfig(
-        plan_only=True,
-        row_views_per_candidate=1,
-        camera_z_m=0.34,
-        row_standoff_m=0.16,
-        row_view_candidate_angle_offsets_rad=(0.0,),
-        row_view_candidate_roll_offsets_rad=(0.0,),
-        row_view_candidate_standoff_multipliers=(1.0,),
-        row_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-        row_view_candidate_max_attempts=1,
-    )
-
-    selected_view, selection = _select_row_capture_view(
-        backend=_FakeRowValidationBackend(("collision",)),
-        planned=planned_views[0],
-        workspace=workspace,
-        config=config,
-    )
-
-    assert selected_view is None
-    assert selection["status"] == "failed_no_collision_free_candidate"
-    assert selection["candidate_limit_reached"] is True
-    assert selection["attempt_count"] == 1
-    summary = _row_view_selection_summary([{"row_view_selection": selection}])
-    assert summary["candidate_limit_reached_count"] == 1
-
-
-def test_row_fusion_merges_duplicate_candidates_but_keeps_separate_nearby_objects() -> None:
-    hypotheses = fuse_row_observations(
+def test_rough_fusion_merges_duplicate_candidates_but_keeps_separate_nearby_objects() -> None:
+    hypotheses = fuse_rough_observations(
         [
-            _row_observation("candidate_001", "row_candidate_001_00", "记号笔", 0.82, (0.30, 0.30, 0.03), yaw=0.10),
-            _row_observation("candidate_002", "row_candidate_002_00", "记号笔", 0.78, (0.32, 0.31, 0.03), yaw=0.14),
-            _row_observation("candidate_003", "row_candidate_003_00", "标准件", 0.90, (0.43, 0.31, 0.03), yaw=None),
+            _rough_observation("candidate_001", "rough_candidate_001_00", "记号笔", 0.82, (0.30, 0.30, 0.03), yaw=0.10),
+            _rough_observation("candidate_002", "rough_candidate_002_00", "记号笔", 0.78, (0.32, 0.31, 0.03), yaw=0.14),
+            _rough_observation("candidate_003", "rough_candidate_003_00", "标准件", 0.90, (0.43, 0.31, 0.03), yaw=None),
         ],
         cluster_radius_m=0.055,
     )
 
     assert len(hypotheses) == 2
     assert hypotheses[0]["source_candidate_ids"] == ["candidate_001", "candidate_002"]
+    assert hypotheses[0]["source_observation_ids"] == ["rough_candidate_001_00_obs", "rough_candidate_002_00_obs"]
     assert hypotheses[0]["class_name"] == "记号笔"
     assert hypotheses[0]["yaw_rad"] == pytest.approx(0.1195, abs=0.01)
     assert hypotheses[1]["class_name"] == "标准件"
     assert hypotheses[1]["pose_quality"]["yaw_source"] == "unresolved_fallback_zero_in_T_world_object"
 
 
-def test_stable_row_objects_filter_noise_and_suppress_same_class_duplicates() -> None:
-    stable_objects, metadata = select_stable_row_objects(
-        [
-            _hypothesis("hyp_marker_best", "记号笔", 0.92, 8, (0.30, 0.30, 0.03)),
-            _hypothesis("hyp_marker_fragment", "记号笔", 0.82, 5, (0.37, 0.33, 0.03)),
-            _hypothesis("hyp_standard", "标准件", 0.58, 3, (0.60, 0.31, 0.03)),
-            _hypothesis("hyp_low_support", "纸胶带", 0.88, 1, (0.70, 0.70, 0.03)),
-            _hypothesis("hyp_low_conf", "钻头", 0.31, 7, (0.72, 0.72, 0.03)),
-            _hypothesis("hyp_outside", "手套", 0.99, 7, (1.20, 0.50, 0.03)),
-        ],
-        workspace={
-            "x_min": 0.15,
-            "x_max": 0.85,
-            "y_min": 0.15,
-            "y_max": 0.85,
-            "bottom_z_m": 0.03,
-            "tank_opening_z_m": 0.50,
+def test_rough_filtered_annotation_uses_selected_objects_only() -> None:
+    rough_observations = [
+        {
+            "observation_id": "obs_stable_small",
+            "rough_view_id": "rough_candidate_001_00",
+            "bbox_xyxy": [10.0, 10.0, 50.0, 50.0],
+            "confidence": 0.95,
+            "class_id": 1,
+            "class_name": "记号笔",
         },
+        {
+            "observation_id": "obs_stable_best",
+            "rough_view_id": "rough_candidate_001_00",
+            "bbox_xyxy": [12.0, 12.0, 90.0, 90.0],
+            "confidence": 0.80,
+            "class_id": 1,
+            "class_name": "记号笔",
+        },
+        {
+            "observation_id": "obs_raw_rejected",
+            "rough_view_id": "rough_candidate_001_00",
+            "bbox_xyxy": [100.0, 100.0, 180.0, 180.0],
+            "confidence": 0.99,
+            "class_id": 4,
+            "class_name": "标准件",
+        },
+        {
+            "observation_id": "obs_tentative",
+            "rough_view_id": "rough_candidate_002_00",
+            "bbox_xyxy": [20.0, 30.0, 60.0, 70.0],
+            "confidence": 0.42,
+            "class_id": 4,
+            "class_name": "标准件",
+        },
+    ]
+    object_hypotheses = [
+        {
+            "hypothesis_id": "hyp_stable",
+            "source_observation_ids": ["obs_stable_small", "obs_stable_best"],
+        },
+        {
+            "hypothesis_id": "hyp_rejected",
+            "source_observation_ids": ["obs_raw_rejected"],
+        },
+        {
+            "hypothesis_id": "hyp_tentative",
+            "source_observation_ids": ["obs_tentative"],
+        },
+    ]
+    stable_objects = [
+        {
+            "object_id": "rough_object_001",
+            "source_hypothesis_id": "hyp_stable",
+            "class_name": "记号笔",
+            "confidence": 0.90,
+        }
+    ]
+    tentative_objects = [
+        {
+            "object_id": "rough_tentative_001",
+            "source_hypothesis_id": "hyp_tentative",
+            "class_name": "标准件",
+            "confidence": 0.42,
+        }
+    ]
+
+    detections_by_view = _rough_filtered_annotation_detections_by_view(
+        object_hypotheses=object_hypotheses,
+        rough_observations=rough_observations,
+        stable_objects=stable_objects,
+        tentative_objects=tentative_objects,
+        ambiguous_objects=[],
     )
 
-    assert [obj["class_name"] for obj in stable_objects] == ["记号笔", "标准件"]
-    assert stable_objects[0]["source_hypothesis_id"] == "hyp_marker_best"
-    assert stable_objects[0]["suppressed_duplicate_hypothesis_ids"] == ["hyp_marker_fragment"]
-    assert metadata["stable_object_count"] == 2
-    assert metadata["suppressed_same_class_duplicate_count"] == 1
-    assert metadata["rejected_counts"]["low_support_count"] == 1
-    assert metadata["rejected_counts"]["low_confidence"] == 1
-    assert metadata["rejected_counts"]["outside_workspace"] == 1
+    assert sorted(detections_by_view) == ["rough_candidate_001_00", "rough_candidate_002_00"]
+    stable_detections = detections_by_view["rough_candidate_001_00"]
+    assert len(stable_detections) == 1
+    assert stable_detections[0]["bbox_xyxy"] == [12.0, 12.0, 90.0, 90.0]
+    assert stable_detections[0]["source_observation_id"] == "obs_stable_best"
+    assert stable_detections[0]["annotation_label"] == "rough_object_001 记号笔 0.80"
+    tentative_detections = detections_by_view["rough_candidate_002_00"]
+    assert tentative_detections[0]["annotation_label"] == "rough_tentative_001 tentative 标准件 0.42"
 
 
-def test_row_object_selection_keeps_small_low_evidence_as_tentative() -> None:
-    selection = select_row_objects_with_policy(
+def test_rough_object_selection_policy_layers_outputs_and_rejections() -> None:
+    ambiguous_hypothesis = _hypothesis("hyp_shape_confused", "内六角扳手", 0.91, 5, (0.72, 0.30, 0.03))
+    ambiguous_hypothesis["class_votes"] = {"内六角扳手": 3.0, "钻头": 2.8}
+    selection = select_rough_objects_with_policy(
         [
-            _hypothesis("hyp_small", "标准件", 0.42, 1, (0.30, 0.30, 0.03)),
-            _hypothesis("hyp_stable", "记号笔", 0.90, 4, (0.70, 0.70, 0.03)),
+            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.30, 0.30, 0.03)),
+            _hypothesis("hyp_marker_fragment", "记号笔", 0.70, 3, (0.34, 0.31, 0.03)),
+            _hypothesis("hyp_small", "标准件", 0.42, 1, (0.60, 0.30, 0.03)),
+            _hypothesis("hyp_supported_drill", "钻头", 0.49, 12, (0.30, 0.70, 0.03)),
+            ambiguous_hypothesis,
+            _hypothesis("hyp_outside", "手套", 0.90, 4, (0.88, 0.50, 0.03)),
         ],
         workspace=_unit_workspace(),
         tentative_small_bbox_area_px=2_000.0,
+        class_vote_ambiguity_top_to_second_ratio=1.35,
+        class_vote_ambiguity_min_secondary_vote=0.50,
     )
 
-    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔"]
+    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔", "钻头"]
+    assert selection["stable_objects"][0]["suppressed_duplicate_hypothesis_ids"] == ["hyp_marker_fragment"]
     assert [obj["class_name"] for obj in selection["tentative_objects"]] == ["标准件"]
     assert selection["tentative_objects"][0]["selection"]["evidence_gaps"] == [
         "low_confidence",
         "low_support_count",
     ]
+    assert {
+        candidate["class_name"] for candidate in selection["ambiguous_objects"][0]["class_candidates"]
+    } == {"内六角扳手", "钻头"}
+    summary = selection["object_selection_summary"]
+    assert summary["stable_object_count"] == 2
     assert selection["object_selection_summary"]["tentative_object_count"] == 1
+    assert summary["ambiguous_object_count"] == 1
+    assert summary["class_vote_ambiguous_count"] == 1
+    assert summary["suppressed_same_class_duplicate_count"] == 1
+    assert summary["rejected_counts"]["same_class_duplicate"] == 1
+    assert summary["rejected_counts"]["outside_workspace"] == 1
 
 
-def test_row_object_selection_allows_high_multiview_evidence_below_confidence_gate() -> None:
-    selection = select_row_objects_with_policy(
-        [
-            _hypothesis("hyp_supported_drill", "钻头", 0.49, 12, (0.30, 0.30, 0.03)),
-            _hypothesis("hyp_low_evidence", "纸胶带", 0.31, 3, (0.70, 0.70, 0.03)),
-        ],
-        workspace=_unit_workspace(),
-    )
-
-    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["钻头"]
-    assert selection["object_selection_summary"]["thresholds"]["min_evidence_score"] == 1.25
-    assert selection["object_selection_summary"]["rejected_counts"]["low_confidence"] == 1
-
-
-def test_row_object_selection_reports_similar_cross_class_neighbors_as_ambiguous() -> None:
-    selection = select_row_objects_with_policy(
-        [
-            _hypothesis("hyp_wrench", "内六角扳手", 0.84, 3, (0.30, 0.30, 0.03)),
-            _hypothesis("hyp_drill", "钻头", 0.82, 3, (0.34, 0.31, 0.03)),
-            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.72, 0.72, 0.03)),
-        ],
-        workspace=_unit_workspace(),
-        cross_class_conflict_radius_m=0.08,
-        cross_class_ambiguity_score_ratio=0.80,
-    )
-
-    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔"]
-    assert len(selection["ambiguous_objects"]) == 1
-    assert {
-        candidate["class_name"] for candidate in selection["ambiguous_objects"][0]["class_candidates"]
-    } == {"内六角扳手", "钻头"}
-    assert selection["object_selection_summary"]["ambiguous_object_count"] == 1
-
-
-def test_row_object_selection_keeps_separated_cross_class_neighbors() -> None:
-    selection = select_row_objects_with_policy(
-        [
-            _hypothesis("hyp_standard", "标准件", 0.84, 5, (0.30, 0.30, 0.03)),
-            _hypothesis("hyp_drill", "钻头", 0.86, 5, (0.355, 0.30, 0.03)),
-            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.72, 0.72, 0.03)),
-        ],
-        workspace=_unit_workspace(),
-    )
-
-    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["标准件", "钻头", "记号笔"]
-    assert selection["ambiguous_objects"] == []
-    assert selection["object_selection_summary"]["rejected_counts"]["cross_class_conflict_weaker"] == 0
-
-
-def test_row_object_selection_accepts_configured_workspace_margin() -> None:
-    selection = select_row_objects_with_policy(
-        [
-            _hypothesis("hyp_edge", "钻头", 0.90, 4, (0.86, 0.50, 0.03)),
-            _hypothesis("hyp_outside", "手套", 0.90, 4, (0.88, 0.50, 0.03)),
-        ],
-        workspace=_unit_workspace(),
-        workspace_margin_m=0.02,
-    )
-
-    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["钻头"]
-    assert selection["stable_objects"][0]["selection"]["workspace_filter"] == {
-        "within_nominal_workspace": False,
-        "workspace_margin_m": 0.02,
-    }
-    assert (
-        selection["stable_objects"][0]["pose_quality"]["workspace_bounds_status"]
-        == "within_configured_selection_margin"
-    )
-    assert selection["object_selection_summary"]["rejected_counts"]["outside_workspace"] == 1
-    assert selection["object_selection_summary"]["thresholds"]["workspace_margin_m"] == 0.02
-
-
-def test_row_object_selection_reports_close_class_votes_as_ambiguous() -> None:
-    ambiguous_hypothesis = _hypothesis("hyp_shape_confused", "内六角扳手", 0.91, 5, (0.30, 0.30, 0.03))
-    ambiguous_hypothesis["class_votes"] = {"内六角扳手": 3.0, "钻头": 2.8}
-    selection = select_row_objects_with_policy(
-        [
-            ambiguous_hypothesis,
-            _hypothesis("hyp_marker", "记号笔", 0.90, 4, (0.72, 0.72, 0.03)),
-        ],
-        workspace=_unit_workspace(),
-        class_vote_ambiguity_top_to_second_ratio=1.35,
-        class_vote_ambiguity_min_secondary_vote=0.50,
-    )
-
-    assert [obj["class_name"] for obj in selection["stable_objects"]] == ["记号笔"]
-    assert len(selection["ambiguous_objects"]) == 1
-    assert {
-        candidate["class_name"] for candidate in selection["ambiguous_objects"][0]["class_candidates"]
-    } == {"内六角扳手", "钻头"}
-    assert selection["object_selection_summary"]["class_vote_ambiguous_count"] == 1
-
-
-def test_final_plan_consumes_layered_row_report(tmp_path: Path) -> None:
+def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
-    row_report_path = _write_row_report(tmp_path, layout_path)
-    row_report = load_task1_row_report(row_report_path)
+    rough_report_path = _write_rough_report(tmp_path, layout_path)
+    rough_report = load_task1_rough_report(rough_report_path)
     assert FinalConfig().capture_config().save_depth_arrays is True
 
     workspace, planned = build_final_plan(
-        row_report,
+        rough_report,
         FinalConfig(
             plan_only=True,
             camera_z_m=0.30,
@@ -958,7 +744,7 @@ def test_final_plan_consumes_layered_row_report(tmp_path: Path) -> None:
     assert len(planned) == 3
     assert [item.target.source_status for item in planned] == ["stable", "tentative", "ambiguous"]
     assert [item.target.target_role for item in planned] == ["primary", "follow_up", "follow_up"]
-    assert planned[0].direction_source == "best_row_image_view"
+    assert planned[0].direction_source == "best_rough_image_view"
     for item in planned:
         position = item.view.desired_camera_position_world
         target = item.target.position_world
@@ -1001,7 +787,7 @@ def test_final_plan_consumes_layered_row_report(tmp_path: Path) -> None:
 
 def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
-    row_report_path = _write_row_report(tmp_path, layout_path)
+    rough_report_path = _write_rough_report(tmp_path, layout_path)
 
     result = subprocess.run(
         [
@@ -1009,8 +795,8 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
             str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
             "--stage",
             "final",
-            "--row-report",
-            str(row_report_path),
+            "--rough-report",
+            str(rough_report_path),
             "--plan-only",
         ],
         cwd=REPO_ROOT,
@@ -1020,12 +806,12 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
     )
 
     assert '"status": "plan_only"' in result.stdout
-    capture_report_path = row_report_path.parent.parent / "final" / "final_report.json"
+    capture_report_path = rough_report_path.parent.parent / "final" / "final_report.json"
     report = json.loads(capture_report_path.read_text(encoding="utf-8"))
     assert report["schema_version"] == "task1_final_report_v1"
     assert report["stage"] == "final"
     assert report["status"] == "plan_only"
-    assert report["source_row_report_path"] == str(row_report_path)
+    assert report["source_rough_report_path"] == str(rough_report_path)
     assert len(report["primary_objects"]) == 1
     assert len(report["follow_up_targets"]) == 2
     assert report["stable_objects"] == []
@@ -1059,8 +845,8 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
 
 def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
-    row_report_path = _write_row_report(tmp_path, layout_path)
-    row_report = load_task1_row_report(row_report_path)
+    rough_report_path = _write_rough_report(tmp_path, layout_path)
+    rough_report = load_task1_rough_report(rough_report_path)
     config = FinalConfig(
         run_yolo=False,
         camera_z_m=0.30,
@@ -1073,7 +859,7 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
         final_view_roll_offsets_deg=(0.0,),
         centerline_view_angle_offsets_deg=(),
     )
-    _, planned = build_final_plan(row_report, config)
+    _, planned = build_final_plan(rough_report, config)
     backend = _FakeFinalCaptureBackend(("collision", "success", "collision", "success", "success"))
 
     result = _capture_first_reachable_candidate(
@@ -1110,8 +896,8 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
 
 def test_final_capture_continues_after_unconfirmed_safe_candidate(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
-    row_report_path = _write_row_report(tmp_path, layout_path)
-    row_report = load_task1_row_report(row_report_path)
+    rough_report_path = _write_rough_report(tmp_path, layout_path)
+    rough_report = load_task1_rough_report(rough_report_path)
     config = FinalConfig(
         camera_z_m=0.30,
         standoff_m=0.12,
@@ -1123,7 +909,7 @@ def test_final_capture_continues_after_unconfirmed_safe_candidate(tmp_path: Path
         final_view_roll_offsets_deg=(0.0,),
         centerline_view_angle_offsets_deg=(),
     )
-    _, planned = build_final_plan(row_report, config)
+    _, planned = build_final_plan(rough_report, config)
     target = planned[0].target
     backend = _FakeFinalCaptureBackend(
         ("success", "success", "success", "success"),
@@ -1164,8 +950,8 @@ def test_final_capture_continues_after_unconfirmed_safe_candidate(tmp_path: Path
 
 def test_final_capture_continues_after_quality_limited_candidate(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
-    row_report_path = _write_row_report(tmp_path, layout_path)
-    row_report = load_task1_row_report(row_report_path)
+    rough_report_path = _write_rough_report(tmp_path, layout_path)
+    rough_report = load_task1_rough_report(rough_report_path)
     config = FinalConfig(
         camera_z_m=0.30,
         standoff_m=0.12,
@@ -1177,7 +963,7 @@ def test_final_capture_continues_after_quality_limited_candidate(tmp_path: Path)
         final_view_roll_offsets_deg=(0.0,),
         centerline_view_angle_offsets_deg=(),
     )
-    _, planned = build_final_plan(row_report, config)
+    _, planned = build_final_plan(rough_report, config)
     target = planned[0].target
     backend = _FakeFinalCaptureBackend(
         ("success", "success", "success", "success"),
@@ -1240,7 +1026,7 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
     selection = select_stable_final_objects(
         [
             _final_payload(
-                object_id="row_object_001",
+                object_id="rough_object_001",
                 source_status="stable",
                 target_role="primary",
                 capture_status="confirmed",
@@ -1250,7 +1036,7 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
                 source_transform=source_transform,
             ),
             _final_payload(
-                object_id="row_tentative_001",
+                object_id="rough_tentative_001",
                 source_status="tentative",
                 target_role="follow_up",
                 capture_status="follow_up_observed",
@@ -1260,7 +1046,7 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
                 source_transform=source_transform,
             ),
             _final_payload(
-                object_id="row_ambiguous_001",
+                object_id="rough_ambiguous_001",
                 source_status="ambiguous",
                 target_role="follow_up",
                 capture_status="follow_up_observed",
@@ -1271,7 +1057,7 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
                 source_transform=None,
             ),
             _final_payload(
-                object_id="row_object_002",
+                object_id="rough_object_002",
                 source_status="stable",
                 target_role="primary",
                 capture_status="class_conflict",
@@ -1285,9 +1071,9 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
 
     stable_objects = selection["stable_objects"]
     assert [obj["object_id"] for obj in stable_objects] == [
-        "row_object_001",
-        "row_tentative_001",
-        "row_ambiguous_001",
+        "rough_object_001",
+        "rough_tentative_001",
+        "rough_ambiguous_001",
     ]
     assert [obj["class_name"] for obj in stable_objects] == ["notebook", "standard_part", "drill"]
     assert stable_objects[0]["bbox_xyxy"] == (100.0, 110.0, 220.0, 240.0)
@@ -1303,7 +1089,7 @@ def test_final_stable_selection_rejects_duplicate_follow_up_object() -> None:
     selection = select_stable_final_objects(
         [
             _final_payload(
-                object_id="row_object_001",
+                object_id="rough_object_001",
                 source_status="stable",
                 target_role="primary",
                 capture_status="confirmed",
@@ -1313,7 +1099,7 @@ def test_final_stable_selection_rejects_duplicate_follow_up_object() -> None:
                 source_transform=None,
             ),
             _final_payload(
-                object_id="row_tentative_001",
+                object_id="rough_tentative_001",
                 source_status="tentative",
                 target_role="follow_up",
                 capture_status="follow_up_observed",
@@ -1325,14 +1111,14 @@ def test_final_stable_selection_rejects_duplicate_follow_up_object() -> None:
         ]
     )
 
-    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["row_object_001"]
+    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["rough_object_001"]
     assert selection["stable_object_selection"]["stable_object_count"] == 1
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {
         "duplicate_follow_up_observation": 1
     }
     duplicate = selection["unstable_objects"][0]
-    assert duplicate["object_id"] == "row_tentative_001"
-    assert duplicate["duplicate_of_object_id"] == "row_object_001"
+    assert duplicate["object_id"] == "rough_tentative_001"
+    assert duplicate["duplicate_of_object_id"] == "rough_object_001"
     assert duplicate["duplicate_xy_distance_m"] == pytest.approx(0.008544, abs=1e-6)
 
 
@@ -1340,7 +1126,7 @@ def test_final_stable_selection_rejects_low_confidence_follow_up_object() -> Non
     selection = select_stable_final_objects(
         [
             _final_payload(
-                object_id="row_object_001",
+                object_id="rough_object_001",
                 source_status="stable",
                 target_role="primary",
                 capture_status="confirmed",
@@ -1350,7 +1136,7 @@ def test_final_stable_selection_rejects_low_confidence_follow_up_object() -> Non
                 source_transform=None,
             ),
             _final_payload(
-                object_id="row_tentative_001",
+                object_id="rough_tentative_001",
                 source_status="tentative",
                 target_role="follow_up",
                 capture_status="follow_up_observed",
@@ -1363,18 +1149,18 @@ def test_final_stable_selection_rejects_low_confidence_follow_up_object() -> Non
         ]
     )
 
-    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["row_object_001"]
+    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["rough_object_001"]
     assert selection["stable_object_selection"]["stable_object_count"] == 1
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {
         "follow_up_low_confidence": 1
     }
-    assert selection["unstable_objects"][0]["object_id"] == "row_tentative_001"
+    assert selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
 
 
 def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> None:
     primary_captures = [
         _final_payload(
-            object_id=f"row_object_{index:03d}",
+            object_id=f"rough_object_{index:03d}",
             source_status="stable",
             target_role="primary",
             capture_status="confirmed",
@@ -1389,7 +1175,7 @@ def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> N
         primary_captures
         + [
             _final_payload(
-                object_id="row_tentative_001",
+                object_id="rough_tentative_001",
                 source_status="tentative",
                 target_role="follow_up",
                 capture_status="follow_up_observed",
@@ -1404,20 +1190,20 @@ def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> N
     )
 
     assert [obj["object_id"] for obj in selection["stable_objects"]] == [
-        "row_object_001",
-        "row_object_002",
-        "row_object_003",
-        "row_object_004",
-        "row_object_005",
+        "rough_object_001",
+        "rough_object_002",
+        "rough_object_003",
+        "rough_object_004",
+        "rough_object_005",
     ]
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {"follow_up_not_needed": 1}
-    assert selection["unstable_objects"][0]["object_id"] == "row_tentative_001"
+    assert selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
 
 
 def test_final_stable_selection_reports_skipped_follow_up_as_not_needed() -> None:
     captures = [
         _final_payload(
-            object_id=f"row_object_{index:03d}",
+            object_id=f"rough_object_{index:03d}",
             source_status="stable",
             target_role="primary",
             capture_status="confirmed",
@@ -1431,7 +1217,7 @@ def test_final_stable_selection_reports_skipped_follow_up_as_not_needed() -> Non
     captures.append(
         {
             "target": {
-                "object_id": "row_tentative_001",
+                "object_id": "rough_tentative_001",
                 "source_status": "tentative",
                 "target_role": "follow_up",
                 "class_name": "extra_class",
@@ -1454,13 +1240,13 @@ def test_final_stable_selection_reports_skipped_follow_up_as_not_needed() -> Non
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {
         "skipped_follow_up_not_needed": 1
     }
-    assert selection["unstable_objects"][0]["object_id"] == "row_tentative_001"
+    assert selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
     assert _overall_status(captures) == "success"
 
 
 def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
     target = FinalTarget(
-        object_id="row_object_002",
+        object_id="rough_object_002",
         target_role="primary",
         source_status="stable",
         position_world=(0.359, 0.687, 0.03),
@@ -1475,8 +1261,8 @@ def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
     )
     observations = [
         SurveyObservation(
-            view_id="final_row_object_002",
-            image_path="final_row_object_002_rgb.png",
+            view_id="final_rough_object_002",
+            image_path="final_rough_object_002_rgb.png",
             bbox_xyxy=(810.0, 340.0, 1018.0, 505.0),
             confidence=0.33,
             class_id=1,
@@ -1484,8 +1270,8 @@ def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
             rough_position_world=(0.325, 0.692, 0.03),
         ),
         SurveyObservation(
-            view_id="final_row_object_002",
-            image_path="final_row_object_002_rgb.png",
+            view_id="final_rough_object_002",
+            image_path="final_rough_object_002_rgb.png",
             bbox_xyxy=(902.0, 429.0, 1226.0, 505.0),
             confidence=0.25,
             class_id=1,
@@ -1504,7 +1290,7 @@ def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
 
 def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> None:
     target = FinalTarget(
-        object_id="row_object_004",
+        object_id="rough_object_004",
         target_role="primary",
         source_status="stable",
         position_world=(0.62, 0.47, 0.03),
@@ -1519,8 +1305,8 @@ def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> 
     )
     observations = [
         SurveyObservation(
-            view_id="final_row_object_004",
-            image_path="final_row_object_004_rgb.png",
+            view_id="final_rough_object_004",
+            image_path="final_rough_object_004_rgb.png",
             bbox_xyxy=(784.0, 305.0, 1017.0, 565.0),
             confidence=0.83,
             class_id=2,
@@ -1528,8 +1314,8 @@ def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> 
             rough_position_world=(0.621, 0.471, 0.03),
         ),
         SurveyObservation(
-            view_id="final_row_object_004",
-            image_path="final_row_object_004_rgb.png",
+            view_id="final_rough_object_004",
+            image_path="final_rough_object_004_rgb.png",
             bbox_xyxy=(902.0, 507.0, 1422.0, 1079.0),
             confidence=0.74,
             class_id=2,
@@ -1665,25 +1451,25 @@ def _write_survey_report(tmp_path: Path, layout_path: Path) -> Path:
     return report_path
 
 
-def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
+def _write_rough_report(tmp_path: Path, layout_path: Path) -> Path:
     run_dir = tmp_path / "task1" / "20260705T000100Z_seed12"
-    row_dir = run_dir / "row"
-    report_path = row_dir / "row_report.json"
-    row_image_1 = row_dir / "images" / "row_candidate_001_00_rgb.png"
-    row_image_2 = row_dir / "images" / "row_candidate_002_00_rgb.png"
-    row_image_3 = row_dir / "images" / "row_candidate_003_00_rgb.png"
+    rough_dir = run_dir / "rough"
+    report_path = rough_dir / "rough_report.json"
+    rough_image_1 = rough_dir / "images" / "rough_candidate_001_00_rgb.png"
+    rough_image_2 = rough_dir / "images" / "rough_candidate_002_00_rgb.png"
+    rough_image_3 = rough_dir / "images" / "rough_candidate_003_00_rgb.png"
     payload = {
-        "schema_version": "task1_row_report_v1",
-        "stage": "row",
+        "schema_version": "task1_rough_report_v1",
+        "stage": "rough",
         "status": "success",
         "created_utc": "2026-07-05T00:01:00+00:00",
-        "message": "test row report",
+        "message": "test rough report",
         "source_survey_report_path": str(run_dir / "survey" / "survey_report.json"),
         "source_survey_status": "success",
         "layout_snapshot_path": str(layout_path),
         "task1_run_dir": str(run_dir),
-        "row_dir": str(row_dir),
-        "plan_path": str(row_dir / "row_plan.json"),
+        "rough_dir": str(rough_dir),
+        "plan_path": str(rough_dir / "rough_plan.json"),
         "report_path": str(report_path),
         "scene_model_path": "examples/mujoco/gen3_with_tank.xml",
         "camera_name": "wrist",
@@ -1701,35 +1487,35 @@ def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
         "yolo_profile_path": "configs/yolo/stage3_default.yaml",
         "views": [
             {
-                "view_id": "row_candidate_001_00",
+                "view_id": "rough_candidate_001_00",
                 "status": "success",
-                "rgb_image_path": str(row_image_1),
+                "rgb_image_path": str(rough_image_1),
                 "desired_camera_position_world": [0.30, 0.47, 0.34],
                 "actual_camera_position_world": [0.31, 0.46, 0.34],
             },
             {
-                "view_id": "row_candidate_002_00",
+                "view_id": "rough_candidate_002_00",
                 "status": "success",
-                "rgb_image_path": str(row_image_2),
+                "rgb_image_path": str(rough_image_2),
                 "desired_camera_position_world": [0.70, 0.80, 0.34],
                 "actual_camera_position_world": [0.70, 0.79, 0.34],
             },
             {
-                "view_id": "row_candidate_003_00",
+                "view_id": "rough_candidate_003_00",
                 "status": "success",
-                "rgb_image_path": str(row_image_3),
+                "rgb_image_path": str(rough_image_3),
                 "desired_camera_position_world": [0.52, 0.60, 0.34],
                 "actual_camera_position_world": [0.52, 0.59, 0.34],
             },
         ],
         "stable_objects": [
             {
-                "object_id": "row_object_001",
+                "object_id": "rough_object_001",
                 "source_hypothesis_id": "object_hypothesis_001",
                 "class_name": "notebook",
                 "confidence": 0.91,
                 "support_count": 3,
-                "supporting_row_views": ["row_candidate_001_00"],
+                "supporting_rough_views": ["rough_candidate_001_00"],
                 "position_world": [0.30, 0.35, 0.03],
                 "yaw_rad": 0.1,
                 "T_world_object": [
@@ -1738,18 +1524,18 @@ def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
                     [0.0, 0.0, 1.0, 0.03],
                     [0.0, 0.0, 0.0, 1.0],
                 ],
-                "best_image_path": str(row_image_1),
+                "best_image_path": str(rough_image_1),
                 "best_bbox_xyxy": [100.0, 100.0, 420.0, 420.0],
             }
         ],
         "tentative_objects": [
             {
-                "object_id": "row_tentative_001",
+                "object_id": "rough_tentative_001",
                 "status": "tentative",
                 "class_name": "standard_part",
                 "confidence": 0.41,
                 "support_count": 1,
-                "supporting_row_views": ["row_candidate_002_00"],
+                "supporting_rough_views": ["rough_candidate_002_00"],
                 "position_world": [0.70, 0.65, 0.03],
                 "T_world_object": [
                     [1.0, 0.0, 0.0, 0.70],
@@ -1757,13 +1543,13 @@ def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
                     [0.0, 0.0, 1.0, 0.03],
                     [0.0, 0.0, 0.0, 1.0],
                 ],
-                "best_image_path": str(row_image_2),
+                "best_image_path": str(rough_image_2),
                 "best_bbox_xyxy": [60.0, 60.0, 120.0, 120.0],
             }
         ],
         "ambiguous_objects": [
             {
-                "object_id": "row_ambiguous_001",
+                "object_id": "rough_ambiguous_001",
                 "status": "ambiguous",
                 "position_world": [0.52, 0.45, 0.03],
                 "class_candidates": [
@@ -1771,18 +1557,18 @@ def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
                         "class_name": "drill",
                         "confidence": 0.78,
                         "evidence_score": 1.2,
-                        "supporting_row_views": ["row_candidate_003_00"],
+                        "supporting_rough_views": ["rough_candidate_003_00"],
                         "position_world": [0.52, 0.45, 0.03],
-                        "best_image_path": str(row_image_3),
+                        "best_image_path": str(rough_image_3),
                         "best_bbox_xyxy": [200.0, 200.0, 360.0, 360.0],
                     },
                     {
                         "class_name": "hex_key",
                         "confidence": 0.76,
                         "evidence_score": 1.1,
-                        "supporting_row_views": ["row_candidate_003_00"],
+                        "supporting_rough_views": ["rough_candidate_003_00"],
                         "position_world": [0.53, 0.45, 0.03],
-                        "best_image_path": str(row_image_3),
+                        "best_image_path": str(rough_image_3),
                         "best_bbox_xyxy": [210.0, 205.0, 350.0, 350.0],
                     },
                 ],
@@ -1790,7 +1576,7 @@ def _write_row_report(tmp_path: Path, layout_path: Path) -> Path:
         ],
         "object_selection_summary": {
             "status": "success",
-            "policy_version": "row_object_selection_policy_v2",
+            "policy_version": "rough_object_selection_policy_v2",
             "stable_object_count": 1,
             "tentative_object_count": 1,
             "ambiguous_object_count": 1,
@@ -1873,23 +1659,23 @@ def _observation(
     )
 
 
-def _row_observation(
+def _rough_observation(
     candidate_id: str,
-    row_view_id: str,
+    rough_view_id: str,
     class_name: str,
     confidence: float,
     position_world: tuple[float, float, float],
     *,
     yaw: float | None,
-) -> RowObservation:
+) -> RoughObservation:
     yaw_for_transform = yaw if yaw is not None else 0.0
-    return RowObservation(
-        observation_id=f"{row_view_id}_obs",
+    return RoughObservation(
+        observation_id=f"{rough_view_id}_obs",
         candidate_id=candidate_id,
-        row_view_id=row_view_id,
-        image_path=f"outputs/{row_view_id}.png",
-        depth_path=f"outputs/{row_view_id}.npy",
-        yolo_raw_path=f"outputs/{row_view_id}.json",
+        rough_view_id=rough_view_id,
+        image_path=f"outputs/{rough_view_id}.png",
+        depth_path=f"outputs/{rough_view_id}.npy",
+        yolo_raw_path=f"outputs/{rough_view_id}.json",
         bbox_xyxy=(10.0, 10.0, 120.0, 120.0),
         confidence=confidence,
         class_id=None,
@@ -1917,7 +1703,7 @@ def _hypothesis(
     return {
         "hypothesis_id": hypothesis_id,
         "source_candidate_ids": ["candidate_001"],
-        "supporting_row_views": [f"row_{index:02d}" for index in range(support_count)],
+        "supporting_rough_views": [f"rough_{index:02d}" for index in range(support_count)],
         "support_count": support_count,
         "class_name": class_name,
         "class_votes": {class_name: confidence},
@@ -1947,7 +1733,7 @@ def _unit_workspace() -> dict[str, float]:
     }
 
 
-class _FakeRowValidationBackend:
+class _FakeRoughValidationBackend:
     def __init__(self, outcomes: tuple[str, ...]) -> None:
         self.outcomes = outcomes
         self.calls = 0
@@ -2034,7 +1820,7 @@ class _FakeRowValidationBackend:
         }
 
 
-class _FakeFinalCaptureBackend(_FakeRowValidationBackend):
+class _FakeFinalCaptureBackend(_FakeRoughValidationBackend):
     def __init__(
         self,
         outcomes: tuple[str, ...],

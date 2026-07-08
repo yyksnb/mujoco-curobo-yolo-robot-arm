@@ -31,7 +31,7 @@ def test_zoom_crop_reaches_target_area_ratio() -> None:
 def test_task1_zoom_writes_zoomed_images_from_final_report(tmp_path: Path) -> None:
     image_module = pytest.importorskip("PIL.Image")
     run_dir = tmp_path / "task1" / "20260706T000000Z_seed42"
-    source_image_path = run_dir / "final" / "images" / "final_row_object_001_rgb.png"
+    source_image_path = run_dir / "final" / "images" / "final_rough_object_001_rgb.png"
     source_image_path.parent.mkdir(parents=True, exist_ok=True)
     image_module.new("RGB", (800, 600), color=(20, 20, 20)).save(source_image_path)
     final_report_path = _write_final_report(
@@ -120,8 +120,8 @@ def _write_final_report(run_dir: Path, *, source_image_path: Path, bbox_xyxy: li
         "status": "success",
         "created_utc": "2026-07-06T00:00:00+00:00",
         "message": "test final report",
-        "source_row_report_path": str(run_dir / "row" / "row_report.json"),
-        "source_row_status": "success",
+        "source_rough_report_path": str(run_dir / "rough" / "rough_report.json"),
+        "source_rough_status": "success",
         "layout_snapshot_path": str(run_dir / "layout" / "target_object_poses.json"),
         "task1_run_dir": str(run_dir),
         "capture_dir": str(final_dir),
@@ -130,7 +130,7 @@ def _write_final_report(run_dir: Path, *, source_image_path: Path, bbox_xyxy: li
         "image_size": [800, 600],
         "stable_objects": [
             {
-                "object_id": "row_object_001",
+                "object_id": "rough_object_001",
                 "class_name": "notebook",
                 "confidence": 0.91,
                 "bbox_xyxy": bbox_xyxy,

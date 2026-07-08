@@ -41,7 +41,7 @@ def find_latest_task1_run(output_dir: Path | str = DEFAULT_OUTPUT_DIR) -> Path:
 def build_task1_replay_manifest(
     run_dir: Path | str,
     *,
-    phases: Iterable[str] = ("survey", "row", "final"),
+    phases: Iterable[str] = ("survey", "rough", "final"),
     manifest_path: Path | str | None = None,
 ) -> dict[str, Any]:
     run_dir = Path(run_dir)
@@ -114,7 +114,7 @@ def build_task1_replay_manifest(
 def write_task1_replay_manifest(
     run_dir: Path | str,
     *,
-    phases: Iterable[str] = ("survey", "row", "final"),
+    phases: Iterable[str] = ("survey", "rough", "final"),
     manifest_path: Path | str | None = None,
 ) -> dict[str, Any]:
     manifest = build_task1_replay_manifest(run_dir, phases=phases, manifest_path=manifest_path)
@@ -166,15 +166,15 @@ def replay_manifest_path_for_run(run_dir: Path | str) -> Path:
 def _looks_like_task1_run_dir(path: Path) -> bool:
     return (
         (path / "survey" / "survey_report.json").exists()
-        or (path / "row" / "row_report.json").exists()
+        or (path / "rough" / "rough_report.json").exists()
         or (path / "final" / "final_report.json").exists()
     )
 
 
 def _normalize_phase(phase: str) -> str:
     value = str(phase).strip().lower()
-    if value not in {"survey", "row", "final"}:
-        raise ValueError("phases values must be survey, row, or final")
+    if value not in {"survey", "rough", "final"}:
+        raise ValueError("phases values must be survey, rough, or final")
     return value
 
 
@@ -197,7 +197,7 @@ def _report_path(run_dir: Path, phase: str) -> Path:
 
 
 def _anchor_report(reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    for phase in ("final", "row", "survey"):
+    for phase in ("final", "rough", "survey"):
         report = reports.get(phase)
         if report is not None:
             return report
@@ -229,8 +229,8 @@ def _replay_frames_from_reports(reports: dict[str, dict[str, Any]], *, run_dir: 
     frames: list[dict[str, Any]] = []
     if "survey" in reports:
         frames.extend(_view_frames(reports["survey"], phase="survey", view_role="survey_capture", run_dir=run_dir))
-    if "row" in reports:
-        frames.extend(_view_frames(reports["row"], phase="row", view_role="row_capture", run_dir=run_dir))
+    if "rough" in reports:
+        frames.extend(_view_frames(reports["rough"], phase="rough", view_role="rough_capture", run_dir=run_dir))
     if "final" in reports:
         frames.extend(_final_frames(reports["final"], run_dir=run_dir))
     return frames
@@ -257,7 +257,7 @@ def _view_frames(report: dict[str, Any], *, phase: str, view_role: str, run_dir:
             qpos_source=qpos_source,
             source_report_path=report.get("report_path") or _report_path(run_dir, phase),
         )
-        if phase == "row":
+        if phase == "rough":
             frame["target_id"] = view.get("candidate_id")
             frame["target_position_world"] = view.get("candidate_rough_position_world")
         frames.append(frame)

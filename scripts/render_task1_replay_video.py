@@ -63,8 +63,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--zoom-report", type=Path, default=None, help="Zoom report JSON used for the optional final/zoom photo tail.")
     parser.add_argument(
         "--phases",
-        default="survey,row,final",
-        help="Comma-separated phases to include when building a manifest: survey,row,final.",
+        default="survey,rough,final",
+        help="Comma-separated phases to include when building a manifest: survey,rough,final.",
     )
     parser.add_argument("--output", type=Path, default=None, help="Output MP4 path. Defaults to run_dir/replay/task1_replay_video.mp4.")
     parser.add_argument("--width", type=int, default=DEFAULT_VIDEO_WIDTH, help="Video width in pixels.")

@@ -241,8 +241,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--phases",
-        default="survey,row,final",
-        help="Comma-separated phases to include when building a manifest: survey,row,final.",
+        default="survey,rough,final",
+        help="Comma-separated phases to include when building a manifest: survey,rough,final.",
     )
     parser.add_argument(
         "--view",
@@ -262,19 +262,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--global-lookat",
         type=_parse_float_triplet,
         default=DEFAULT_GLOBAL_LOOKAT,
-        help="Interior global free-camera lookat point as x,y,z in world coordinates for row/final replay.",
+        help="Interior global free-camera lookat point as x,y,z in world coordinates for rough/final replay.",
     )
     parser.add_argument(
         "--global-distance",
         type=float,
         default=DEFAULT_GLOBAL_DISTANCE_M,
-        help="Interior global free-camera orbit distance in meters for row/final replay.",
+        help="Interior global free-camera orbit distance in meters for rough/final replay.",
     )
     parser.add_argument(
         "--global-elevation-deg",
         type=float,
         default=DEFAULT_GLOBAL_ELEVATION_DEG,
-        help="Interior global free-camera elevation angle in degrees for row/final replay.",
+        help="Interior global free-camera elevation angle in degrees for rough/final replay.",
     )
     parser.add_argument(
         "--survey-global-fovy-deg",
@@ -1391,10 +1391,10 @@ def _should_smooth_replay_transition(from_frame: dict[str, Any], to_frame: dict[
         return True, None
     from_phase = str(from_frame.get("phase") or "")
     to_phase = str(to_frame.get("phase") or "")
-    if from_phase == to_phase and from_phase in {"row", "final"}:
+    if from_phase == to_phase and from_phase in {"rough", "final"}:
         return True, "target_group_boundary"
-    if from_phase == "row" and to_phase == "final":
-        return True, "row_to_final_boundary"
+    if from_phase == "rough" and to_phase == "final":
+        return True, "rough_to_final_boundary"
     if from_frame.get("phase") != to_frame.get("phase"):
         return False, "phase_boundary"
     return False, "target_group_boundary"
@@ -1404,9 +1404,9 @@ def _replay_motion_group_key(frame: dict[str, Any]) -> tuple[str, str] | None:
     phase = str(frame.get("phase") or "")
     if phase == "survey":
         return ("survey", "survey")
-    if phase == "row":
+    if phase == "rough":
         target_id = frame.get("target_id")
-        return ("row", str(target_id)) if target_id else None
+        return ("rough", str(target_id)) if target_id else None
     if phase == "final":
         target_id = frame.get("target_id")
         return ("final", str(target_id)) if target_id else None
