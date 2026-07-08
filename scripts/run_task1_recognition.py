@@ -19,6 +19,7 @@ from robot_arm_pipeline.task1.survey import (  # noqa: E402
     DEFAULT_YOLO_TILE_OVERLAP,
     DEFAULT_YOLO_PROFILE,
     SurveyConfig,
+    load_stage0_layout,
     run_task1_survey,
 )
 from robot_arm_pipeline.scene.target_object_layout import (  # noqa: E402
@@ -71,7 +72,7 @@ def _task1_run_name(created_utc: str, seed: int) -> str:
 
 def _write_seeded_layout(args: argparse.Namespace, *, created_utc: str) -> tuple[Path, Path]:
     if args.seed is None:
-        raise SystemExit("Provide either --layout or --seed for the survey stage.")
+        raise SystemExit("Provide --seed to generate a task1 layout.")
     run_dir = args.output_dir / _task1_run_name(created_utc, args.seed)
     layout_path = run_dir / "layout" / "target_object_poses.json"
     if layout_path.exists():
@@ -97,10 +98,26 @@ def _write_seeded_layout(args: argparse.Namespace, *, created_utc: str) -> tuple
     return layout_path, run_dir
 
 
-def _survey_layout(args: argparse.Namespace, *, created_utc: str) -> tuple[Path, Path | None]:
-    if args.layout is None:
-        return _write_seeded_layout(args, created_utc=created_utc)
-    return args.layout, None
+def _run_layout_stage(args: argparse.Namespace, *, created_utc: str | None = None) -> dict:
+    if args.layout is not None:
+        layout = load_stage0_layout(args.layout)
+        return {
+            "status": "success",
+            "message": f"Using existing task1 layout with {len(layout.objects)} objects.",
+            "report_path": str(args.layout),
+            "layout_path": str(args.layout),
+            "task1_run_dir": None,
+        }
+    if created_utc is None:
+        created_utc = datetime.now(timezone.utc).isoformat()
+    layout_path, run_dir = _write_seeded_layout(args, created_utc=created_utc)
+    return {
+        "status": "success",
+        "message": f"Generated task1 layout for seed {args.seed}.",
+        "report_path": str(layout_path),
+        "layout_path": str(layout_path),
+        "task1_run_dir": str(run_dir),
+    }
 
 
 def _run_survey_stage(
@@ -113,7 +130,10 @@ def _run_survey_stage(
     if created_utc is None:
         created_utc = datetime.now(timezone.utc).isoformat()
     if layout_path is None:
-        layout_path, run_dir = _survey_layout(args, created_utc=created_utc)
+        if args.layout is None:
+            raise SystemExit("Provide --layout for the survey stage, or omit --stage to run layout first.")
+        layout_path = args.layout
+        run_dir = None
     config = SurveyConfig(
         scene_model_path=args.scene_model,
         yolo_profile_path=args.yolo_config,
@@ -252,37 +272,48 @@ def _run_zoom_stage(args: argparse.Namespace, *, final_report_path: Path | None 
 
 def _run_full_pipeline(args: argparse.Namespace) -> dict:
     created_utc = datetime.now(timezone.utc).isoformat()
-    layout_path, run_dir = _survey_layout(args, created_utc=created_utc)
+    layout_report = _run_layout_stage(args, created_utc=created_utc)
+    layout_path = Path(str(layout_report["layout_path"]))
+    run_dir_value = layout_report.get("task1_run_dir")
+    run_dir = Path(str(run_dir_value)) if run_dir_value else None
     survey_report = _run_survey_stage(args, layout_path=layout_path, run_dir=run_dir, created_utc=created_utc)
     rough_report = _run_rough_stage(args, survey_report_path=Path(str(survey_report["report_path"])))
     final_report = _run_final_stage(args, rough_report_path=Path(str(rough_report["report_path"])))
     zoom_report = _run_zoom_stage(args, final_report_path=Path(str(final_report["report_path"])))
     reports = {
+        "layout": survey_report.get("layout_snapshot_path") or layout_report["layout_path"],
         "survey": survey_report["report_path"],
         "rough": rough_report["report_path"],
         "final": final_report["report_path"],
         "zoom": zoom_report["report_path"],
     }
-    statuses = [
+    recognition_statuses = [
         str(survey_report.get("status")),
         str(rough_report.get("status")),
         str(final_report.get("status")),
         str(zoom_report.get("status")),
     ]
-    if any(status == "failed" for status in statuses):
+    if any(status == "failed" for status in recognition_statuses):
         status = "failed"
-    elif any(status == "partial" for status in statuses):
+    elif any(status == "partial" for status in recognition_statuses):
         status = "partial"
-    elif all(status == "plan_only" for status in statuses):
+    elif all(status == "plan_only" for status in recognition_statuses):
         status = "plan_only"
-    elif any(status == "plan_only" for status in statuses):
+    elif any(status == "plan_only" for status in recognition_statuses):
         status = "partial"
     else:
         status = "success"
+    stage_statuses = {
+        "layout": str(layout_report.get("status")),
+        "survey": str(survey_report.get("status")),
+        "rough": str(rough_report.get("status")),
+        "final": str(final_report.get("status")),
+        "zoom": str(zoom_report.get("status")),
+    }
     return {
         "status": status,
         "message": "Ran task1 recognition pipeline: "
-        + ", ".join(f"{name}={report_status}" for name, report_status in zip(reports, statuses)),
+        + ", ".join(f"{name}={stage_statuses[name]}" for name in reports),
         "report_path": zoom_report["report_path"],
         "stage_reports": reports,
     }
@@ -292,21 +323,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
         "--stage",
-        choices=("survey", "rough", "final", "zoom"),
+        choices=("layout", "survey", "rough", "final", "zoom"),
         default=None,
-        help="Recognition stage to run. Omit this option to run survey, rough, final, and zoom in sequence.",
+        help="Recognition stage to run. Omit this option to run layout, survey, rough, final, and zoom in sequence.",
     )
     parser.add_argument(
         "--layout",
         type=Path,
         default=None,
-        help="Explicit target object pose layout JSON. When omitted, --seed generates one under the task1 run directory.",
+        help="Explicit target object pose layout JSON. Required for --stage survey; full pipeline may use this instead of --seed.",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=None,
-        help="Seed used to generate a task1 layout when --layout is omitted.",
+        help="Seed used by the layout stage when generating a task1 layout.",
     )
     parser.add_argument(
         "--object-count",
@@ -416,6 +447,8 @@ def main() -> None:
 
     if args.stage is None:
         report = _run_full_pipeline(args)
+    elif args.stage == "layout":
+        report = _run_layout_stage(args)
     elif args.stage == "survey":
         report = _run_survey_stage(args)
     elif args.stage == "rough":

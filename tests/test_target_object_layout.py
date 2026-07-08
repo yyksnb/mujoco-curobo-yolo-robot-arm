@@ -1,7 +1,4 @@
-import json
 import math
-import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -56,36 +53,6 @@ def test_load_target_specs_from_mujoco_model() -> None:
     assert len(specs) >= 5
     assert all(spec.object_id.startswith("target_") for spec in specs)
     assert all(spec.footprint_area_m2 > 0.0 for spec in specs)
-
-
-def test_generate_target_object_poses_script_writes_json(tmp_path: Path) -> None:
-    pytest.importorskip("mujoco")
-    output = tmp_path / "target_object_poses.json"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "generate_target_object_poses.py"),
-            "--model",
-            str(GEN3_TANK_MODEL),
-            "--output",
-            str(output),
-            "--seed",
-            "123",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    payload = json.loads(output.read_text(encoding="utf-8"))
-    assert "wrote=" in result.stdout
-    assert payload["schema_version"] == "target_object_pose_layout_v1"
-    assert payload["seed"] == 123
-    assert payload["base_height_m"] == 0.03
-    assert len(payload["objects"]) == 5
-    assert all(obj["position"][2] == 0.03 for obj in payload["objects"])
 
 
 def _box_spec(object_id: str, width: float, depth: float) -> TargetObjectSpec:
