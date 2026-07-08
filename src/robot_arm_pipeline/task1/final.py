@@ -17,6 +17,7 @@ from robot_arm_pipeline.task1.survey import (
     DEFAULT_IMAGE_WIDTH,
     DEFAULT_OPENING_CLEARANCE_M,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS,
     DEFAULT_SCENE_MODEL,
     DEFAULT_TANK_OPENING_Z_M,
     DEFAULT_YOLO_PROFILE,
@@ -73,6 +74,9 @@ DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX = 8.0
 DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M = DEFAULT_FINAL_TARGET_MATCH_RADIUS_M
 DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE = DEFAULT_FINAL_YOLO_CONFIDENCE
 DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT = 5
+DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS = True
+DEFAULT_SAVE_FINAL_DEBUG_TRACE = False
+DEFAULT_FINAL_FAILURE_SAMPLE_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,10 @@ class FinalConfig:
     depth_component_split_distance_m: float = DEFAULT_DEPTH_COMPONENT_SPLIT_DISTANCE_M
     bbox_fragment_min_overlap_ratio: float = DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO
     selection_border_margin_px: float = DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX
+    save_filtered_annotations: bool = DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS
+    save_raw_yolo_annotations: bool = DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS
+    save_debug_trace: bool = DEFAULT_SAVE_FINAL_DEBUG_TRACE
+    failure_sample_limit: int = DEFAULT_FINAL_FAILURE_SAMPLE_LIMIT
     run_yolo: bool = True
     plan_only: bool = False
     strict_yolo: bool = False
@@ -227,6 +235,8 @@ class FinalConfig:
             raise ValueError("bbox_fragment_min_overlap_ratio must be between 0 and 1")
         if self.selection_border_margin_px < 0.0:
             raise ValueError("selection_border_margin_px must be non-negative")
+        if self.failure_sample_limit < 0:
+            raise ValueError("failure_sample_limit must be non-negative")
 
     def capture_config(self) -> SurveyConfig:
         return SurveyConfig(
@@ -251,6 +261,7 @@ class FinalConfig:
             depth_sample_stride_px=self.depth_sample_stride_px,
             depth_component_min_pixels=self.depth_component_min_pixels,
             depth_component_split_distance_m=self.depth_component_split_distance_m,
+            save_raw_yolo_annotations=self.save_raw_yolo_annotations,
             save_depth_arrays=True,
             run_yolo=self.run_yolo,
             plan_only=self.plan_only,
@@ -472,9 +483,11 @@ def run_task1_final(
     depth_dir = capture_dir / "depth"
     yolo_dir = capture_dir / "yolo_raw"
     annotated_dir = capture_dir / "annotated"
+    raw_annotated_dir = capture_dir / "raw_annotated"
     tiles_dir = capture_dir / "tiles"
     plan_path = capture_dir / "final_plan.json"
     report_path = capture_dir / "final_report.json"
+    debug_trace_path = capture_dir / "final_debug_trace.json"
     plan_payload = _plan_payload(
         created_utc=created_utc,
         rough_report=rough_report,
@@ -500,8 +513,19 @@ def run_task1_final(
             planned_captures=planned_captures,
             object_captures=[],
         )
-        _write_json(plan_path, plan_payload)
-        _write_json(report_path, report)
+        _write_final_outputs(
+            plan_path=plan_path,
+            report_path=report_path,
+            debug_trace_path=debug_trace_path,
+            plan_payload=plan_payload,
+            report=report,
+            created_utc=created_utc,
+            rough_report=rough_report,
+            config=config,
+            capture_dir=capture_dir,
+            planned_captures=planned_captures,
+            object_captures=[],
+        )
         return report
 
     if config.plan_only:
@@ -522,8 +546,19 @@ def run_task1_final(
             planned_captures=planned_captures,
             object_captures=object_captures,
         )
-        _write_json(plan_path, plan_payload)
-        _write_json(report_path, report)
+        _write_final_outputs(
+            plan_path=plan_path,
+            report_path=report_path,
+            debug_trace_path=debug_trace_path,
+            plan_payload=plan_payload,
+            report=report,
+            created_utc=created_utc,
+            rough_report=rough_report,
+            config=config,
+            capture_dir=capture_dir,
+            planned_captures=planned_captures,
+            object_captures=object_captures,
+        )
         return report
 
     if config.run_yolo and detector is None:
@@ -541,8 +576,19 @@ def run_task1_final(
             planned_captures=planned_captures,
             object_captures=object_captures,
         )
-        _write_json(plan_path, plan_payload)
-        _write_json(report_path, report)
+        _write_final_outputs(
+            plan_path=plan_path,
+            report_path=report_path,
+            debug_trace_path=debug_trace_path,
+            plan_payload=plan_payload,
+            report=report,
+            created_utc=created_utc,
+            rough_report=rough_report,
+            config=config,
+            capture_dir=capture_dir,
+            planned_captures=planned_captures,
+            object_captures=object_captures,
+        )
         return report
 
     layout = load_stage0_layout(rough_report.layout_snapshot_path)
@@ -567,6 +613,7 @@ def run_task1_final(
                 depth_dir=depth_dir,
                 yolo_dir=yolo_dir,
                 annotated_dir=annotated_dir,
+                raw_annotated_dir=raw_annotated_dir,
                 tiles_dir=tiles_dir,
                 config=config,
             )
@@ -586,6 +633,7 @@ def run_task1_final(
                 depth_dir=depth_dir,
                 yolo_dir=yolo_dir,
                 annotated_dir=annotated_dir,
+                raw_annotated_dir=raw_annotated_dir,
                 tiles_dir=tiles_dir,
                 config=config,
             )
@@ -604,8 +652,19 @@ def run_task1_final(
             planned_captures=planned_captures,
             object_captures=object_captures,
         )
-        _write_json(plan_path, plan_payload)
-        _write_json(report_path, report)
+        _write_final_outputs(
+            plan_path=plan_path,
+            report_path=report_path,
+            debug_trace_path=debug_trace_path,
+            plan_payload=plan_payload,
+            report=report,
+            created_utc=created_utc,
+            rough_report=rough_report,
+            config=config,
+            capture_dir=capture_dir,
+            planned_captures=planned_captures,
+            object_captures=object_captures,
+        )
         return report
     finally:
         backend.close()
@@ -625,8 +684,19 @@ def run_task1_final(
         planned_captures=planned_captures,
         object_captures=object_captures,
     )
-    _write_json(plan_path, plan_payload)
-    _write_json(report_path, report)
+    _write_final_outputs(
+        plan_path=plan_path,
+        report_path=report_path,
+        debug_trace_path=debug_trace_path,
+        plan_payload=plan_payload,
+        report=report,
+        created_utc=created_utc,
+        rough_report=rough_report,
+        config=config,
+        capture_dir=capture_dir,
+        planned_captures=planned_captures,
+        object_captures=object_captures,
+    )
     return report
 
 
@@ -696,6 +766,7 @@ def _capture_first_reachable_candidate(
     depth_dir: Path,
     yolo_dir: Path,
     annotated_dir: Path,
+    raw_annotated_dir: Path,
     tiles_dir: Path,
     config: FinalConfig,
 ) -> dict[str, Any]:
@@ -755,6 +826,7 @@ def _capture_first_reachable_candidate(
             depth_dir=depth_dir,
             yolo_dir=yolo_dir,
             annotated_dir=annotated_dir,
+            raw_annotated_dir=raw_annotated_dir,
             tiles_dir=tiles_dir,
         )
         attempt = _candidate_attempt_payload(
@@ -778,6 +850,12 @@ def _capture_first_reachable_candidate(
             observations=observations,
             config=config,
         )
+        if config.save_filtered_annotations:
+            _write_final_filtered_annotation(
+                capture_result=capture_result,
+                annotated_dir=annotated_dir,
+                config=config,
+            )
         attempt["capture_status"] = capture_result["status"]
         attempt["recognition"] = capture_result["recognition"]
         if _capture_result_satisfies_target(capture_result):
@@ -1493,6 +1571,139 @@ def _object_capture_result(
     }
 
 
+def _write_final_filtered_annotation(
+    *,
+    capture_result: dict[str, Any],
+    annotated_dir: Path,
+    config: FinalConfig,
+) -> None:
+    view_result = capture_result.get("view") if isinstance(capture_result.get("view"), dict) else {}
+    view_id = str(view_result.get("view_id") or "")
+    rgb_image_path = view_result.get("rgb_image_path")
+    if not view_id or not rgb_image_path:
+        return
+    detections = _final_filtered_annotation_detections(capture_result)
+    annotated_path, annotation_error = _write_final_annotated_image(
+        rgb_path=Path(str(rgb_image_path)),
+        output_path=annotated_dir / f"{view_id}_yolo.png",
+        detections=detections,
+        image_width=config.image_width,
+        image_height=config.image_height,
+    )
+    annotated_path_text = str(annotated_path) if annotated_path is not None else None
+    view_result["annotated_image_path"] = annotated_path_text
+    view_result["annotation"] = {
+        "source": "final_selected_observation",
+        "included_statuses": ["confirmed", "follow_up_observed", "quality_limited", "class_conflict", "unconfirmed"],
+        "detections": len(detections),
+        "status": "written" if annotated_path is not None else "unavailable",
+        "error": annotation_error,
+    }
+    capture_result["annotated_image_path"] = annotated_path_text
+
+
+def _final_filtered_annotation_detections(capture_result: dict[str, Any]) -> list[dict[str, Any]]:
+    best = capture_result.get("best_observation")
+    if not isinstance(best, dict):
+        return []
+    bbox = _optional_bbox(best.get("bbox_xyxy"))
+    if bbox is None:
+        return []
+    target = capture_result.get("target") if isinstance(capture_result.get("target"), dict) else {}
+    recognition = capture_result.get("recognition") if isinstance(capture_result.get("recognition"), dict) else {}
+    object_id = str(target.get("object_id") or "final_object")
+    status = str(capture_result.get("status") or "observed")
+    class_name = str(recognition.get("detected_class_name") or best.get("class_name") or target.get("class_name") or "object")
+    confidence = _float_or_zero(recognition.get("confidence") if recognition.get("confidence") is not None else best.get("confidence"))
+    label_status = "" if status == "confirmed" else f" {status}"
+    return [
+        {
+            "bbox_xyxy": [_round(value) for value in bbox],
+            "confidence": confidence,
+            "class_id": best.get("class_id"),
+            "class_name": class_name,
+            "annotation_label": f"{object_id}{label_status} {class_name} {confidence:.2f}",
+            "source": "final_selected_observation",
+            "source_status": status,
+            "target_xy_distance_m": recognition.get("target_xy_distance_m"),
+            "bbox_quality": recognition.get("bbox_quality"),
+        }
+    ]
+
+
+def _write_final_annotated_image(
+    *,
+    rgb_path: Path,
+    output_path: Path,
+    detections: list[dict[str, Any]],
+    image_width: int,
+    image_height: int,
+) -> tuple[Path | None, str | None]:
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return (None, "pillow_not_available")
+
+    try:
+        image = Image.open(rgb_path).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        font = _final_annotation_font(ImageFont)
+        for index, detection in enumerate(detections):
+            bbox = _optional_bbox(detection.get("bbox_xyxy"))
+            if bbox is None:
+                continue
+            left, top, right, bottom = _bbox_pixel_bounds(
+                bbox,
+                image_width=image_width,
+                image_height=image_height,
+            )
+            color = _final_annotation_box_color(index)
+            draw.rectangle((left, top, right, bottom), outline=color, width=4)
+            label = str(detection.get("annotation_label") or "").strip()
+            if not label:
+                continue
+            text_bbox = draw.textbbox((left, top), label, font=font)
+            text_height = text_bbox[3] - text_bbox[1]
+            label_top = max(0.0, float(top) - text_height - 6.0)
+            label_bbox = (
+                float(left),
+                label_top,
+                float(left) + text_bbox[2] - text_bbox[0] + 8.0,
+                label_top + text_height + 6.0,
+            )
+            draw.rectangle(label_bbox, fill=color)
+            draw.text((float(left) + 4.0, label_top + 3.0), label, fill=(0, 0, 0), font=font)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path)
+        return (output_path, None)
+    except Exception as exc:
+        return (None, f"{type(exc).__name__}: {exc}")
+
+
+def _final_annotation_font(image_font_module: Any) -> Any:
+    for font_path in (
+        Path("/home/yoda/.local/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+    ):
+        if font_path.exists():
+            return image_font_module.truetype(str(font_path), size=24)
+    return image_font_module.load_default()
+
+
+def _final_annotation_box_color(index: int) -> tuple[int, int, int]:
+    colors = (
+        (52, 199, 89),
+        (0, 122, 255),
+        (255, 204, 0),
+        (175, 82, 222),
+        (255, 149, 0),
+    )
+    return colors[index % len(colors)]
+
+
 def _all_candidates_failed_capture_result(
     planned: FinalPlannedCapture,
     candidate_attempts: list[dict[str, Any]],
@@ -1522,47 +1733,7 @@ def _all_candidates_failed_capture_result(
         "yolo_raw_path": None,
         "notes": [
             "No planned final-view candidate passed both entry validation and final pose validation.",
-            "Each candidate attempt is recorded in view_candidate_attempts.",
-        ],
-    }
-
-
-def _entry_failed_capture_result(
-    planned: FinalPlannedCapture,
-    entry_results: list[dict[str, Any]],
-    failed_entry: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "target": planned.target.to_dict(),
-        "status": "entry_validation_failed",
-        "source_status": planned.target.source_status,
-        "target_role": planned.target.target_role,
-        "selected_view_candidate": None,
-        "view_candidate_attempts": [
-            _candidate_attempt_payload(
-                candidate=planned.view_candidates[0],
-                entry_results=entry_results,
-                view_result=_planned_view_result(planned.view),
-                final_pose_validation=None,
-                status="entry_validation_failed",
-                message=str(failed_entry.get("message") or "entry validation failed"),
-            )
-        ],
-        "view": _planned_view_result(planned.view),
-        "entry_validation": entry_results,
-        "matched_observations": [],
-        "best_observation": None,
-        "recognition": {
-            "status": "not_run",
-            "reason": "entry_validation_failed",
-        },
-        "final_image_path": None,
-        "depth_path": None,
-        "annotated_image_path": None,
-        "yolo_raw_path": None,
-        "notes": [
-            "The top-opening entry waypoints did not all pass whole-arm IK and collision checks, so the final photo was not rendered.",
-            f"First failed entry sample: {failed_entry.get('view_id')}.",
+            "Formal reports keep an attempt summary and limited failure samples; enable save_debug_trace for the full candidate attempt trace.",
         ],
     }
 
@@ -1575,7 +1746,7 @@ def _planned_capture_result(planned: FinalPlannedCapture) -> dict[str, Any]:
         "target_role": planned.target.target_role,
         "selected_view_candidate": None,
         "view_candidate_attempts": [],
-        "view_candidates": [candidate.to_dict() for candidate in planned.view_candidates],
+        "view_candidate_summary": _planned_view_candidate_summary(planned),
         "view": _planned_view_result(planned.view),
         "entry_validation": [_planned_view_result(view) for view in planned.entry_views],
         "matched_observations": [],
@@ -1600,7 +1771,7 @@ def _skipped_follow_up_capture_result(planned: FinalPlannedCapture) -> dict[str,
         "target_role": planned.target.target_role,
         "selected_view_candidate": None,
         "view_candidate_attempts": [],
-        "view_candidates": [candidate.to_dict() for candidate in planned.view_candidates],
+        "view_candidate_summary": _planned_view_candidate_summary(planned),
         "view": _planned_view_result(planned.view),
         "entry_validation": [],
         "matched_observations": [],
@@ -2288,6 +2459,246 @@ def _final_reachable_planning_summary(
     }
 
 
+def _write_final_outputs(
+    *,
+    plan_path: Path,
+    report_path: Path,
+    debug_trace_path: Path,
+    plan_payload: dict[str, Any],
+    report: dict[str, Any],
+    created_utc: str,
+    rough_report: Task1RoughReport,
+    config: FinalConfig,
+    capture_dir: Path,
+    planned_captures: tuple[FinalPlannedCapture, ...],
+    object_captures: list[dict[str, Any]],
+) -> None:
+    _write_json(plan_path, plan_payload)
+    _write_json(report_path, report)
+    if config.save_debug_trace:
+        _write_json(
+            debug_trace_path,
+            _debug_trace_payload(
+                created_utc=created_utc,
+                rough_report=rough_report,
+                config=config,
+                capture_dir=capture_dir,
+                plan_path=plan_path,
+                report_path=report_path,
+                debug_trace_path=debug_trace_path,
+                planned_captures=planned_captures,
+                object_captures=object_captures,
+            ),
+        )
+
+
+def _debug_trace_payload(
+    *,
+    created_utc: str,
+    rough_report: Task1RoughReport,
+    config: FinalConfig,
+    capture_dir: Path,
+    plan_path: Path,
+    report_path: Path,
+    debug_trace_path: Path,
+    planned_captures: tuple[FinalPlannedCapture, ...],
+    object_captures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "task1_final_debug_trace_v1",
+        "stage": "final",
+        "artifact_role": "debug_trace",
+        "created_utc": created_utc,
+        "source_rough_report_path": str(rough_report.path),
+        "source_rough_status": rough_report.status,
+        "task1_run_dir": str(rough_report.task1_run_dir),
+        "capture_dir": str(capture_dir),
+        "plan_path": str(plan_path),
+        "report_path": str(report_path),
+        "debug_trace_path": str(debug_trace_path),
+        "save_debug_trace": config.save_debug_trace,
+        "planned_captures": [planned.to_dict() for planned in planned_captures],
+        "object_captures": object_captures,
+        "notes": [
+            "This file contains the complete final candidate and attempt trace.",
+            "Formal final_plan.json and final_report.json intentionally keep only selected candidates, summaries, and limited failure samples.",
+        ],
+    }
+
+
+def _debug_trace_policy_payload(config: FinalConfig, *, capture_dir: Path) -> dict[str, Any]:
+    return {
+        "save_debug_trace": config.save_debug_trace,
+        "debug_trace_path": str(capture_dir / "final_debug_trace.json") if config.save_debug_trace else None,
+        "formal_outputs_include_full_candidate_trace": False,
+        "formal_failure_sample_limit": config.failure_sample_limit,
+        "full_trace_schema_version": "task1_final_debug_trace_v1",
+    }
+
+
+def _planned_capture_public_payload(planned: FinalPlannedCapture) -> dict[str, Any]:
+    return {
+        "target": planned.target.to_dict(),
+        "view": _planned_view_result(planned.view),
+        "entry_views": [_planned_view_result(view) for view in planned.entry_views],
+        "approach_angle_rad": _round(planned.approach_angle_rad),
+        "direction_source": planned.direction_source,
+        "direction_adjusted": planned.direction_adjusted,
+        "view_candidate_summary": _planned_view_candidate_summary(planned),
+    }
+
+
+def _planned_view_candidate_summary(planned: FinalPlannedCapture) -> dict[str, Any]:
+    first_candidate = planned.view_candidates[0] if planned.view_candidates else None
+    return {
+        "candidate_count": len(planned.view_candidates),
+        "evaluated_camera_position_count": len(planned.evaluated_camera_positions),
+        "entry_view_count": len(planned.entry_views),
+        "first_candidate": _view_candidate_compact_payload(first_candidate) if first_candidate is not None else None,
+        "full_candidate_trace_in_formal_output": False,
+    }
+
+
+def _object_capture_public_payload(capture: dict[str, Any], *, config: FinalConfig) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in (
+        "target",
+        "status",
+        "source_status",
+        "target_role",
+        "selected_view_candidate",
+        "view_candidate_summary",
+        "view",
+        "entry_validation",
+        "matched_observations",
+        "best_observation",
+        "recognition",
+        "final_image_path",
+        "depth_path",
+        "annotated_image_path",
+        "yolo_raw_path",
+        "notes",
+    ):
+        if key in capture:
+            payload[key] = capture[key]
+    payload["view_candidate_attempt_summary"] = _view_candidate_attempt_summary(
+        capture.get("view_candidate_attempts"),
+        sample_limit=config.failure_sample_limit,
+    )
+    return payload
+
+
+def _view_candidate_attempt_summary(value: Any, *, sample_limit: int) -> dict[str, Any]:
+    attempts = value if isinstance(value, list) else []
+    status_counts: dict[str, int] = {}
+    failure_attempts: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        status = str(attempt.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status != "captured":
+            failure_attempts.append(attempt)
+    samples = [_attempt_failure_sample_payload(attempt) for attempt in failure_attempts[:sample_limit]]
+    return {
+        "attempt_count": len(attempts),
+        "status_counts": status_counts,
+        "failure_sample_limit": sample_limit,
+        "failure_sample_count": len(samples),
+        "omitted_failure_attempt_count": max(0, len(failure_attempts) - len(samples)),
+        "failure_samples": samples,
+        "full_attempt_trace_in_formal_output": False,
+    }
+
+
+def _attempt_failure_sample_payload(attempt: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": attempt.get("status"),
+        "message": attempt.get("message"),
+        "candidate": _view_candidate_compact_payload(attempt.get("candidate")),
+        "entry_validation": [
+            _validation_compact_payload(entry)
+            for entry in attempt.get("entry_validation", [])
+            if isinstance(entry, dict)
+        ],
+    }
+    final_pose_validation = attempt.get("final_pose_validation")
+    if isinstance(final_pose_validation, dict):
+        payload["final_pose_validation"] = _validation_compact_payload(final_pose_validation)
+    recognition = attempt.get("recognition")
+    if isinstance(recognition, dict):
+        payload["recognition"] = {
+            "status": recognition.get("status"),
+            "reason": recognition.get("reason"),
+            "bbox_quality": recognition.get("bbox_quality"),
+        }
+    return payload
+
+
+def _view_candidate_compact_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, FinalViewCandidate):
+        return {
+            "candidate_id": value.candidate_id,
+            "approach_angle_rad": _round(value.approach_angle_rad),
+            "angle_source": value.angle_source,
+            "angle_offset_deg": _round(value.angle_offset_deg),
+            "standoff_m": _round(value.standoff_m),
+            "standoff_multiplier": _round(value.standoff_multiplier),
+            "camera_z_offset_m": _round(value.camera_z_offset_m),
+            "roll_offset_deg": _round(value.roll_offset_deg),
+            "entry_portal_mode": value.entry_portal_mode,
+            "candidate_source": value.candidate_source,
+            "direction_adjusted": value.direction_adjusted,
+            "camera_position_world": [_round(component) for component in value.camera_position_world],
+            "view_id": value.view.view_id,
+            "entry_view_count": len(value.entry_views),
+        }
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "candidate_id": value.get("candidate_id"),
+        "approach_angle_rad": value.get("approach_angle_rad"),
+        "angle_source": value.get("angle_source"),
+        "angle_offset_deg": value.get("angle_offset_deg"),
+        "standoff_m": value.get("standoff_m"),
+        "standoff_multiplier": value.get("standoff_multiplier"),
+        "camera_z_offset_m": value.get("camera_z_offset_m"),
+        "roll_offset_deg": value.get("roll_offset_deg"),
+        "entry_portal_mode": value.get("entry_portal_mode"),
+        "candidate_source": value.get("candidate_source"),
+        "direction_adjusted": value.get("direction_adjusted"),
+        "camera_position_world": value.get("camera_position_world"),
+        "view_id": (value.get("view") if isinstance(value.get("view"), dict) else {}).get("view_id"),
+        "entry_view_count": len(value.get("entry_views", [])) if isinstance(value.get("entry_views"), list) else None,
+    }
+
+
+def _validation_compact_payload(validation: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "view_id": validation.get("view_id"),
+        "status": validation.get("status"),
+        "message": validation.get("message"),
+        "validation_role": validation.get("validation_role"),
+        "view_candidate_id": validation.get("view_candidate_id"),
+    }
+    ik = validation.get("ik")
+    if isinstance(ik, dict):
+        payload["ik"] = {
+            "success": ik.get("success"),
+            "position_error_m": ik.get("position_error_m"),
+            "orientation_error_rad": ik.get("orientation_error_rad"),
+            "iterations": ik.get("iterations"),
+        }
+    collision = validation.get("collision")
+    if isinstance(collision, dict):
+        payload["collision"] = {
+            "collision_free": collision.get("collision_free"),
+            "contact_count": collision.get("contact_count"),
+            "robot_tank_contact_count": collision.get("robot_tank_contact_count"),
+        }
+    return payload
+
+
 def _accumulate_final_validation_rejection(
     counts: dict[str, int],
     validation: dict[str, Any],
@@ -2381,7 +2792,8 @@ def _plan_payload(
             "quality_source": "rough_report.object_selection_summary",
             "fixed_object_count_assumption": False,
         },
-        "planned_captures": [planned.to_dict() for planned in planned_captures],
+        "debug_trace_policy": _debug_trace_policy_payload(config, capture_dir=capture_dir),
+        "planned_captures": [_planned_capture_public_payload(planned) for planned in planned_captures],
     }
 
 
@@ -2429,6 +2841,20 @@ def _report_payload(
         "run_yolo": config.run_yolo,
         "yolo_profile_path": str(config.yolo_profile_path),
         "final_config": _config_payload(config),
+        "annotation_policy": {
+            "save_filtered_annotations": config.save_filtered_annotations,
+            "filtered_annotation_dir": str(capture_dir / "annotated"),
+            "filtered_annotation_source": "final_selected_observation",
+            "filtered_annotation_included_statuses": [
+                "confirmed",
+                "follow_up_observed",
+                "quality_limited",
+                "class_conflict",
+                "unconfirmed",
+            ],
+            "save_raw_yolo_annotations": config.save_raw_yolo_annotations,
+            "raw_yolo_annotation_dir": str(capture_dir / "raw_annotated"),
+        },
         "primary_objects": primary_targets,
         "follow_up_targets": follow_up_targets,
         "stable_objects": stable_selection["stable_objects"],
@@ -2437,13 +2863,18 @@ def _report_payload(
         "quality": rough_report.object_selection_summary,
         "object_selection_summary": rough_report.object_selection_summary,
         "final_reachable_planning_summary": reachable_planning_summary,
-        "planned_captures": [planned.to_dict() for planned in planned_captures],
-        "object_captures": object_captures,
+        "debug_trace_policy": _debug_trace_policy_payload(config, capture_dir=capture_dir),
+        "planned_captures": [_planned_capture_public_payload(planned) for planned in planned_captures],
+        "object_captures": [
+            _object_capture_public_payload(capture, config=config)
+            for capture in object_captures
+        ],
         "notes": [
             "Stable rough objects are consumed as primary final capture targets.",
             "Tentative and ambiguous rough objects are consumed as explicit follow-up targets only when the configured desired stable count still needs rescue candidates.",
             "Each target keeps its own capture status; unconfirmed and class-conflict results are kept out of stable_objects.",
             "Final capture views are rendered only from fixed qpos values produced by successful whole-arm IK and collision validation.",
+            "Formal outputs keep selected candidates, summaries, and limited failure samples; full candidate and attempt traces are written only when save_debug_trace is enabled.",
             "The report intentionally supports any number of rough targets.",
         ],
     }
@@ -2714,15 +3145,6 @@ def _dot(left: tuple[float, float, float], right: tuple[float, float, float]) ->
     return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 
 
-def _unique_angles(values: tuple[float, ...]) -> tuple[float, ...]:
-    unique: list[float] = []
-    for value in values:
-        normalized = _normalize_angle(value)
-        if all(abs(_normalize_angle(normalized - existing)) > 1e-6 for existing in unique):
-            unique.append(normalized)
-    return tuple(unique)
-
-
 def _unique_angle_records(records: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     unique: list[dict[str, Any]] = []
     for record in records:
@@ -2814,6 +3236,20 @@ def _bbox_border_margin_px(
 ) -> float:
     x1, y1, x2, y2 = bbox_xyxy
     return min(x1, y1, float(image_width) - x2, float(image_height) - y2)
+
+
+def _bbox_pixel_bounds(
+    bbox_xyxy: tuple[float, float, float, float],
+    *,
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox_xyxy
+    left = max(0, min(image_width - 1, int(math.floor(min(x1, x2)))))
+    right = max(left + 1, min(image_width, int(math.ceil(max(x1, x2)))))
+    top = max(0, min(image_height - 1, int(math.floor(min(y1, y2)))))
+    bottom = max(top + 1, min(image_height, int(math.ceil(max(y1, y2)))))
+    return (left, top, right, bottom)
 
 
 def _round(value: float | None) -> float:

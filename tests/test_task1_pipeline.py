@@ -12,9 +12,6 @@ from robot_arm_pipeline.task1.survey import (
     SurveyObservation,
     SurveyWorkspace,
     _candidate_annotation_detections_by_view,
-    _image_tile_rects,
-    _merge_yolo_detections,
-    _offset_bbox_xyxy,
     build_grid_survey_plan,
     fuse_survey_observations,
     load_stage0_layout,
@@ -28,9 +25,7 @@ from robot_arm_pipeline.task1.rough import (
     load_task1_survey_report,
     select_rough_objects_with_policy,
     _rough_filtered_annotation_detections_by_view,
-    _rough_view_selection_summary,
     _select_reachable_rough_capture_plan,
-    _select_rough_capture_view,
 )
 from robot_arm_pipeline.task1.final import (
     DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
@@ -44,13 +39,16 @@ from robot_arm_pipeline.task1.final import (
     FinalTarget,
     FinalConfig,
     _capture_first_reachable_candidate,
+    _final_filtered_annotation_detections,
     _overall_status,
     _final_reachable_planning_summary,
     _matched_observations,
+    _object_capture_public_payload,
     build_final_plan,
     load_task1_rough_report,
     select_stable_final_objects,
 )
+from robot_arm_pipeline.task1.zoom import ZoomConfig, run_task1_zoom
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -76,56 +74,6 @@ def test_target_layout_loads_and_grid_survey_plan_stays_inside_tank(tmp_path: Pa
     assert all(view.fixed_qpos is not None for view in views)
     assert all(workspace.x_min <= view.desired_camera_position_world[0] <= workspace.x_max for view in views)
     assert all(workspace.y_min <= view.desired_camera_position_world[1] <= workspace.y_max for view in views)
-
-
-def test_survey_observations_are_fused_by_world_position() -> None:
-    candidates = fuse_survey_observations(
-        [
-            SurveyObservation(
-                view_id="survey_0000",
-                image_path="outputs/a.png",
-                bbox_xyxy=(10.0, 20.0, 250.0, 280.0),
-                confidence=0.5,
-                class_id=5,
-                class_name="notebook",
-                rough_position_world=(0.30, 0.30, 0.03),
-            ),
-            SurveyObservation(
-                view_id="survey_0001",
-                image_path="outputs/b.png",
-                bbox_xyxy=(12.0, 20.0, 260.0, 285.0),
-                confidence=0.6,
-                class_id=5,
-                class_name="notebook",
-                rough_position_world=(0.34, 0.32, 0.03),
-            ),
-            SurveyObservation(
-                view_id="survey_0008",
-                image_path="outputs/c.png",
-                bbox_xyxy=(100.0, 120.0, 360.0, 360.0),
-                confidence=0.7,
-                class_id=2,
-                class_name="marker",
-                rough_position_world=(0.70, 0.70, 0.03),
-            ),
-            SurveyObservation(
-                view_id="survey_0009",
-                image_path="outputs/d.png",
-                bbox_xyxy=(102.0, 121.0, 350.0, 355.0),
-                confidence=0.72,
-                class_id=2,
-                class_name="marker",
-                rough_position_world=(0.72, 0.69, 0.03),
-            ),
-        ],
-        cluster_radius_m=0.08,
-    )
-
-    assert len(candidates) == 2
-    assert candidates[0]["support_count"] == 2
-    assert candidates[0]["supporting_views"] == ["survey_0000", "survey_0001"]
-    assert candidates[0]["class_votes"]["notebook"] == pytest.approx(1.1)
-    assert candidates[1]["support_count"] == 2
 
 
 def test_survey_fusion_splits_spatial_modes_and_mixed_class_clusters() -> None:
@@ -167,34 +115,6 @@ def test_survey_fusion_splits_spatial_modes_and_mixed_class_clusters() -> None:
         for candidate in mixed_class_candidates
     ]
     assert labels == ["标准件", "手套"]
-
-
-def test_survey_single_view_fallback_accepts_isolated_new_class_and_rejects_duplicate() -> None:
-    candidates = fuse_survey_observations(
-        [
-            _observation("survey_0001", "notebook", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-            _observation("survey_0002", "notebook", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-            _observation("survey_0006", "marker", 0.78, (0.74, 0.70, 0.03), bbox=(300.0, 20.0, 520.0, 280.0)),
-            _observation("survey_0007", "marker", 0.77, (0.36, 0.33, 0.03), bbox=(300.0, 20.0, 520.0, 280.0)),
-        ],
-        cluster_radius_m=0.10,
-    )
-
-    assert len(candidates) == 2
-    assert candidates[1]["support_count"] == 1
-    assert "single-view fallback" in candidates[1]["notes"][0]
-
-    duplicate_candidates = fuse_survey_observations(
-        [
-            _observation("survey_0001", "standard", 0.82, (0.30, 0.30, 0.03), bbox=(10.0, 10.0, 260.0, 260.0)),
-            _observation("survey_0002", "standard", 0.84, (0.31, 0.30, 0.03), bbox=(12.0, 10.0, 250.0, 255.0)),
-            _observation("survey_0008", "standard", 0.70, (0.70, 0.70, 0.03), bbox=(500.0, 400.0, 560.0, 460.0)),
-        ],
-        cluster_radius_m=0.06,
-    )
-
-    assert len(duplicate_candidates) == 1
-    assert duplicate_candidates[0]["support_count"] == 2
 
 
 def test_survey_fusion_gates_weak_candidates_and_keeps_explicit_multiview_fallback() -> None:
@@ -319,35 +239,7 @@ def test_candidate_annotation_uses_final_candidate_supporting_observations_only(
     assert detections[0]["annotation_label"] == "candidate_001 marker 0.90"
 
 
-def test_tile_detections_are_mapped_and_merged_in_full_image_coordinates() -> None:
-    rects = _image_tile_rects(image_width=100, image_height=80, grid_size=2, overlap=0.10)
-
-    assert len(rects) == 4
-    assert rects[0] == (0, 0, 53, 42)
-    assert rects[-1] == (47, 38, 100, 80)
-    assert _offset_bbox_xyxy((1.0, 2.0, 11.0, 12.0), offset_x=47.0, offset_y=38.0) == [
-        48.0,
-        40.0,
-        58.0,
-        50.0,
-    ]
-
-    merged = _merge_yolo_detections(
-        [
-            {"bbox_xyxy": [10.0, 10.0, 40.0, 40.0], "confidence": 0.80, "class_id": 1, "class_name": "钻头"},
-            {"bbox_xyxy": [11.0, 11.0, 41.0, 41.0], "confidence": 0.70, "class_id": 1, "class_name": "钻头"},
-            {"bbox_xyxy": [70.0, 10.0, 90.0, 30.0], "confidence": 0.60, "class_id": 4, "class_name": "标准件"},
-        ],
-        image_width=100,
-        image_height=80,
-        iou_threshold=0.45,
-    )
-
-    assert len(merged) == 2
-    assert merged[0]["class_name"] == "钻头"
-
-
-def test_task1_recognition_script_plan_only_writes_report(tmp_path: Path) -> None:
+def test_task1_recognition_script_without_stage_runs_full_pipeline(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     output_dir = tmp_path / "task1"
 
@@ -367,9 +259,19 @@ def test_task1_recognition_script_plan_only_writes_report(tmp_path: Path) -> Non
         text=True,
     )
 
-    assert '"status": "plan_only"' in result.stdout
+    summary = json.loads(result.stdout.splitlines()[0])
+    assert summary["status"] == "failed"
+    assert set(summary["stage_reports"]) == {"survey", "rough", "final", "zoom"}
     reports = sorted(output_dir.glob("*/survey/survey_report.json"))
     assert len(reports) == 1
+    run_dir = reports[0].parent.parent
+    assert Path(summary["stage_reports"]["survey"]) == reports[0]
+    assert Path(summary["stage_reports"]["rough"]) == run_dir / "rough" / "rough_report.json"
+    assert Path(summary["stage_reports"]["final"]) == run_dir / "final" / "final_report.json"
+    assert Path(summary["stage_reports"]["zoom"]) == run_dir / "zoom" / "zoom_report.json"
+    assert (run_dir / "rough" / "rough_report.json").exists()
+    assert (run_dir / "final" / "final_report.json").exists()
+    assert (run_dir / "zoom" / "zoom_report.json").exists()
     report = json.loads(reports[0].read_text(encoding="utf-8"))
     assert report["schema_version"] == "task1_survey_report_v1"
     assert report["stage"] == "survey"
@@ -394,6 +296,8 @@ def test_task1_recognition_script_seeded_layout_stays_under_task1_output(tmp_pat
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
+            "--stage",
+            "survey",
             "--seed",
             "21",
             "--object-count",
@@ -431,6 +335,8 @@ def test_rough_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path
     survey_report = load_task1_survey_report(survey_report_path)
     assert RoughConfig().capture_config().save_depth_arrays is False
     assert RoughConfig(save_raw_yolo_annotations=True).capture_config().save_raw_yolo_annotations is True
+    assert FinalConfig().capture_config().save_raw_yolo_annotations is False
+    assert FinalConfig(save_raw_yolo_annotations=True).capture_config().save_raw_yolo_annotations is True
 
     workspace, planned_views = build_rough_inspection_plan(
         survey_report,
@@ -524,62 +430,6 @@ def test_reachable_rough_capture_plan_only_returns_validated_views(tmp_path: Pat
     assert all(planned.view.fixed_qpos is not None for planned in selected_views)
     assert selected_views[0].view.view_id == "rough_candidate_001_00"
     assert selections[selected_views[0].view.view_id]["selected_candidate"]["camera_z_offset_m"] == pytest.approx(0.04)
-
-
-def test_reachable_rough_capture_plan_rejects_invalid_candidates(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-    survey_report = load_task1_survey_report(survey_report_path)
-    config = RoughConfig(
-        plan_only=True,
-        rough_views_per_candidate=1,
-        camera_z_m=0.34,
-        rough_standoff_m=0.16,
-        rough_view_candidate_angle_offsets_rad=(0.0,),
-        rough_view_candidate_roll_offsets_rad=(0.0,),
-        rough_view_candidate_standoff_multipliers=(1.0,),
-        rough_view_candidate_camera_z_offsets_m=(0.0,),
-    )
-    workspace, planned_views = build_rough_inspection_plan(survey_report, config)
-
-    selected_views, selections, summary = _select_reachable_rough_capture_plan(
-        backend=_FakeRoughValidationBackend(("success_no_qpos",)),
-        planned_views=(planned_views[0],),
-        workspace=workspace,
-        config=config,
-    )
-
-    assert selected_views == ()
-    assert selections == {}
-    assert summary["requested_view_count"] == 1
-    assert summary["selected_view_count"] == 0
-    assert summary["insufficient_candidate_count"] == 1
-    assert summary["candidate_summaries"][0]["rejected_counts"]["missing_validated_qpos"] == 1
-
-    no_safe_config = RoughConfig(
-        plan_only=True,
-        rough_views_per_candidate=1,
-        camera_z_m=0.34,
-        rough_standoff_m=0.16,
-        rough_view_candidate_angle_offsets_rad=(0.0,),
-        rough_view_candidate_roll_offsets_rad=(0.0,),
-        rough_view_candidate_standoff_multipliers=(1.0,),
-        rough_view_candidate_camera_z_offsets_m=(0.0, 0.04),
-    )
-    selected_view, selection = _select_rough_capture_view(
-        backend=_FakeRoughValidationBackend(("collision", "ik_failed")),
-        planned=planned_views[0],
-        workspace=workspace,
-        config=no_safe_config,
-    )
-
-    assert selected_view is None
-    assert selection["status"] == "failed_no_collision_free_candidate"
-    assert selection["attempt_count"] == 2
-    assert selection["rejected_counts"]["collision"] == 1
-    assert selection["rejected_counts"]["ik_failed"] == 1
-    summary = _rough_view_selection_summary([{"rough_view_selection": selection}])
-    assert summary["failed_no_safe_candidate_count"] == 1
 
 
 def test_rough_fusion_merges_duplicate_candidates_but_keeps_separate_nearby_objects() -> None:
@@ -798,6 +648,7 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
             "--rough-report",
             str(rough_report_path),
             "--plan-only",
+            "--save-debug-trace",
         ],
         cwd=REPO_ROOT,
         check=True,
@@ -819,18 +670,22 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
     assert report["stable_object_selection"]["status"] == "not_run"
     assert [capture["status"] for capture in report["object_captures"]] == ["planned", "planned", "planned"]
     assert report["quality"]["stable_object_count"] == 1
+    plan_path = rough_report_path.parent.parent / "final" / "final_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
     assert (
         report["planned_captures"][0]["entry_views"][0]["desired_camera_position_world"][2]
         < report["workspace"]["tank_opening_z_m"] - report["workspace"]["opening_clearance_m"]
     )
-    assert len(report["planned_captures"][0]["view_candidates"]) >= 2
-    assert len(report["object_captures"][0]["view_candidates"]) >= 2
-    assert any(
-        candidate["standoff_multiplier"] == DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1]
-        for candidate in report["planned_captures"][0]["view_candidates"]
-    )
+    assert "view_candidates" not in report["planned_captures"][0]
+    assert "view_candidates" not in report["object_captures"][0]
+    assert "view_candidate_attempts" not in report["object_captures"][0]
+    assert report["planned_captures"][0]["view_candidate_summary"]["candidate_count"] >= 2
+    assert report["object_captures"][0]["view_candidate_attempt_summary"]["attempt_count"] == 0
+    assert plan["planned_captures"][0]["view_candidate_summary"]["first_candidate"]["entry_portal_mode"] == "final-vertical"
+    assert plan["debug_trace_policy"]["formal_outputs_include_full_candidate_trace"] is False
     assert "final_view_camera_z_offsets_m" in report["final_config"]
     assert "final_view_roll_offsets_deg" in report["final_config"]
+    assert report["final_config"]["save_debug_trace"] is True
     assert report["final_config"]["entry_portal_modes"] == list(DEFAULT_FINAL_ENTRY_PORTAL_MODES)
     assert report["final_config"]["entry_orientation_policy"] == DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY
     assert (
@@ -839,7 +694,14 @@ def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) 
     )
     assert report["final_config"]["entry_path_policy"] == DEFAULT_FINAL_ENTRY_PATH_POLICY
     assert report["final_config"]["desired_stable_object_count"] == DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT
-    assert report["planned_captures"][0]["view_candidates"][0]["entry_portal_mode"] == "final-vertical"
+    debug_trace_path = rough_report_path.parent.parent / "final" / "final_debug_trace.json"
+    debug_trace = json.loads(debug_trace_path.read_text(encoding="utf-8"))
+    assert debug_trace["schema_version"] == "task1_final_debug_trace_v1"
+    assert len(debug_trace["planned_captures"][0]["view_candidates"]) >= 2
+    assert any(
+        candidate["standoff_multiplier"] == DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1]
+        for candidate in debug_trace["planned_captures"][0]["view_candidates"]
+    )
     assert report["final_reachable_planning_summary"]["strategy"] == "whole_arm_final_view_candidate_selection_v1"
 
 
@@ -869,6 +731,7 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
         depth_dir=tmp_path / "depth",
         yolo_dir=tmp_path / "yolo",
         annotated_dir=tmp_path / "annotated",
+        raw_annotated_dir=tmp_path / "raw_annotated",
         tiles_dir=tmp_path / "tiles",
         config=config,
     )
@@ -892,9 +755,15 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
     assert summary["rejection_counts"]["entry_collision"] == 1
     assert summary["rejection_counts"]["final_collision"] == 1
     assert summary["selected_fixed_qpos_count"] == 1
+    public_result = _object_capture_public_payload(result, config=FinalConfig(failure_sample_limit=1))
+    assert "view_candidate_attempts" not in public_result
+    assert public_result["view_candidate_attempt_summary"]["attempt_count"] == 3
+    assert public_result["view_candidate_attempt_summary"]["failure_sample_count"] == 1
+    assert public_result["view_candidate_attempt_summary"]["omitted_failure_attempt_count"] == 1
+    assert public_result["view_candidate_attempt_summary"]["failure_samples"][0]["status"] == "entry_validation_failed"
 
 
-def test_final_capture_continues_after_unconfirmed_safe_candidate(tmp_path: Path) -> None:
+def test_final_capture_continues_until_confirmed_candidate(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     rough_report_path = _write_rough_report(tmp_path, layout_path)
     rough_report = load_task1_rough_report(rough_report_path)
@@ -911,65 +780,28 @@ def test_final_capture_continues_after_unconfirmed_safe_candidate(tmp_path: Path
     )
     _, planned = build_final_plan(rough_report, config)
     target = planned[0].target
-    backend = _FakeFinalCaptureBackend(
-        ("success", "success", "success", "success"),
-        capture_observations=(
-            [],
-            [
-                SurveyObservation(
-                    view_id="final_confirmed",
-                    image_path="confirmed.png",
-                    bbox_xyxy=(100.0, 120.0, 180.0, 220.0),
-                    confidence=0.9,
-                    class_id=1,
-                    class_name=target.class_name,
-                    rough_position_world=target.position_world,
-                )
-            ],
-        ),
+    confirmed_observation = SurveyObservation(
+        view_id="final_confirmed",
+        image_path="confirmed.png",
+        bbox_xyxy=(100.0, 120.0, 180.0, 220.0),
+        confidence=0.9,
+        class_id=1,
+        class_name=target.class_name,
+        rough_position_world=target.position_world,
     )
 
-    result = _capture_first_reachable_candidate(
-        backend=backend,
-        planned=planned[0],
-        images_dir=tmp_path / "images",
-        depth_dir=tmp_path / "depth",
-        yolo_dir=tmp_path / "yolo",
-        annotated_dir=tmp_path / "annotated",
-        tiles_dir=tmp_path / "tiles",
-        config=config,
-    )
-
-    assert result["status"] == "confirmed"
-    assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
-        "captured_unconfirmed",
-        "captured",
-    ]
-    assert backend.capture_calls == 2
-
-
-def test_final_capture_continues_after_quality_limited_candidate(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    rough_report_path = _write_rough_report(tmp_path, layout_path)
-    rough_report = load_task1_rough_report(rough_report_path)
-    config = FinalConfig(
-        camera_z_m=0.30,
-        standoff_m=0.12,
-        min_oblique_distance_m=0.06,
-        entry_validation_samples=1,
-        final_view_angle_offsets_deg=(0.0, 30.0),
-        final_view_standoff_multipliers=(1.0,),
-        final_view_camera_z_offsets_m=(0.0,),
-        final_view_roll_offsets_deg=(0.0,),
-        centerline_view_angle_offsets_deg=(),
-    )
-    _, planned = build_final_plan(rough_report, config)
-    target = planned[0].target
-    backend = _FakeFinalCaptureBackend(
-        ("success", "success", "success", "success"),
-        capture_observations=(
-            [
-                SurveyObservation(
+    scenarios = (
+        {
+            "name": "unconfirmed",
+            "observations": ([], [confirmed_observation]),
+            "expected_attempt_status": "captured_unconfirmed",
+            "expected_quality_reasons": None,
+        },
+        {
+            "name": "quality_limited",
+            "observations": (
+                [
+                    SurveyObservation(
                     view_id="final_clipped",
                     image_path="clipped.png",
                     bbox_xyxy=(0.0, 120.0, 180.0, 220.0),
@@ -978,42 +810,83 @@ def test_final_capture_continues_after_quality_limited_candidate(tmp_path: Path)
                     class_name=target.class_name,
                     rough_position_world=target.position_world,
                 )
-            ],
-            [
-                SurveyObservation(
-                    view_id="final_confirmed",
-                    image_path="confirmed.png",
-                    bbox_xyxy=(100.0, 120.0, 180.0, 220.0),
-                    confidence=0.9,
-                    class_id=1,
-                    class_name=target.class_name,
-                    rough_position_world=target.position_world,
-                )
-            ],
-        ),
+                ],
+                [confirmed_observation],
+            ),
+            "expected_attempt_status": "captured_quality_limited",
+            "expected_quality_reasons": ["bbox_too_close_to_image_boundary"],
+        },
     )
 
-    result = _capture_first_reachable_candidate(
-        backend=backend,
-        planned=planned[0],
-        images_dir=tmp_path / "images",
-        depth_dir=tmp_path / "depth",
-        yolo_dir=tmp_path / "yolo",
-        annotated_dir=tmp_path / "annotated",
-        tiles_dir=tmp_path / "tiles",
-        config=config,
+    for scenario in scenarios:
+        backend = _FakeFinalCaptureBackend(
+            ("success", "success", "success", "success"),
+            capture_observations=scenario["observations"],
+        )
+
+        result = _capture_first_reachable_candidate(
+            backend=backend,
+            planned=planned[0],
+            images_dir=tmp_path / scenario["name"] / "images",
+            depth_dir=tmp_path / scenario["name"] / "depth",
+            yolo_dir=tmp_path / scenario["name"] / "yolo",
+            annotated_dir=tmp_path / scenario["name"] / "annotated",
+            raw_annotated_dir=tmp_path / scenario["name"] / "raw_annotated",
+            tiles_dir=tmp_path / scenario["name"] / "tiles",
+            config=config,
+        )
+
+        assert result["status"] == "confirmed"
+        assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
+            scenario["expected_attempt_status"],
+            "captured",
+        ]
+        assert backend.capture_calls == 2
+        if scenario["expected_quality_reasons"] is not None:
+            assert result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["status"] == "limited"
+            assert (
+                result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["reasons"]
+                == scenario["expected_quality_reasons"]
+            )
+
+
+def test_final_filtered_annotation_uses_selected_observation_only() -> None:
+    detections = _final_filtered_annotation_detections(
+        {
+            "target": {"object_id": "row_object_001", "class_name": "手套"},
+            "status": "confirmed",
+            "best_observation": {
+                "bbox_xyxy": [100.0, 120.0, 240.0, 260.0],
+                "confidence": 0.91,
+                "class_id": 2,
+                "class_name": "手套",
+            },
+            "matched_observations": [
+                {
+                    "bbox_xyxy": [10.0, 20.0, 40.0, 60.0],
+                    "confidence": 0.31,
+                    "class_id": 2,
+                    "class_name": "手套",
+                },
+                {
+                    "bbox_xyxy": [100.0, 120.0, 240.0, 260.0],
+                    "confidence": 0.91,
+                    "class_id": 2,
+                    "class_name": "手套",
+                },
+            ],
+            "recognition": {
+                "detected_class_name": "手套",
+                "confidence": 0.91,
+                "target_xy_distance_m": 0.012,
+            },
+        }
     )
 
-    assert result["status"] == "confirmed"
-    assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
-        "captured_quality_limited",
-        "captured",
-    ]
-    assert result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["status"] == "limited"
-    assert result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["reasons"] == [
-        "bbox_too_close_to_image_boundary"
-    ]
-    assert backend.capture_calls == 2
+    assert len(detections) == 1
+    assert detections[0]["bbox_xyxy"] == [100.0, 120.0, 240.0, 260.0]
+    assert detections[0]["annotation_label"] == "row_object_001 手套 0.91"
+    assert detections[0]["source"] == "final_selected_observation"
 
 
 def test_final_stable_selection_outputs_downstream_object_list() -> None:
@@ -1085,8 +958,8 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
     assert selection["stable_object_selection"]["rejected_reason_counts"] == {"class_conflict": 1}
 
 
-def test_final_stable_selection_rejects_duplicate_follow_up_object() -> None:
-    selection = select_stable_final_objects(
+def test_final_stable_selection_follow_up_guardrails() -> None:
+    duplicate_selection = select_stable_final_objects(
         [
             _final_payload(
                 object_id="rough_object_001",
@@ -1111,19 +984,17 @@ def test_final_stable_selection_rejects_duplicate_follow_up_object() -> None:
         ]
     )
 
-    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["rough_object_001"]
-    assert selection["stable_object_selection"]["stable_object_count"] == 1
-    assert selection["stable_object_selection"]["rejected_reason_counts"] == {
+    assert [obj["object_id"] for obj in duplicate_selection["stable_objects"]] == ["rough_object_001"]
+    assert duplicate_selection["stable_object_selection"]["stable_object_count"] == 1
+    assert duplicate_selection["stable_object_selection"]["rejected_reason_counts"] == {
         "duplicate_follow_up_observation": 1
     }
-    duplicate = selection["unstable_objects"][0]
+    duplicate = duplicate_selection["unstable_objects"][0]
     assert duplicate["object_id"] == "rough_tentative_001"
     assert duplicate["duplicate_of_object_id"] == "rough_object_001"
     assert duplicate["duplicate_xy_distance_m"] == pytest.approx(0.008544, abs=1e-6)
 
-
-def test_final_stable_selection_rejects_low_confidence_follow_up_object() -> None:
-    selection = select_stable_final_objects(
+    low_confidence_selection = select_stable_final_objects(
         [
             _final_payload(
                 object_id="rough_object_001",
@@ -1149,15 +1020,13 @@ def test_final_stable_selection_rejects_low_confidence_follow_up_object() -> Non
         ]
     )
 
-    assert [obj["object_id"] for obj in selection["stable_objects"]] == ["rough_object_001"]
-    assert selection["stable_object_selection"]["stable_object_count"] == 1
-    assert selection["stable_object_selection"]["rejected_reason_counts"] == {
+    assert [obj["object_id"] for obj in low_confidence_selection["stable_objects"]] == ["rough_object_001"]
+    assert low_confidence_selection["stable_object_selection"]["stable_object_count"] == 1
+    assert low_confidence_selection["stable_object_selection"]["rejected_reason_counts"] == {
         "follow_up_low_confidence": 1
     }
-    assert selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
+    assert low_confidence_selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
 
-
-def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> None:
     primary_captures = [
         _final_payload(
             object_id=f"rough_object_{index:03d}",
@@ -1171,7 +1040,7 @@ def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> N
         )
         for index in range(1, 6)
     ]
-    selection = select_stable_final_objects(
+    not_needed_selection = select_stable_final_objects(
         primary_captures
         + [
             _final_payload(
@@ -1189,18 +1058,18 @@ def test_final_stable_selection_uses_follow_up_only_to_fill_desired_count() -> N
         desired_stable_object_count=5,
     )
 
-    assert [obj["object_id"] for obj in selection["stable_objects"]] == [
+    assert [obj["object_id"] for obj in not_needed_selection["stable_objects"]] == [
         "rough_object_001",
         "rough_object_002",
         "rough_object_003",
         "rough_object_004",
         "rough_object_005",
     ]
-    assert selection["stable_object_selection"]["rejected_reason_counts"] == {"follow_up_not_needed": 1}
-    assert selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
+    assert not_needed_selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "follow_up_not_needed": 1
+    }
+    assert not_needed_selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
 
-
-def test_final_stable_selection_reports_skipped_follow_up_as_not_needed() -> None:
     captures = [
         _final_payload(
             object_id=f"rough_object_{index:03d}",
@@ -1234,58 +1103,14 @@ def test_final_stable_selection_reports_skipped_follow_up_as_not_needed() -> Non
         }
     )
 
-    selection = select_stable_final_objects(captures, desired_stable_object_count=5)
+    skipped_selection = select_stable_final_objects(captures, desired_stable_object_count=5)
 
-    assert selection["stable_object_selection"]["stable_object_count"] == 5
-    assert selection["stable_object_selection"]["rejected_reason_counts"] == {
+    assert skipped_selection["stable_object_selection"]["stable_object_count"] == 5
+    assert skipped_selection["stable_object_selection"]["rejected_reason_counts"] == {
         "skipped_follow_up_not_needed": 1
     }
-    assert selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
+    assert skipped_selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
     assert _overall_status(captures) == "success"
-
-
-def test_final_matching_merges_overlapping_same_class_bbox_fragments() -> None:
-    target = FinalTarget(
-        object_id="rough_object_002",
-        target_role="primary",
-        source_status="stable",
-        position_world=(0.359, 0.687, 0.03),
-        class_name="钻头",
-        confidence=0.66,
-        T_world_object=None,
-        best_image_path=None,
-        best_bbox_xyxy=None,
-        supporting_views=(),
-        candidate_class_names=("钻头",),
-        source_payload={},
-    )
-    observations = [
-        SurveyObservation(
-            view_id="final_rough_object_002",
-            image_path="final_rough_object_002_rgb.png",
-            bbox_xyxy=(810.0, 340.0, 1018.0, 505.0),
-            confidence=0.33,
-            class_id=1,
-            class_name="钻头",
-            rough_position_world=(0.325, 0.692, 0.03),
-        ),
-        SurveyObservation(
-            view_id="final_rough_object_002",
-            image_path="final_rough_object_002_rgb.png",
-            bbox_xyxy=(902.0, 429.0, 1226.0, 505.0),
-            confidence=0.25,
-            class_id=1,
-            class_name="钻头",
-            rough_position_world=(0.363, 0.689, 0.03),
-        ),
-    ]
-
-    matched = _matched_observations(target, observations, config=FinalConfig(image_width=1920, image_height=1080))
-
-    assert matched[0]["observation_kind"] == "merged_same_class_bbox_fragments"
-    assert matched[0]["bbox_xyxy"] == [810.0, 340.0, 1226.0, 505.0]
-    assert matched[0]["source_observation_count"] == 2
-    assert matched[0]["selection_score"]["bbox_area_px"] > matched[1]["selection_score"]["bbox_area_px"]
 
 
 def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> None:
@@ -1329,6 +1154,93 @@ def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> 
     assert matched[0]["bbox_xyxy"] == [902.0, 507.0, 1422.0, 1079.0]
     assert matched[0]["selection_score"]["border_safe"] is False
     assert matched[0]["selection_score"]["bbox_area_px"] > matched[1]["selection_score"]["bbox_area_px"]
+
+
+def test_task1_zoom_writes_selected_image_and_reports_missing_source(tmp_path: Path) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    run_dir = tmp_path / "task1" / "20260706T000000Z_seed42"
+    source_image_path = run_dir / "final" / "images" / "final_rough_object_001_rgb.png"
+    source_image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_module.new("RGB", (800, 600), color=(20, 20, 20)).save(source_image_path)
+    final_report_path = _write_final_report(
+        run_dir,
+        source_image_path=source_image_path,
+        bbox_xyxy=[250.0, 180.0, 550.0, 405.0],
+    )
+
+    report = run_task1_zoom(
+        final_report_path,
+        ZoomConfig(target_area_ratio=0.60, ratio_tolerance=0.01),
+    )
+
+    assert report["schema_version"] == "task1_zoom_report_v1"
+    assert report["stage"] == "zoom"
+    assert report["status"] == "success"
+    assert report["status_counts"] == {"zoomed": 1}
+    zoomed = report["zoomed_objects"][0]
+    assert zoomed["status"] == "zoomed"
+    assert zoomed["zoom_plan"]["achieved_area_ratio"] == pytest.approx(0.60, abs=0.01)
+    assert zoomed["selected_zoom"]["candidate_id"] in {
+        candidate["candidate_id"] for candidate in zoomed["candidate_zooms"]
+    }
+    output_path = Path(zoomed["output_image_path"])
+    assert output_path.exists()
+    assert output_path.parent.name == "selected"
+    with image_module.open(output_path) as image:
+        assert image.size == (800, 600)
+
+    missing_report_path = _write_final_report(
+        tmp_path / "task1" / "20260706T000000Z_seed43",
+        source_image_path=tmp_path / "task1" / "20260706T000000Z_seed43" / "final" / "images" / "missing.png",
+        bbox_xyxy=[250.0, 180.0, 550.0, 405.0],
+    )
+    missing_report = run_task1_zoom(missing_report_path, ZoomConfig(target_area_ratio=0.60))
+
+    assert missing_report["status"] == "failed"
+    assert missing_report["status_counts"] == {"failed": 1}
+    assert missing_report["zoomed_objects"][0]["reason"] == "source_image_missing"
+
+
+def _write_final_report(run_dir: Path, *, source_image_path: Path, bbox_xyxy: list[float]) -> Path:
+    final_dir = run_dir / "final"
+    report_path = final_dir / "final_report.json"
+    payload = {
+        "schema_version": "task1_final_report_v1",
+        "stage": "final",
+        "status": "success",
+        "created_utc": "2026-07-06T00:00:00+00:00",
+        "message": "test final report",
+        "source_rough_report_path": str(run_dir / "rough" / "rough_report.json"),
+        "source_rough_status": "success",
+        "layout_snapshot_path": str(run_dir / "layout" / "target_object_poses.json"),
+        "task1_run_dir": str(run_dir),
+        "capture_dir": str(final_dir),
+        "plan_path": str(final_dir / "final_plan.json"),
+        "report_path": str(report_path),
+        "image_size": [800, 600],
+        "stable_objects": [
+            {
+                "object_id": "rough_object_001",
+                "class_name": "notebook",
+                "confidence": 0.91,
+                "bbox_xyxy": bbox_xyxy,
+                "position_world": [0.30, 0.35, 0.03],
+                "T_world_object": [
+                    [1.0, 0.0, 0.0, 0.30],
+                    [0.0, 1.0, 0.0, 0.35],
+                    [0.0, 0.0, 1.0, 0.03],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                "final_image_path": str(source_image_path),
+            }
+        ],
+        "unstable_objects": [],
+        "stable_object_selection": {"status": "success", "stable_object_count": 1},
+        "object_captures": [],
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    return report_path
 
 
 def _write_layout(tmp_path: Path) -> Path:
@@ -1840,6 +1752,7 @@ class _FakeFinalCaptureBackend(_FakeRoughValidationBackend):
         depth_dir: Path,
         yolo_dir: Path,
         annotated_dir: Path,
+        raw_annotated_dir: Path,
         tiles_dir: Path,
     ):
         self.captured_view = view

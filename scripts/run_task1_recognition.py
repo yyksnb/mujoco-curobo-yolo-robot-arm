@@ -34,34 +34,11 @@ from robot_arm_pipeline.task1.rough import (  # noqa: E402
     run_task1_rough,
 )
 from robot_arm_pipeline.task1.final import (  # noqa: E402
-    DEFAULT_FINAL_CAMERA_Z_M,
-    DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
-    DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
-    DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY,
-    DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY,
-    DEFAULT_FINAL_ENTRY_PATH_POLICY,
-    DEFAULT_FINAL_ENTRY_PORTAL_MODES,
-    DEFAULT_FINAL_ENTRY_SIDE,
-    DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES,
-    DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG,
-    DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M,
-    DEFAULT_FINAL_VIEW_ROLL_OFFSETS_DEG,
-    DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
-    DEFAULT_FINAL_IK_POSITION_TOLERANCE_M,
-    DEFAULT_FINAL_LOOK_AT_HEIGHT_OFFSET_M,
-    DEFAULT_FINAL_MIN_OBLIQUE_DISTANCE_M,
-    DEFAULT_FINAL_STANDOFF_M,
-    DEFAULT_FINAL_TARGET_MATCH_RADIUS_M,
     FinalConfig,
     find_latest_rough_report,
     run_task1_final,
 )
 from robot_arm_pipeline.task1.zoom import (  # noqa: E402
-    DEFAULT_ZOOM_CANDIDATE_AREA_RATIOS,
-    DEFAULT_ZOOM_PADDING_RATIO,
-    DEFAULT_ZOOM_RATIO_TOLERANCE,
-    DEFAULT_ZOOM_SELECTION_BORDER_MARGIN_PX,
-    DEFAULT_ZOOM_TARGET_AREA_RATIO,
     ZoomConfig,
     find_latest_final_report,
     run_task1_zoom,
@@ -85,20 +62,6 @@ def _build_yolo_detector(config):
 
 def _value_or_default(value, default):
     return default if value is None else value
-
-
-def _parse_float_tuple(text: str) -> tuple[float, ...]:
-    values = tuple(float(item.strip()) for item in text.split(",") if item.strip())
-    if not values:
-        raise argparse.ArgumentTypeError("expected one or more comma-separated numbers")
-    return values
-
-
-def _parse_text_tuple(text: str) -> tuple[str, ...]:
-    values = tuple(item.strip() for item in text.split(",") if item.strip())
-    if not values:
-        raise argparse.ArgumentTypeError("expected one or more comma-separated values")
-    return values
 
 
 def _task1_run_name(created_utc: str, seed: int) -> str:
@@ -134,13 +97,204 @@ def _write_seeded_layout(args: argparse.Namespace, *, created_utc: str) -> tuple
     return layout_path, run_dir
 
 
+def _survey_layout(args: argparse.Namespace, *, created_utc: str) -> tuple[Path, Path | None]:
+    if args.layout is None:
+        return _write_seeded_layout(args, created_utc=created_utc)
+    return args.layout, None
+
+
+def _run_survey_stage(
+    args: argparse.Namespace,
+    *,
+    layout_path: Path | None = None,
+    run_dir: Path | None = None,
+    created_utc: str | None = None,
+) -> dict:
+    if created_utc is None:
+        created_utc = datetime.now(timezone.utc).isoformat()
+    if layout_path is None:
+        layout_path, run_dir = _survey_layout(args, created_utc=created_utc)
+    config = SurveyConfig(
+        scene_model_path=args.scene_model,
+        yolo_profile_path=args.yolo_config,
+        output_dir=args.output_dir,
+        run_dir=run_dir,
+        created_utc=created_utc if run_dir is not None else None,
+        camera_name=args.camera_name,
+        image_width=args.image_width,
+        image_height=args.image_height,
+        tank_opening_z_m=args.tank_opening_z,
+        opening_clearance_m=args.opening_clearance,
+        save_raw_yolo_annotations=args.save_raw_yolo_annotations,
+        yolo_confidence=args.yolo_conf,
+        yolo_iou=args.yolo_iou,
+        yolo_image_size=args.yolo_imgsz,
+        yolo_device=args.yolo_device,
+        yolo_max_detections=args.yolo_max_det,
+        yolo_tile_grid_size=args.yolo_tile_grid,
+        yolo_tile_overlap=args.yolo_tile_overlap,
+        yolo_tile_nms_iou=args.yolo_tile_nms_iou,
+        run_yolo=not args.skip_yolo,
+        plan_only=args.plan_only,
+        strict_yolo=args.strict_yolo,
+        max_ik_iterations=_value_or_default(args.max_ik_iterations, SurveyConfig().max_ik_iterations),
+        ik_position_tolerance_m=_value_or_default(
+            args.ik_position_tolerance,
+            SurveyConfig().ik_position_tolerance_m,
+        ),
+        ik_orientation_tolerance_rad=_value_or_default(
+            args.ik_orientation_tolerance,
+            SurveyConfig().ik_orientation_tolerance_rad,
+        ),
+    )
+    detector = _build_yolo_detector(config)
+    return run_task1_survey(layout_path, config, detector=detector)
+
+
+def _run_rough_stage(args: argparse.Namespace, *, survey_report_path: Path | None = None) -> dict:
+    if survey_report_path is None:
+        try:
+            survey_report_path = args.survey_report or find_latest_survey_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+    config = RoughConfig(
+        scene_model_path=args.scene_model,
+        yolo_profile_path=args.yolo_config,
+        output_dir=args.output_dir,
+        camera_name=args.camera_name,
+        image_width=args.image_width,
+        image_height=args.image_height,
+        tank_opening_z_m=args.tank_opening_z,
+        opening_clearance_m=args.opening_clearance,
+        save_raw_yolo_annotations=args.save_raw_yolo_annotations,
+        yolo_confidence=args.yolo_conf,
+        yolo_iou=args.yolo_iou,
+        yolo_image_size=args.yolo_imgsz,
+        yolo_device=args.yolo_device,
+        yolo_max_detections=args.yolo_max_det,
+        yolo_tile_grid_size=args.yolo_tile_grid,
+        yolo_tile_overlap=args.yolo_tile_overlap,
+        yolo_tile_nms_iou=args.yolo_tile_nms_iou,
+        run_yolo=not args.skip_yolo,
+        plan_only=args.plan_only,
+        strict_yolo=args.strict_yolo,
+        max_ik_iterations=_value_or_default(args.max_ik_iterations, RoughConfig().max_ik_iterations),
+        ik_position_tolerance_m=_value_or_default(
+            args.ik_position_tolerance,
+            RoughConfig().ik_position_tolerance_m,
+        ),
+        ik_orientation_tolerance_rad=_value_or_default(
+            args.ik_orientation_tolerance,
+            RoughConfig().ik_orientation_tolerance_rad,
+        ),
+    )
+    detector = _build_yolo_detector(config)
+    return run_task1_rough(survey_report_path, config, detector=detector)
+
+
+def _run_final_stage(args: argparse.Namespace, *, rough_report_path: Path | None = None) -> dict:
+    if rough_report_path is None:
+        try:
+            rough_report_path = args.rough_report or find_latest_rough_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+    config = FinalConfig(
+        scene_model_path=args.scene_model,
+        yolo_profile_path=args.yolo_config,
+        output_dir=args.output_dir,
+        camera_name=args.camera_name,
+        image_width=args.image_width,
+        image_height=args.image_height,
+        tank_opening_z_m=args.tank_opening_z,
+        opening_clearance_m=args.opening_clearance,
+        yolo_confidence=args.yolo_conf,
+        yolo_iou=args.yolo_iou,
+        yolo_image_size=args.yolo_imgsz,
+        yolo_device=args.yolo_device,
+        yolo_max_detections=args.yolo_max_det,
+        yolo_tile_grid_size=args.yolo_tile_grid,
+        yolo_tile_overlap=args.yolo_tile_overlap,
+        yolo_tile_nms_iou=args.yolo_tile_nms_iou,
+        save_raw_yolo_annotations=args.save_raw_yolo_annotations,
+        save_debug_trace=args.save_debug_trace,
+        run_yolo=not args.skip_yolo,
+        plan_only=args.plan_only,
+        strict_yolo=args.strict_yolo,
+        max_ik_iterations=_value_or_default(
+            args.max_ik_iterations,
+            FinalConfig().max_ik_iterations,
+        ),
+        ik_position_tolerance_m=_value_or_default(
+            args.ik_position_tolerance,
+            FinalConfig().ik_position_tolerance_m,
+        ),
+        ik_orientation_tolerance_rad=_value_or_default(
+            args.ik_orientation_tolerance,
+            FinalConfig().ik_orientation_tolerance_rad,
+        ),
+    )
+    detector = _build_yolo_detector(config)
+    return run_task1_final(rough_report_path, config, detector=detector)
+
+
+def _run_zoom_stage(args: argparse.Namespace, *, final_report_path: Path | None = None) -> dict:
+    if final_report_path is None:
+        try:
+            final_report_path = args.final_report or find_latest_final_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+    config = ZoomConfig(
+        output_dir=args.output_dir,
+        plan_only=args.plan_only,
+    )
+    return run_task1_zoom(final_report_path, config)
+
+
+def _run_full_pipeline(args: argparse.Namespace) -> dict:
+    created_utc = datetime.now(timezone.utc).isoformat()
+    layout_path, run_dir = _survey_layout(args, created_utc=created_utc)
+    survey_report = _run_survey_stage(args, layout_path=layout_path, run_dir=run_dir, created_utc=created_utc)
+    rough_report = _run_rough_stage(args, survey_report_path=Path(str(survey_report["report_path"])))
+    final_report = _run_final_stage(args, rough_report_path=Path(str(rough_report["report_path"])))
+    zoom_report = _run_zoom_stage(args, final_report_path=Path(str(final_report["report_path"])))
+    reports = {
+        "survey": survey_report["report_path"],
+        "rough": rough_report["report_path"],
+        "final": final_report["report_path"],
+        "zoom": zoom_report["report_path"],
+    }
+    statuses = [
+        str(survey_report.get("status")),
+        str(rough_report.get("status")),
+        str(final_report.get("status")),
+        str(zoom_report.get("status")),
+    ]
+    if any(status == "failed" for status in statuses):
+        status = "failed"
+    elif any(status == "partial" for status in statuses):
+        status = "partial"
+    elif all(status == "plan_only" for status in statuses):
+        status = "plan_only"
+    elif any(status == "plan_only" for status in statuses):
+        status = "partial"
+    else:
+        status = "success"
+    return {
+        "status": status,
+        "message": "Ran task1 recognition pipeline: "
+        + ", ".join(f"{name}={report_status}" for name, report_status in zip(reports, statuses)),
+        "report_path": zoom_report["report_path"],
+        "stage_reports": reports,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
         "--stage",
         choices=("survey", "rough", "final", "zoom"),
-        default="survey",
-        help="Recognition stage to run.",
+        default=None,
+        help="Recognition stage to run. Omit this option to run survey, rough, final, and zoom in sequence.",
     )
     parser.add_argument(
         "--layout",
@@ -206,7 +360,7 @@ def main() -> None:
         "--save-raw-yolo-annotations",
         action="store_true",
         default=DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS,
-        help="Also save raw YOLO annotated survey/rough images under the stage's raw_annotated directory.",
+        help="Also save raw YOLO annotated images under the active stage's raw_annotated directory.",
     )
     parser.add_argument("--yolo-config", type=Path, default=DEFAULT_YOLO_PROFILE, help="YOLO Stage3 profile YAML/JSON.")
     parser.add_argument("--yolo-conf", type=float, default=0.15, help="YOLO confidence threshold for the active stage.")
@@ -236,6 +390,11 @@ def main() -> None:
     parser.add_argument("--strict-yolo", action="store_true", help="Fail the active stage if YOLO inference fails.")
     parser.add_argument("--plan-only", action="store_true", help="Only write the active stage plan; do not load MuJoCo or YOLO.")
     parser.add_argument(
+        "--save-debug-trace",
+        action="store_true",
+        help="Save full debug traces for stages that support separate debug artifacts.",
+    )
+    parser.add_argument(
         "--max-ik-iterations",
         type=int,
         default=None,
@@ -253,307 +412,22 @@ def main() -> None:
         default=None,
         help="IK camera orientation tolerance in radians. Defaults are stage-specific.",
     )
-    parser.add_argument(
-        "--final-camera-z",
-        type=float,
-        default=DEFAULT_FINAL_CAMERA_Z_M,
-        help="Desired final wrist camera world z inside the tank.",
-    )
-    parser.add_argument(
-        "--final-standoff",
-        type=float,
-        default=DEFAULT_FINAL_STANDOFF_M,
-        help="Horizontal standoff from each rough target for final capture.",
-    )
-    parser.add_argument(
-        "--final-min-oblique-distance",
-        type=float,
-        default=DEFAULT_FINAL_MIN_OBLIQUE_DISTANCE_M,
-        help="Minimum horizontal camera offset from each target, preventing pure top-down final photos.",
-    )
-    parser.add_argument(
-        "--final-look-at-height-offset",
-        type=float,
-        default=DEFAULT_FINAL_LOOK_AT_HEIGHT_OFFSET_M,
-        help="Height above the object base plane used as the final look-at target.",
-    )
-    parser.add_argument(
-        "--final-entry-side",
-        choices=("y-max", "y-min", "x-min", "x-max", "center"),
-        default=DEFAULT_FINAL_ENTRY_SIDE,
-        help="Preferred tank-side reference when rough report evidence does not provide a previous view direction.",
-    )
-    parser.add_argument(
-        "--final-target-match-radius",
-        type=float,
-        default=DEFAULT_FINAL_TARGET_MATCH_RADIUS_M,
-        help="World XY radius for associating close YOLO-depth observations with one planned target.",
-    )
-    parser.add_argument(
-        "--final-entry-validation-samples",
-        type=int,
-        default=DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES,
-        help="Number of top-opening entry pose samples to validate before each final photo.",
-    )
-    parser.add_argument(
-        "--final-entry-clearance-margin",
-        type=float,
-        default=DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
-        help="Additional vertical margin below the tank opening for final entry validation samples.",
-    )
-    parser.add_argument(
-        "--final-entry-portal-modes",
-        type=_parse_text_tuple,
-        default=DEFAULT_FINAL_ENTRY_PORTAL_MODES,
-        help="Comma-separated top-opening portal policies tried by final entry waypoint validation.",
-    )
-    parser.add_argument(
-        "--final-entry-orientation-policy",
-        choices=("vertical-descent", "target-look-at"),
-        default=DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY,
-        help="Wrist-camera orientation policy used for final entry validation samples before the close photo pose.",
-    )
-    parser.add_argument(
-        "--final-entry-lateral-orientation-policy",
-        choices=("entry-orientation", "final-look-at"),
-        default=DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY,
-        help="Orientation policy used by lateral in-tank entry samples after the portal descent.",
-    )
-    parser.add_argument(
-        "--final-entry-path-policy",
-        choices=("portal-descent-then-lateral", "direct-interpolate"),
-        default=DEFAULT_FINAL_ENTRY_PATH_POLICY,
-        help="Waypoint geometry used for validating final top-opening entry before the close photo pose.",
-    )
-    parser.add_argument(
-        "--final-desired-stable-object-count",
-        type=int,
-        default=DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
-        help="Desired final stable object count; follow-up targets are promoted only while the stable list is below this count.",
-    )
-    parser.add_argument(
-        "--final-view-angle-offsets-deg",
-        type=_parse_float_tuple,
-        default=DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG,
-        help="Comma-separated final-view angle offsets around the rough-evidence direction.",
-    )
-    parser.add_argument(
-        "--final-view-standoff-multipliers",
-        type=_parse_float_tuple,
-        default=DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
-        help="Comma-separated standoff multipliers for final-view candidates, tried in policy order.",
-    )
-    parser.add_argument(
-        "--final-view-camera-z-offsets",
-        type=_parse_float_tuple,
-        default=DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M,
-        help="Comma-separated camera-z offsets tried by final-view whole-arm candidate selection.",
-    )
-    parser.add_argument(
-        "--final-view-roll-offsets-deg",
-        type=_parse_float_tuple,
-        default=DEFAULT_FINAL_VIEW_ROLL_OFFSETS_DEG,
-        help="Comma-separated wrist-camera roll offsets in degrees tried by final-view whole-arm candidate selection.",
-    )
-    parser.add_argument(
-        "--zoom-target-area-ratio",
-        type=float,
-        default=DEFAULT_ZOOM_TARGET_AREA_RATIO,
-        help="Desired object bbox area ratio in each zoomed image.",
-    )
-    parser.add_argument(
-        "--zoom-ratio-tolerance",
-        type=float,
-        default=DEFAULT_ZOOM_RATIO_TOLERANCE,
-        help="Allowed absolute error around --zoom-target-area-ratio before a zoom result is marked limited.",
-    )
-    parser.add_argument(
-        "--zoom-candidate-area-ratios",
-        type=_parse_float_tuple,
-        default=DEFAULT_ZOOM_CANDIDATE_AREA_RATIOS,
-        help="Comma-separated target area-ratio candidates generated before selecting one zoom output.",
-    )
-    parser.add_argument(
-        "--zoom-padding-ratio",
-        type=float,
-        default=DEFAULT_ZOOM_PADDING_RATIO,
-        help="Minimum per-side ROI padding fraction around the selected bbox before resize.",
-    )
-    parser.add_argument(
-        "--zoom-selection-border-margin",
-        type=float,
-        default=DEFAULT_ZOOM_SELECTION_BORDER_MARGIN_PX,
-        help="Minimum projected bbox border margin in pixels preferred by zoom candidate selection.",
-    )
-    parser.add_argument(
-        "--zoom-output-width",
-        type=int,
-        default=None,
-        help="Optional zoomed image width. Defaults to the final source image width.",
-    )
-    parser.add_argument(
-        "--zoom-output-height",
-        type=int,
-        default=None,
-        help="Optional zoomed image height. Defaults to the final source image height.",
-    )
     args = parser.parse_args()
 
-    if args.stage == "survey":
-        created_utc = datetime.now(timezone.utc).isoformat()
-        if args.layout is None:
-            layout_path, run_dir = _write_seeded_layout(args, created_utc=created_utc)
-        else:
-            layout_path = args.layout
-            run_dir = None
-        config = SurveyConfig(
-            scene_model_path=args.scene_model,
-            yolo_profile_path=args.yolo_config,
-            output_dir=args.output_dir,
-            run_dir=run_dir,
-            created_utc=created_utc if run_dir is not None else None,
-            camera_name=args.camera_name,
-            image_width=args.image_width,
-            image_height=args.image_height,
-            tank_opening_z_m=args.tank_opening_z,
-            opening_clearance_m=args.opening_clearance,
-            save_raw_yolo_annotations=args.save_raw_yolo_annotations,
-            yolo_confidence=args.yolo_conf,
-            yolo_iou=args.yolo_iou,
-            yolo_image_size=args.yolo_imgsz,
-            yolo_device=args.yolo_device,
-            yolo_max_detections=args.yolo_max_det,
-            yolo_tile_grid_size=args.yolo_tile_grid,
-            yolo_tile_overlap=args.yolo_tile_overlap,
-            yolo_tile_nms_iou=args.yolo_tile_nms_iou,
-            run_yolo=not args.skip_yolo,
-            plan_only=args.plan_only,
-            strict_yolo=args.strict_yolo,
-            max_ik_iterations=_value_or_default(args.max_ik_iterations, SurveyConfig().max_ik_iterations),
-            ik_position_tolerance_m=_value_or_default(
-                args.ik_position_tolerance,
-                SurveyConfig().ik_position_tolerance_m,
-            ),
-            ik_orientation_tolerance_rad=_value_or_default(
-                args.ik_orientation_tolerance,
-                SurveyConfig().ik_orientation_tolerance_rad,
-            ),
-        )
-        detector = _build_yolo_detector(config)
-        report = run_task1_survey(layout_path, config, detector=detector)
+    if args.stage is None:
+        report = _run_full_pipeline(args)
+    elif args.stage == "survey":
+        report = _run_survey_stage(args)
     elif args.stage == "rough":
-        try:
-            survey_report_path = args.survey_report or find_latest_survey_report(args.output_dir)
-        except FileNotFoundError as exc:
-            raise SystemExit(str(exc)) from exc
-        config = RoughConfig(
-            scene_model_path=args.scene_model,
-            yolo_profile_path=args.yolo_config,
-            output_dir=args.output_dir,
-            camera_name=args.camera_name,
-            image_width=args.image_width,
-            image_height=args.image_height,
-            tank_opening_z_m=args.tank_opening_z,
-            opening_clearance_m=args.opening_clearance,
-            save_raw_yolo_annotations=args.save_raw_yolo_annotations,
-            yolo_confidence=args.yolo_conf,
-            yolo_iou=args.yolo_iou,
-            yolo_image_size=args.yolo_imgsz,
-            yolo_device=args.yolo_device,
-            yolo_max_detections=args.yolo_max_det,
-            yolo_tile_grid_size=args.yolo_tile_grid,
-            yolo_tile_overlap=args.yolo_tile_overlap,
-            yolo_tile_nms_iou=args.yolo_tile_nms_iou,
-            run_yolo=not args.skip_yolo,
-            plan_only=args.plan_only,
-            strict_yolo=args.strict_yolo,
-            max_ik_iterations=_value_or_default(args.max_ik_iterations, RoughConfig().max_ik_iterations),
-            ik_position_tolerance_m=_value_or_default(
-                args.ik_position_tolerance,
-                RoughConfig().ik_position_tolerance_m,
-            ),
-            ik_orientation_tolerance_rad=_value_or_default(
-                args.ik_orientation_tolerance,
-                RoughConfig().ik_orientation_tolerance_rad,
-            ),
-        )
-        detector = _build_yolo_detector(config)
-        report = run_task1_rough(survey_report_path, config, detector=detector)
+        report = _run_rough_stage(args)
     elif args.stage == "final":
-        try:
-            rough_report_path = args.rough_report or find_latest_rough_report(args.output_dir)
-        except FileNotFoundError as exc:
-            raise SystemExit(str(exc)) from exc
-        config = FinalConfig(
-            scene_model_path=args.scene_model,
-            yolo_profile_path=args.yolo_config,
-            output_dir=args.output_dir,
-            camera_name=args.camera_name,
-            image_width=args.image_width,
-            image_height=args.image_height,
-            camera_z_m=args.final_camera_z,
-            tank_opening_z_m=args.tank_opening_z,
-            opening_clearance_m=args.opening_clearance,
-            standoff_m=args.final_standoff,
-            min_oblique_distance_m=args.final_min_oblique_distance,
-            look_at_height_offset_m=args.final_look_at_height_offset,
-            entry_side=args.final_entry_side,
-            target_match_radius_m=args.final_target_match_radius,
-            entry_validation_samples=args.final_entry_validation_samples,
-            entry_clearance_margin_m=args.final_entry_clearance_margin,
-            entry_portal_modes=args.final_entry_portal_modes,
-            entry_orientation_policy=args.final_entry_orientation_policy,
-            entry_lateral_orientation_policy=args.final_entry_lateral_orientation_policy,
-            entry_path_policy=args.final_entry_path_policy,
-            desired_stable_object_count=args.final_desired_stable_object_count,
-            final_view_angle_offsets_deg=args.final_view_angle_offsets_deg,
-            final_view_standoff_multipliers=args.final_view_standoff_multipliers,
-            final_view_camera_z_offsets_m=args.final_view_camera_z_offsets,
-            final_view_roll_offsets_deg=args.final_view_roll_offsets_deg,
-            yolo_confidence=args.yolo_conf,
-            yolo_iou=args.yolo_iou,
-            yolo_image_size=args.yolo_imgsz,
-            yolo_device=args.yolo_device,
-            yolo_max_detections=args.yolo_max_det,
-            yolo_tile_grid_size=args.yolo_tile_grid,
-            yolo_tile_overlap=args.yolo_tile_overlap,
-            yolo_tile_nms_iou=args.yolo_tile_nms_iou,
-            run_yolo=not args.skip_yolo,
-            plan_only=args.plan_only,
-            strict_yolo=args.strict_yolo,
-            max_ik_iterations=_value_or_default(
-                args.max_ik_iterations,
-                FinalConfig().max_ik_iterations,
-            ),
-            ik_position_tolerance_m=_value_or_default(
-                args.ik_position_tolerance,
-                DEFAULT_FINAL_IK_POSITION_TOLERANCE_M,
-            ),
-            ik_orientation_tolerance_rad=_value_or_default(
-                args.ik_orientation_tolerance,
-                FinalConfig().ik_orientation_tolerance_rad,
-            ),
-        )
-        detector = _build_yolo_detector(config)
-        report = run_task1_final(rough_report_path, config, detector=detector)
+        report = _run_final_stage(args)
     else:
-        try:
-            final_report_path = args.final_report or find_latest_final_report(args.output_dir)
-        except FileNotFoundError as exc:
-            raise SystemExit(str(exc)) from exc
-        config = ZoomConfig(
-            output_dir=args.output_dir,
-            target_area_ratio=args.zoom_target_area_ratio,
-            ratio_tolerance=args.zoom_ratio_tolerance,
-            candidate_area_ratios=args.zoom_candidate_area_ratios,
-            padding_ratio=args.zoom_padding_ratio,
-            selection_border_margin_px=args.zoom_selection_border_margin,
-            output_width=args.zoom_output_width,
-            output_height=args.zoom_output_height,
-            plan_only=args.plan_only,
-        )
-        report = run_task1_zoom(final_report_path, config)
-    print(json.dumps({"status": report["status"], "message": report["message"]}, ensure_ascii=False))
+        report = _run_zoom_stage(args)
+    summary = {"status": report["status"], "message": report["message"]}
+    if "stage_reports" in report:
+        summary["stage_reports"] = report["stage_reports"]
+    print(json.dumps(summary, ensure_ascii=False))
     print(f"report={report['report_path']}")
 
 
