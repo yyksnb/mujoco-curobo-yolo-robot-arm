@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import math
 import random
 import sys
 import time
-from contextlib import ExitStack
 from dataclasses import dataclass, field
 from importlib.util import find_spec
 from pathlib import Path
@@ -244,12 +242,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="survey,rough,final",
         help="Comma-separated phases to include when building a manifest: survey,rough,final.",
     )
-    parser.add_argument(
-        "--view",
-        choices=("global", "wrist", "both"),
-        default="global",
-        help="Viewer mode. both renders global and wrist-camera views side by side in one window.",
-    )
     parser.add_argument("--frame-duration", type=float, default=1.2, help="Seconds per frame in continuous playback.")
     parser.add_argument("--poll-seconds", type=float, default=0.005, help="GUI polling interval.")
     parser.add_argument(
@@ -305,18 +297,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_SURVEY_GLOBAL_ELEVATION_DEG,
         help="Survey-phase global free-camera elevation angle in degrees.",
-    )
-    parser.add_argument(
-        "--smooth-replay",
-        dest="smooth_replay",
-        action="store_true",
-        help="Build collision-checked in-memory interpolation frames for GUI display.",
-    )
-    parser.add_argument(
-        "--no-smooth-replay",
-        dest="smooth_replay",
-        action="store_false",
-        help="Show only recorded replay frames without GUI-only interpolation.",
     )
     parser.add_argument(
         "--replay-max-joint-step-rad",
@@ -448,7 +428,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.set_defaults(
         step_by_step=True,
         wait_for_close=True,
-        smooth_replay=True,
         replay_heavy_connector=DEFAULT_REPLAY_HEAVY_CONNECTOR,
     )
     return parser
@@ -506,11 +485,10 @@ def main() -> None:
     frames = manifest.get("frames", [])
     if not isinstance(frames, list) or not frames:
         raise SystemExit("Replay manifest contains no frames with robot qpos.")
-    if find_spec("mujoco") is None or find_spec("mujoco.viewer") is None:
-        raise SystemExit("MuJoCo viewer is not available. Run inside the mujoco-curobo conda environment.")
+    if find_spec("mujoco") is None:
+        raise SystemExit("MuJoCo is not available. Run inside the mujoco-curobo conda environment.")
 
     import mujoco  # type: ignore[import-not-found]
-    import mujoco.viewer  # type: ignore[import-not-found]
 
     run_dir = _resolve_run_dir(manifest, args.repo_root)
     model_path = _resolve_required_path(
@@ -526,207 +504,43 @@ def main() -> None:
         description="layout_snapshot_path",
     )
 
-    if args.view == "both":
-        _run_split_viewer(
-            mujoco,
-            manifest=manifest,
-            frames=frames,
-            model_path=model_path,
-            layout_path=layout_path,
-            camera_name=str(manifest.get("camera_name") or "wrist"),
-            step_by_step=args.step_by_step,
-            frame_duration_s=args.frame_duration,
-            poll_seconds=args.poll_seconds,
-            global_fovy_deg=args.global_fovy_deg,
-            global_lookat=args.global_lookat,
-            global_distance=args.global_distance,
-            global_elevation_deg=args.global_elevation_deg,
-            survey_global_fovy_deg=args.survey_global_fovy_deg,
-            survey_global_lookat=args.survey_global_lookat,
-            survey_global_distance=args.survey_global_distance,
-            survey_global_azimuth_deg=args.survey_global_azimuth_deg,
-            survey_global_elevation_deg=args.survey_global_elevation_deg,
-            smooth_replay=args.smooth_replay,
-            replay_max_joint_step_rad=args.replay_max_joint_step_rad,
-            replay_interpolated_frame_duration_s=args.replay_interpolated_frame_duration,
-            replay_playback_speed=args.replay_playback_speed,
-            replay_rrt_max_nodes=args.replay_rrt_max_nodes,
-            replay_rrt_step_rad=args.replay_rrt_step_rad,
-            replay_rrt_goal_sample_rate=args.replay_rrt_goal_sample_rate,
-            replay_rrt_seed=args.replay_rrt_seed,
-            replay_rrt_attempt_count=args.replay_rrt_attempt_count,
-            replay_recorded_waypoint_window=args.replay_recorded_waypoint_window,
-            replay_shortcut_passes=args.replay_shortcut_passes,
-            replay_heavy_connector=args.replay_heavy_connector,
-            replay_heavy_rrt_max_nodes=args.replay_heavy_rrt_max_nodes,
-            replay_heavy_rrt_step_rad=args.replay_heavy_rrt_step_rad,
-            replay_heavy_rrt_goal_sample_rate=args.replay_heavy_rrt_goal_sample_rate,
-            replay_motion_failure_policy=args.replay_motion_failure_policy,
-            loop=args.loop,
-            wait_for_close=args.wait_for_close,
-        )
-        return
-
-    scenes = {
-        mode: _load_replay_scene(
-            mujoco,
-            model_path=model_path,
-            layout_path=layout_path,
-            camera_name=str(manifest.get("camera_name") or "wrist"),
-        )
-        for mode in _viewer_modes(args.view)
-    }
-    if args.smooth_replay:
-        first_scene = next(iter(scenes.values()))
-        frames, smoothing_summary = _build_collision_checked_replay_motion(
-            mujoco,
-            first_scene.model,
-            first_scene.data,
-            frames,
-            max_joint_step_rad=args.replay_max_joint_step_rad,
-            interpolated_frame_duration_s=args.replay_interpolated_frame_duration,
-            rrt_max_nodes=args.replay_rrt_max_nodes,
-            rrt_step_rad=args.replay_rrt_step_rad,
-            rrt_goal_sample_rate=args.replay_rrt_goal_sample_rate,
-            rrt_seed=args.replay_rrt_seed,
-            rrt_attempt_count=args.replay_rrt_attempt_count,
-            recorded_waypoint_window=args.replay_recorded_waypoint_window,
-            shortcut_passes=args.replay_shortcut_passes,
-            heavy_connector=args.replay_heavy_connector,
-            heavy_rrt_max_nodes=args.replay_heavy_rrt_max_nodes,
-            heavy_rrt_step_rad=args.replay_heavy_rrt_step_rad,
-            heavy_rrt_goal_sample_rate=args.replay_heavy_rrt_goal_sample_rate,
-            motion_failure_policy=args.replay_motion_failure_policy,
-        )
-        _print_replay_motion_summary(smoothing_summary)
-    keymap = _resolve_keymap(mujoco)
-    control = _ReplayControl(paused=args.step_by_step)
-    launch_kwargs = {}
-    if _launch_passive_supports_key_callback(mujoco.viewer.launch_passive):
-        launch_kwargs["key_callback"] = lambda key: control.handle_key(int(key), keymap)
-
-    current_index = 0
-    motion_target_index: int | None = None
-    _apply_frame_to_all(mujoco, scenes, frames[current_index])
-    last_switch = time.monotonic()
-    advance_limit_warning_printed = False
-    finished = False
-
-    with ExitStack() as stack:
-        viewers = {
-            mode: stack.enter_context(mujoco.viewer.launch_passive(scene.model, scene.data, **launch_kwargs))
-            for mode, scene in scenes.items()
-        }
-        for mode, viewer in viewers.items():
-            scene = scenes[mode]
-            _configure_viewer_camera(
-                viewer,
-                mujoco,
-                scene.model,
-                scene.data,
-                mode,
-                manifest,
-                frames[current_index],
-                scene.camera_id,
-                global_fovy_deg=args.global_fovy_deg,
-                global_lookat=args.global_lookat,
-                global_distance=args.global_distance,
-                global_elevation_deg=args.global_elevation_deg,
-                survey_global_fovy_deg=args.survey_global_fovy_deg,
-                survey_global_lookat=args.survey_global_lookat,
-                survey_global_distance=args.survey_global_distance,
-                survey_global_azimuth_deg=args.survey_global_azimuth_deg,
-                survey_global_elevation_deg=args.survey_global_elevation_deg,
-            )
-
-        while all(viewer.is_running() for viewer in viewers.values()):
-            if control.consume_reset_request():
-                current_index = 0
-                finished = False
-                last_switch = time.monotonic()
-                _apply_frame_to_all(mujoco, scenes, frames[current_index])
-            else:
-                paused, _ = control.snapshot()
-                should_advance = False
-                if not finished:
-                    now = time.monotonic()
-                    force_first_step = False
-                    if motion_target_index is not None:
-                        should_advance = True
-                    elif paused:
-                        if control.consume_frame_request():
-                            motion_target_index = _next_replay_keyframe_index(
-                                frames,
-                                current_index,
-                                loop=args.loop,
-                            )
-                            should_advance = motion_target_index is not None
-                            force_first_step = should_advance
-                            last_switch = now
-                    else:
-                        should_advance = True
-                if should_advance:
-                    advance = _advance_replay_index(
-                        frames,
-                        current_index=current_index,
-                        finished=finished,
-                        motion_target_index=motion_target_index,
-                        elapsed_s=0.0 if force_first_step else now - last_switch,
-                        default_duration_s=args.frame_duration,
-                        playback_speed=args.replay_playback_speed,
-                        loop=args.loop,
-                        force_first_step=force_first_step,
-                    )
-                    current_index = advance.current_index
-                    finished = advance.finished
-                    motion_target_index = advance.motion_target_index
-                    if advance.reached_indices and (not finished or args.loop):
-                        _apply_frame_to_all(mujoco, scenes, frames[current_index])
-                        for reached_index in advance.reached_indices:
-                            if not _is_generated_motion_frame(frames[reached_index]):
-                                _print_frame(frames[reached_index])
-                    if advance.reached_indices:
-                        last_switch = now - advance.elapsed_remainder_s
-                    if advance.advance_limit_reached and not advance_limit_warning_printed:
-                        _print_replay_timing_warning(max_advances=len(frames))
-                        advance_limit_warning_printed = True
-
-            for mode, viewer in viewers.items():
-                scene = scenes[mode]
-                _configure_viewer_camera(
-                    viewer,
-                    mujoco,
-                    scene.model,
-                    scene.data,
-                    mode,
-                    manifest,
-                    frames[current_index],
-                    scene.camera_id,
-                    global_fovy_deg=args.global_fovy_deg,
-                    global_lookat=args.global_lookat,
-                    global_distance=args.global_distance,
-                    global_elevation_deg=args.global_elevation_deg,
-                    survey_global_fovy_deg=args.survey_global_fovy_deg,
-                    survey_global_lookat=args.survey_global_lookat,
-                    survey_global_distance=args.survey_global_distance,
-                    survey_global_azimuth_deg=args.survey_global_azimuth_deg,
-                    survey_global_elevation_deg=args.survey_global_elevation_deg,
-                )
-                _render_overlay(
-                    viewer,
-                    mujoco,
-                    mode=mode,
-                    frame=frames[current_index],
-                    frame_index=_capture_frame_display_position(frames, current_index)[0] - 1,
-                    frame_count=_capture_frame_display_position(frames, current_index)[1],
-                    control=control,
-                    finished=finished,
-                )
-                viewer.sync()
-
-            if finished and not args.wait_for_close:
-                break
-            time.sleep(args.poll_seconds)
+    _run_split_viewer(
+        mujoco,
+        manifest=manifest,
+        frames=frames,
+        model_path=model_path,
+        layout_path=layout_path,
+        camera_name=str(manifest.get("camera_name") or "wrist"),
+        step_by_step=args.step_by_step,
+        frame_duration_s=args.frame_duration,
+        poll_seconds=args.poll_seconds,
+        global_fovy_deg=args.global_fovy_deg,
+        global_lookat=args.global_lookat,
+        global_distance=args.global_distance,
+        global_elevation_deg=args.global_elevation_deg,
+        survey_global_fovy_deg=args.survey_global_fovy_deg,
+        survey_global_lookat=args.survey_global_lookat,
+        survey_global_distance=args.survey_global_distance,
+        survey_global_azimuth_deg=args.survey_global_azimuth_deg,
+        survey_global_elevation_deg=args.survey_global_elevation_deg,
+        replay_max_joint_step_rad=args.replay_max_joint_step_rad,
+        replay_interpolated_frame_duration_s=args.replay_interpolated_frame_duration,
+        replay_playback_speed=args.replay_playback_speed,
+        replay_rrt_max_nodes=args.replay_rrt_max_nodes,
+        replay_rrt_step_rad=args.replay_rrt_step_rad,
+        replay_rrt_goal_sample_rate=args.replay_rrt_goal_sample_rate,
+        replay_rrt_seed=args.replay_rrt_seed,
+        replay_rrt_attempt_count=args.replay_rrt_attempt_count,
+        replay_recorded_waypoint_window=args.replay_recorded_waypoint_window,
+        replay_shortcut_passes=args.replay_shortcut_passes,
+        replay_heavy_connector=args.replay_heavy_connector,
+        replay_heavy_rrt_max_nodes=args.replay_heavy_rrt_max_nodes,
+        replay_heavy_rrt_step_rad=args.replay_heavy_rrt_step_rad,
+        replay_heavy_rrt_goal_sample_rate=args.replay_heavy_rrt_goal_sample_rate,
+        replay_motion_failure_policy=args.replay_motion_failure_policy,
+        loop=args.loop,
+        wait_for_close=args.wait_for_close,
+    )
 
 
 def _load_or_build_manifest(args: argparse.Namespace) -> dict[str, Any]:
@@ -743,12 +557,6 @@ def _load_or_build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     except ValueError as exc:
         print(f"rebuilding replay manifest because existing manifest could not be loaded: {exc}", file=sys.stderr)
         return write_task1_replay_manifest(run_dir, phases=phases, manifest_path=manifest_path)
-
-
-def _viewer_modes(view: str) -> tuple[str, ...]:
-    if view == "both":
-        return ("global", "wrist")
-    return (view,)
 
 
 def _run_split_viewer(
@@ -771,7 +579,6 @@ def _run_split_viewer(
     survey_global_distance: float | None,
     survey_global_azimuth_deg: float | None,
     survey_global_elevation_deg: float | None,
-    smooth_replay: bool,
     replay_max_joint_step_rad: float,
     replay_interpolated_frame_duration_s: float,
     replay_playback_speed: float,
@@ -825,28 +632,27 @@ def _run_split_viewer(
         wrist_camera = mujoco.MjvCamera()
         wrist_camera.type = mujoco.mjtCamera.mjCAMERA_FIXED
         wrist_camera.fixedcamid = replay_scene.camera_id
-        if smooth_replay:
-            frames, smoothing_summary = _build_collision_checked_replay_motion(
-                mujoco,
-                model,
-                data,
-                frames,
-                max_joint_step_rad=replay_max_joint_step_rad,
-                interpolated_frame_duration_s=replay_interpolated_frame_duration_s,
-                rrt_max_nodes=replay_rrt_max_nodes,
-                rrt_step_rad=replay_rrt_step_rad,
-                rrt_goal_sample_rate=replay_rrt_goal_sample_rate,
-                rrt_seed=replay_rrt_seed,
-                rrt_attempt_count=replay_rrt_attempt_count,
-                recorded_waypoint_window=replay_recorded_waypoint_window,
-                shortcut_passes=replay_shortcut_passes,
-                heavy_connector=replay_heavy_connector,
-                heavy_rrt_max_nodes=replay_heavy_rrt_max_nodes,
-                heavy_rrt_step_rad=replay_heavy_rrt_step_rad,
-                heavy_rrt_goal_sample_rate=replay_heavy_rrt_goal_sample_rate,
-                motion_failure_policy=replay_motion_failure_policy,
-            )
-            _print_replay_motion_summary(smoothing_summary)
+        frames, smoothing_summary = _build_collision_checked_replay_motion(
+            mujoco,
+            model,
+            data,
+            frames,
+            max_joint_step_rad=replay_max_joint_step_rad,
+            interpolated_frame_duration_s=replay_interpolated_frame_duration_s,
+            rrt_max_nodes=replay_rrt_max_nodes,
+            rrt_step_rad=replay_rrt_step_rad,
+            rrt_goal_sample_rate=replay_rrt_goal_sample_rate,
+            rrt_seed=replay_rrt_seed,
+            rrt_attempt_count=replay_rrt_attempt_count,
+            recorded_waypoint_window=replay_recorded_waypoint_window,
+            shortcut_passes=replay_shortcut_passes,
+            heavy_connector=replay_heavy_connector,
+            heavy_rrt_max_nodes=replay_heavy_rrt_max_nodes,
+            heavy_rrt_step_rad=replay_heavy_rrt_step_rad,
+            heavy_rrt_goal_sample_rate=replay_heavy_rrt_goal_sample_rate,
+            motion_failure_policy=replay_motion_failure_policy,
+        )
+        _print_replay_motion_summary(smoothing_summary)
 
         keymap = _GuiKeyMap(space=int(glfw.KEY_SPACE), next_frame=int(glfw.KEY_F9), reset=int(glfw.KEY_F12))
         control = _ReplayControl(paused=step_by_step)
@@ -1042,11 +848,6 @@ def _load_replay_scene(mujoco: Any, *, model_path: Path, layout_path: Path, came
     apply_task1_layout_to_mujoco(mujoco, model, data, layout_path)
     camera_id = _resolve_camera_id(mujoco, model, camera_name)
     return _ReplayScene(model=model, data=data, camera_id=camera_id)
-
-
-def _apply_frame_to_all(mujoco: Any, scenes: dict[str, _ReplayScene], frame: dict[str, Any]) -> None:
-    for scene in scenes.values():
-        _apply_frame(mujoco, scene.model, scene.data, frame)
 
 
 def _apply_frame(mujoco: Any, model: Any, data: Any, frame: dict[str, Any]) -> None:
@@ -2458,79 +2259,6 @@ def _resolve_camera_id(mujoco: Any, model: Any, camera_name: str) -> int:
     raise SystemExit(f"Camera not found in MuJoCo model: {camera_name} (also tried gen3_{camera_name})")
 
 
-def _resolve_keymap(mujoco: Any) -> _GuiKeyMap:
-    viewer_module = getattr(mujoco, "viewer", None)
-    glfw = getattr(viewer_module, "glfw", None)
-    if glfw is not None:
-        return _GuiKeyMap(
-            space=int(glfw.KEY_SPACE),
-            next_frame=int(glfw.KEY_F9),
-            reset=int(glfw.KEY_F12),
-        )
-    return _GuiKeyMap(space=32, next_frame=298, reset=301)
-
-
-def _launch_passive_supports_key_callback(launch_passive: Any) -> bool:
-    try:
-        return "key_callback" in inspect.signature(launch_passive).parameters
-    except (TypeError, ValueError):
-        return False
-
-
-def _configure_viewer_camera(
-    viewer: Any,
-    mujoco: Any,
-    model: Any,
-    data: Any,
-    mode: str,
-    manifest: dict[str, Any],
-    frame: dict[str, Any],
-    camera_id: int,
-    global_fovy_deg: float,
-    global_lookat: tuple[float, float, float] | None,
-    global_distance: float | None,
-    global_elevation_deg: float | None,
-    survey_global_fovy_deg: float | None,
-    survey_global_lookat: tuple[float, float, float] | None,
-    survey_global_distance: float | None,
-    survey_global_azimuth_deg: float | None,
-    survey_global_elevation_deg: float | None,
-) -> None:
-    if mode == "wrist":
-        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-        viewer.cam.fixedcamid = camera_id
-        return
-
-    camera_params = _global_camera_params_for_frame(
-        model,
-        manifest,
-        frame,
-        global_lookat=global_lookat,
-        global_distance=global_distance,
-        global_elevation_deg=global_elevation_deg,
-        survey_global_lookat=survey_global_lookat,
-        survey_global_distance=survey_global_distance,
-        survey_global_azimuth_deg=survey_global_azimuth_deg,
-        survey_global_elevation_deg=survey_global_elevation_deg,
-    )
-    viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    viewer.cam.lookat[0] = camera_params["lookat"][0]
-    viewer.cam.lookat[1] = camera_params["lookat"][1]
-    viewer.cam.lookat[2] = camera_params["lookat"][2]
-    viewer.cam.distance = camera_params["distance"]
-    viewer.cam.azimuth = camera_params["azimuth"]
-    viewer.cam.elevation = camera_params["elevation"]
-    _set_global_free_camera_fovy(
-        model,
-        _global_fovy_for_frame(
-            frame,
-            global_fovy_deg=global_fovy_deg,
-            survey_global_fovy_deg=survey_global_fovy_deg,
-        ),
-    )
-    mujoco.mj_forward(model, data)
-
-
 def _configure_mjv_global_camera(
     mujoco: Any,
     model: Any,
@@ -2783,58 +2511,6 @@ def _control_state_text(control: _ReplayControl, *, finished: bool) -> str:
     if pending:
         return f"{state}, queued={pending}"
     return state
-
-
-def _render_overlay(
-    viewer: Any,
-    mujoco: Any,
-    *,
-    mode: str,
-    frame: dict[str, Any],
-    frame_index: int,
-    frame_count: int,
-    control: _ReplayControl,
-    finished: bool,
-) -> None:
-    if not hasattr(viewer, "set_texts"):
-        return
-    font = getattr(mujoco.mjtFontScale, "mjFONTSCALE_100", mujoco.mjtFontScale.mjFONTSCALE_150)
-    top_right = getattr(mujoco.mjtGridPos, "mjGRID_TOPRIGHT", None)
-    top_left = getattr(mujoco.mjtGridPos, "mjGRID_TOPLEFT", None)
-    if top_right is None:
-        return
-
-    paused, pending = control.snapshot()
-    state = "paused" if paused else "running"
-    if finished:
-        state = f"{state}, finished"
-    elif pending:
-        state = f"{state}, queued={pending}"
-    label = "\n".join(
-        [
-            f"{mode} view",
-            f"Frame {frame_index + 1}/{frame_count}",
-            f"{frame.get('phase')} / {frame.get('view_role')}",
-            str(frame.get("view_id") or frame.get("frame_id")),
-            str(frame.get("target_id") or ""),
-        ]
-    )
-    keys = "\n".join(
-        [
-            "Keys:",
-            "Space: pause/resume",
-            "F9: next capture frame",
-            "F12: reset",
-            f"State: {state}",
-        ]
-    )
-    try:
-        texts = [(font, top_right, label, "")]
-        if top_left is not None:
-            texts.insert(0, (font, top_left, keys, ""))
-        viewer.set_texts(texts)
-    except Exception:
-        return
 
 
 def _print_frame(frame: dict[str, Any]) -> None:

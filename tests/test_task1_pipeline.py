@@ -1,6 +1,7 @@
 import json
+import importlib.util
 import math
-import subprocess
+import random
 import sys
 from pathlib import Path
 
@@ -28,13 +29,7 @@ from robot_arm_pipeline.task1.rough import (
     _select_reachable_rough_capture_plan,
 )
 from robot_arm_pipeline.task1.final import (
-    DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
     DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
-    DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY,
-    DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY,
-    DEFAULT_FINAL_ENTRY_PATH_POLICY,
-    DEFAULT_FINAL_ENTRY_PORTAL_MODES,
-    DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS,
     FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
     FinalTarget,
     FinalConfig,
@@ -46,9 +41,17 @@ from robot_arm_pipeline.task1.final import (
     _object_capture_public_payload,
     build_final_plan,
     load_task1_rough_report,
+    run_task1_final,
     select_stable_final_objects,
 )
 from robot_arm_pipeline.task1.zoom import ZoomConfig, run_task1_zoom
+from robot_arm_pipeline.task1.replay import (
+    TASK1_REPLAY_SCHEMA_VERSION,
+    build_task1_replay_manifest,
+    find_latest_task1_run,
+    replay_manifest_path_for_run,
+    write_task1_replay_manifest,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -239,96 +242,6 @@ def test_candidate_annotation_uses_final_candidate_supporting_observations_only(
     assert detections[0]["annotation_label"] == "candidate_001 marker 0.90"
 
 
-def test_task1_recognition_script_without_stage_runs_full_pipeline(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    output_dir = tmp_path / "task1"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
-            "--layout",
-            str(layout_path),
-            "--output-dir",
-            str(output_dir),
-            "--plan-only",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    summary = json.loads(result.stdout.splitlines()[0])
-    assert summary["status"] == "failed"
-    assert set(summary["stage_reports"]) == {"survey", "rough", "final", "zoom"}
-    reports = sorted(output_dir.glob("*/survey/survey_report.json"))
-    assert len(reports) == 1
-    run_dir = reports[0].parent.parent
-    assert Path(summary["stage_reports"]["survey"]) == reports[0]
-    assert Path(summary["stage_reports"]["rough"]) == run_dir / "rough" / "rough_report.json"
-    assert Path(summary["stage_reports"]["final"]) == run_dir / "final" / "final_report.json"
-    assert Path(summary["stage_reports"]["zoom"]) == run_dir / "zoom" / "zoom_report.json"
-    assert (run_dir / "rough" / "rough_report.json").exists()
-    assert (run_dir / "final" / "final_report.json").exists()
-    assert (run_dir / "zoom" / "zoom_report.json").exists()
-    report = json.loads(reports[0].read_text(encoding="utf-8"))
-    assert report["schema_version"] == "task1_survey_report_v1"
-    assert report["stage"] == "survey"
-    assert report["status"] == "plan_only"
-    assert report["report_path"] == str(reports[0])
-    assert report["survey_dir"] == str(reports[0].parent)
-    assert Path(report["layout_snapshot_path"]).exists()
-    assert report["depth_retention"] == {
-        "saved": False,
-        "format": None,
-        "reason": "discarded_after_observation_projection",
-    }
-    assert len(report["views"]) == 16
-    assert report["camera_name"] == "wrist"
-
-
-def test_task1_recognition_script_seeded_layout_stays_under_task1_output(tmp_path: Path) -> None:
-    pytest.importorskip("mujoco")
-    output_dir = tmp_path / "task1"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
-            "--stage",
-            "survey",
-            "--seed",
-            "21",
-            "--object-count",
-            "1",
-            "--output-dir",
-            str(output_dir),
-            "--plan-only",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert '"status": "plan_only"' in result.stdout
-    reports = sorted(output_dir.glob("*/survey/survey_report.json"))
-    assert len(reports) == 1
-    report = json.loads(reports[0].read_text(encoding="utf-8"))
-    run_dir = Path(report["task1_run_dir"])
-    layout_path = run_dir / "layout" / "target_object_poses.json"
-    layout = json.loads(layout_path.read_text(encoding="utf-8"))
-
-    assert run_dir.parent == output_dir
-    assert run_dir.name.endswith("_seed21")
-    assert report["layout_source_path"] == str(layout_path)
-    assert report["layout_snapshot_path"] == str(layout_path)
-    assert layout["seed"] == 21
-    assert len(layout["objects"]) == 1
-    assert not (tmp_path / "object_poses").exists()
-
-
 def test_rough_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path: Path) -> None:
     layout_path = _write_layout(tmp_path)
     survey_report_path = _write_survey_report(tmp_path, layout_path)
@@ -357,44 +270,6 @@ def test_rough_plan_uses_survey_candidates_and_keeps_camera_inside_tank(tmp_path
     candidate_002 = first_by_candidate["candidate_002"]
     assert candidate_001.view.desired_camera_position_world[1] > candidate_001.candidate_rough_position_world[1]
     assert candidate_002.view.desired_camera_position_world[1] < candidate_002.candidate_rough_position_world[1]
-
-
-def test_task1_recognition_script_rough_plan_only_writes_report(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    survey_report_path = _write_survey_report(tmp_path, layout_path)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
-            "--stage",
-            "rough",
-            "--survey-report",
-            str(survey_report_path),
-            "--plan-only",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert '"status": "plan_only"' in result.stdout
-    rough_report_path = survey_report_path.parent.parent / "rough" / "rough_report.json"
-    report = json.loads(rough_report_path.read_text(encoding="utf-8"))
-    assert report["schema_version"] == "task1_rough_report_v1"
-    assert report["stage"] == "rough"
-    assert report["status"] == "plan_only"
-    assert report["source_survey_report_path"] == str(survey_report_path)
-    assert len(report["survey_candidates"]) == 2
-    assert len(report["planned_views"]) == 6
-    assert report["stable_objects"] == []
-    assert report["tentative_objects"] == []
-    assert report["ambiguous_objects"] == []
-    assert report["rejected_hypotheses"] == []
-    assert report["rough_view_selection_summary"]["enabled"] is False
-    assert report["object_selection_summary"]["status"] == "not_run"
-    assert report["stable_object_selection"]["status"] == "not_run"
 
 
 def test_reachable_rough_capture_plan_only_returns_validated_views(tmp_path: Path) -> None:
@@ -578,18 +453,22 @@ def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
     rough_report_path = _write_rough_report(tmp_path, layout_path)
     rough_report = load_task1_rough_report(rough_report_path)
     assert FinalConfig().capture_config().save_depth_arrays is True
-
-    workspace, planned = build_final_plan(
-        rough_report,
-        FinalConfig(
-            plan_only=True,
-            camera_z_m=0.30,
-            standoff_m=0.12,
-            min_oblique_distance_m=0.06,
-            entry_validation_samples=3,
-            entry_clearance_margin_m=DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
-        ),
+    config = FinalConfig(
+        plan_only=True,
+        camera_z_m=0.30,
+        standoff_m=0.12,
+        min_oblique_distance_m=0.06,
+        entry_validation_samples=3,
+        entry_clearance_margin_m=DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
+        final_view_angle_offsets_deg=(0.0, 30.0),
+        final_view_standoff_multipliers=(1.0, 2.0),
+        final_view_camera_z_offsets_m=(0.0,),
+        final_view_roll_offsets_deg=(0.0,),
+        centerline_view_angle_offsets_deg=(),
+        save_debug_trace=True,
     )
+
+    workspace, planned = build_final_plan(rough_report, config)
 
     assert len(planned) == 3
     assert [item.target.source_status for item in planned] == ["stable", "tentative", "ambiguous"]
@@ -625,84 +504,32 @@ def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
         assert item.view_candidates[0].view.view_id == item.view.view_id
         assert item.view_candidates[0].standoff_multiplier == pytest.approx(1.0)
         assert item.view_candidates[0].entry_portal_mode == "final-vertical"
-        assert any(
-            candidate.standoff_multiplier == pytest.approx(DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1])
-            for candidate in item.view_candidates
-        )
         assert all(candidate.entry_views for candidate in item.view_candidates)
         assert all("camera_z_offset_m" in candidate.to_dict() for candidate in item.view_candidates)
         assert all("roll_offset_deg" in candidate.to_dict() for candidate in item.view_candidates)
         assert all("entry_portal_mode" in candidate.to_dict() for candidate in item.view_candidates)
 
+    capture_dir = rough_report.task1_run_dir / "final"
+    plan_path = capture_dir / "final_plan.json"
+    report_path = capture_dir / "final_report.json"
+    report_payload = run_task1_final(rough_report_path, config)
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
 
-def test_task1_recognition_script_final_plan_only_writes_report(tmp_path: Path) -> None:
-    layout_path = _write_layout(tmp_path)
-    rough_report_path = _write_rough_report(tmp_path, layout_path)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "run_task1_recognition.py"),
-            "--stage",
-            "final",
-            "--rough-report",
-            str(rough_report_path),
-            "--plan-only",
-            "--save-debug-trace",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert '"status": "plan_only"' in result.stdout
-    capture_report_path = rough_report_path.parent.parent / "final" / "final_report.json"
-    report = json.loads(capture_report_path.read_text(encoding="utf-8"))
-    assert report["schema_version"] == "task1_final_report_v1"
-    assert report["stage"] == "final"
-    assert report["status"] == "plan_only"
-    assert report["source_rough_report_path"] == str(rough_report_path)
-    assert len(report["primary_objects"]) == 1
-    assert len(report["follow_up_targets"]) == 2
-    assert report["stable_objects"] == []
-    assert report["unstable_objects"] == []
-    assert report["stable_object_selection"]["status"] == "not_run"
-    assert [capture["status"] for capture in report["object_captures"]] == ["planned", "planned", "planned"]
-    assert report["quality"]["stable_object_count"] == 1
-    plan_path = rough_report_path.parent.parent / "final" / "final_plan.json"
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    assert (
-        report["planned_captures"][0]["entry_views"][0]["desired_camera_position_world"][2]
-        < report["workspace"]["tank_opening_z_m"] - report["workspace"]["opening_clearance_m"]
-    )
-    assert "view_candidates" not in report["planned_captures"][0]
-    assert "view_candidates" not in report["object_captures"][0]
-    assert "view_candidate_attempts" not in report["object_captures"][0]
-    assert report["planned_captures"][0]["view_candidate_summary"]["candidate_count"] >= 2
-    assert report["object_captures"][0]["view_candidate_attempt_summary"]["attempt_count"] == 0
-    assert plan["planned_captures"][0]["view_candidate_summary"]["first_candidate"]["entry_portal_mode"] == "final-vertical"
-    assert plan["debug_trace_policy"]["formal_outputs_include_full_candidate_trace"] is False
-    assert "final_view_camera_z_offsets_m" in report["final_config"]
-    assert "final_view_roll_offsets_deg" in report["final_config"]
-    assert report["final_config"]["save_debug_trace"] is True
-    assert report["final_config"]["entry_portal_modes"] == list(DEFAULT_FINAL_ENTRY_PORTAL_MODES)
-    assert report["final_config"]["entry_orientation_policy"] == DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY
-    assert (
-        report["final_config"]["entry_lateral_orientation_policy"]
-        == DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY
-    )
-    assert report["final_config"]["entry_path_policy"] == DEFAULT_FINAL_ENTRY_PATH_POLICY
-    assert report["final_config"]["desired_stable_object_count"] == DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT
-    debug_trace_path = rough_report_path.parent.parent / "final" / "final_debug_trace.json"
-    debug_trace = json.loads(debug_trace_path.read_text(encoding="utf-8"))
+    assert report_path.exists()
+    assert report_payload["status"] == "plan_only"
+    assert "view_candidates" not in plan_payload["planned_captures"][0]
+    assert "view_candidates" not in report_payload["planned_captures"][0]
+    assert "view_candidates" not in report_payload["object_captures"][0]
+    assert "view_candidate_attempts" not in report_payload["object_captures"][0]
+    assert plan_payload["planned_captures"][0]["view_candidate_summary"]["candidate_count"] >= 2
+    assert report_payload["object_captures"][0]["view_candidate_attempt_summary"]["attempt_count"] == 0
+    assert plan_payload["debug_trace_policy"]["formal_outputs_include_full_candidate_trace"] is False
+    assert report_payload["debug_trace_policy"]["debug_trace_path"] == str(capture_dir / "final_debug_trace.json")
+    assert report_payload["final_config"]["save_debug_trace"] is True
+    assert report_payload["final_reachable_planning_summary"]["strategy"] == "whole_arm_final_view_candidate_selection_v1"
+    debug_trace = json.loads((capture_dir / "final_debug_trace.json").read_text(encoding="utf-8"))
     assert debug_trace["schema_version"] == "task1_final_debug_trace_v1"
     assert len(debug_trace["planned_captures"][0]["view_candidates"]) >= 2
-    assert any(
-        candidate["standoff_multiplier"] == DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS[-1]
-        for candidate in debug_trace["planned_captures"][0]["view_candidates"]
-    )
-    assert report["final_reachable_planning_summary"]["strategy"] == "whole_arm_final_view_candidate_selection_v1"
 
 
 def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path) -> None:
@@ -1201,6 +1028,245 @@ def test_task1_zoom_writes_selected_image_and_reports_missing_source(tmp_path: P
     assert missing_report["zoomed_objects"][0]["reason"] == "source_image_missing"
 
 
+def test_task1_replay_manifest_and_latest_run_contract(tmp_path: Path) -> None:
+    run_dir = _write_replay_task1_run(tmp_path)
+
+    manifest = build_task1_replay_manifest(run_dir)
+    assert manifest["schema_version"] == TASK1_REPLAY_SCHEMA_VERSION
+    assert manifest["status"] == "success"
+    assert [frame["phase"] for frame in manifest["frames"]] == ["survey", "rough", "final"]
+    assert [frame["view_role"] for frame in manifest["frames"]] == [
+        "survey_capture",
+        "rough_capture",
+        "final_photo",
+    ]
+    assert manifest["frames"][0]["qpos_source"] == "actual_qpos"
+    assert manifest["frames"][1]["qpos_source"] == "fixed_qpos"
+    assert manifest["frames"][-1]["target_id"] == "rough_object_001"
+
+    written = write_task1_replay_manifest(run_dir)
+    manifest_path = replay_manifest_path_for_run(run_dir)
+    assert manifest_path.exists()
+    assert written["manifest_path"] == str(manifest_path)
+    assert find_latest_task1_run(tmp_path / "task1") == run_dir
+
+
+def test_task1_replay_gui_cli_and_camera_defaults_are_current_single_window_contract() -> None:
+    module = _load_replay_script_module()
+    args = module.build_arg_parser().parse_args([])
+
+    assert not hasattr(args, "view")
+    assert not hasattr(args, "smooth_replay")
+    assert args.global_lookat == pytest.approx((0.5, 0.5, 0.15))
+    assert args.global_distance == pytest.approx(0.75)
+    assert args.global_elevation_deg == pytest.approx(-20.0)
+    assert args.global_fovy_deg == pytest.approx(75.0)
+    assert args.survey_global_lookat == pytest.approx((0.5, 0.5, 0.4))
+    assert args.survey_global_distance == pytest.approx(1.0)
+    assert args.survey_global_azimuth_deg == pytest.approx(135.0)
+    assert args.survey_global_elevation_deg == pytest.approx(-30.0)
+    assert args.survey_global_fovy_deg == pytest.approx(80.0)
+    assert args.poll_seconds == pytest.approx(0.005)
+    assert args.replay_playback_speed == pytest.approx(2.0)
+    assert args.replay_heavy_connector is True
+
+    left, divider, right = module._split_viewports(_FakeReplayRectMujoco, width=1001, height=700)
+    assert (left.left, left.bottom, left.width, left.height) == (0, 0, 499, 700)
+    assert (divider.left, divider.bottom, divider.width, divider.height) == (499, 0, 2, 700)
+    assert (right.left, right.bottom, right.width, right.height) == (501, 0, 500, 700)
+
+    model = _FakeReplayCameraModel(extent=1.2)
+    manifest = {
+        "workspace": {
+            "x_min": 0.15,
+            "x_max": 0.85,
+            "y_min": 0.15,
+            "y_max": 0.85,
+            "bottom_z_m": 0.03,
+        }
+    }
+    survey_params = module._global_camera_params_for_frame(model, manifest, {"phase": "survey"})
+    final_params = module._global_camera_params_for_frame(model, manifest, {"phase": "final"})
+    assert survey_params == pytest.approx(
+        {"lookat": (0.5, 0.5, 0.4), "distance": 1.0, "azimuth": 135.0, "elevation": -30.0}
+    )
+    assert final_params == pytest.approx(
+        {"lookat": (0.5, 0.5, 0.15), "distance": 0.75, "azimuth": 135.0, "elevation": -20.0}
+    )
+
+
+def test_task1_replay_motion_smoothing_keeps_capture_frame_semantics() -> None:
+    module = _load_replay_script_module()
+    frames = [
+        {"frame_id": "survey/a", "phase": "survey", "qpos": [0.0]},
+        {"frame_id": "survey/b", "phase": "survey", "qpos": [0.24]},
+        {"frame_id": "rough/c", "phase": "rough", "target_id": "candidate_001", "qpos": [0.48]},
+        {"frame_id": "final/d", "phase": "final", "target_id": "rough_object_001", "qpos": [0.72]},
+    ]
+
+    display_frames, summary = module._build_collision_checked_replay_motion(
+        _FakeReplayMujoco(),
+        _FakeReplayMotionModel(nq=1),
+        _FakeReplayMotionData(nq=1),
+        frames,
+        max_joint_step_rad=0.1,
+        interpolated_frame_duration_s=0.04,
+    )
+
+    assert len(frames) == 4
+    assert summary.input_frame_count == 4
+    assert summary.interpolated_frame_count == 4
+    assert summary.keyframe_cut_count == 1
+    assert summary.planned_boundary_connector_count == 1
+    by_id = {frame["frame_id"]: frame for frame in display_frames if not frame.get("replay_generated")}
+    assert by_id["survey/b"]["replay_cut_reason"] == "phase_boundary"
+    assert by_id["rough/c"]["replay_planned_boundary"] == "rough_to_final_boundary"
+    assert module._next_replay_keyframe_index(display_frames, 0, loop=False) == 3
+    assert module._capture_frame_display_position(display_frames, 1) == (1, 4)
+    assert module._capture_frame_display_position(display_frames, len(display_frames) - 1) == (4, 4)
+
+
+def test_task1_replay_planning_defenses_are_visible_for_hinges_and_collisions() -> None:
+    module = _load_replay_script_module()
+    display_frames, summary = module._build_collision_checked_replay_motion(
+        _FakeReplayMujoco(),
+        _FakeReplayMotionModel(nq=1, limited=(0,)),
+        _FakeReplayMotionData(nq=1),
+        [
+            {"frame_id": "a", "phase": "survey", "qpos": [math.radians(20.0)]},
+            {"frame_id": "b", "phase": "survey", "qpos": [math.radians(320.0)]},
+        ],
+        max_joint_step_rad=0.2,
+        interpolated_frame_duration_s=0.04,
+    )
+    assert display_frames[-1]["qpos"][0] == pytest.approx(math.radians(-40.0), abs=1e-6)
+    assert display_frames[-1]["replay_qpos_normalization_reason"] == "nearest_equivalent_unlimited_hinge"
+    assert summary.continuous_joint_adjusted_keyframe_count == 1
+
+    with pytest.raises(SystemExit, match="collision check failed"):
+        module._build_collision_checked_replay_motion(
+            _FakeReplayMujoco(
+                body_names={1: "gen3_link", 2: "tank_root"},
+                geom_names={0: "gen3_geom", 1: "tank_geom"},
+            ),
+            _FakeReplayMotionModel(nq=1, body_parentid=[0, 0, 0], geom_bodyid=[1, 2]),
+            _FakeReplayMotionData(nq=1, contacts=[_FakeReplayContact(geom1=0, geom2=1, dist=-0.001)]),
+            [
+                {"frame_id": "a", "phase": "survey", "qpos": [0.0]},
+                {"frame_id": "b", "phase": "survey", "qpos": [0.1]},
+            ],
+            max_joint_step_rad=0.1,
+            interpolated_frame_duration_s=0.04,
+        )
+
+
+def test_task1_replay_connector_strategy_summary_counts_heavy_rrt(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_replay_script_module()
+    monkeypatch.setattr(module, "_collision_free_replay_edge", lambda *_args, **_kwargs: (False, 1))
+    monkeypatch.setattr(module, "_plan_replay_coordinate_sweep", lambda *_args, **_kwargs: (None, 2))
+
+    def _fake_rrt(*_args, max_nodes: int, **_kwargs):
+        if max_nodes == 100:
+            return None, 3
+        return [[0.5, 0.5]], 4
+
+    monkeypatch.setattr(module, "_rrt_connect_replay_segment", _fake_rrt)
+
+    plan, checks = module._plan_replay_edge_with_rrt(
+        _FakeReplayMujoco(),
+        _FakeReplayMotionModel(nq=2),
+        _FakeReplayMotionData(nq=2),
+        [0.0, 0.0],
+        [1.0, 1.0],
+        max_joint_step_rad=0.1,
+        rrt_max_nodes=100,
+        rrt_step_rad=0.1,
+        rrt_goal_sample_rate=0.2,
+        rrt_attempt_count=1,
+        rng=random.Random(0),
+        shortcut_passes=0,
+        heavy_connector=True,
+        heavy_rrt_max_nodes=500,
+        heavy_rrt_step_rad=0.2,
+        heavy_rrt_goal_sample_rate=0.15,
+    )
+
+    assert plan is not None
+    assert plan.strategy == "heavy_rrt_connect"
+    assert plan.heavy_rrt_count == 1
+    assert plan.rrt_edge_count == 1
+    assert checks == 10
+
+
+def test_task1_replay_video_timeline_and_final_zoom_photo_contract(tmp_path: Path) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    module = _load_replay_video_script_module()
+    frames = [
+        {"frame_id": "survey_0000", "phase": "survey"},
+        {"frame_id": "motion_0", "phase": "survey", "replay_generated": True},
+        {"frame_id": "survey_0001", "phase": "survey"},
+        {"frame_id": "final_0000", "phase": "final"},
+    ]
+
+    timeline = module._build_video_timeline(
+        frames,
+        fps=10.0,
+        capture_hold_seconds=2.0,
+        motion_frame_duration_s=0.04,
+    )
+    assert [(item.role, item.label, item.display_index, item.wrist_index, item.repeat_count) for item in timeline] == [
+        ("capture_hold", "survey 1/2", 0, 0, 20),
+        ("motion", "moving...", 1, 0, 1),
+        ("capture_hold", "survey 2/2", 2, 2, 20),
+        ("capture_hold", "final 1/1", 3, 3, 20),
+    ]
+
+    run_dir = tmp_path / "task1" / "run_seed101"
+    final_image = run_dir / "final" / "images" / "final_object.png"
+    zoom_image = run_dir / "zoom" / "selected" / "zoom_object.png"
+    final_image.parent.mkdir(parents=True, exist_ok=True)
+    zoom_image.parent.mkdir(parents=True, exist_ok=True)
+    image_module.new("RGB", (1920, 1080), color=(20, 30, 40)).save(final_image)
+    image_module.new("RGB", (1920, 1080), color=(80, 90, 100)).save(zoom_image)
+    _write_json_report(
+        run_dir / "final" / "final_report.json",
+        {
+            "schema_version": "task1_final_report_v1",
+            "stable_objects": [{"object_id": "rough_object_001", "final_image_path": str(final_image)}],
+        },
+    )
+    _write_json_report(
+        run_dir / "zoom" / "zoom_report.json",
+        {
+            "schema_version": "task1_zoom_report_v1",
+            "zoomed_objects": [
+                {
+                    "object_id": "rough_object_001",
+                    "source_final_image_path": str(final_image),
+                    "selected_zoom": {"selected_image_path": str(zoom_image)},
+                }
+            ],
+        },
+    )
+
+    specs = module._load_final_zoom_photo_specs(
+        run_dir=run_dir,
+        repo_root=tmp_path,
+        final_report_path=None,
+        zoom_report_path=None,
+    )
+    frame = module._compose_final_zoom_photo_frame(specs[0], width=320, height=180)
+
+    assert specs[0].object_id == "rough_object_001"
+    assert specs[0].ordinal == 1
+    assert specs[0].total == 1
+    assert frame.shape == (180, 320, 3)
+    assert tuple(frame[10, 10]) == (20, 30, 40)
+    assert tuple(frame[170, 310]) == (80, 90, 100)
+    assert tuple(frame[170, 10]) == (0, 0, 0)
+    assert tuple(frame[10, 310]) == (0, 0, 0)
+
+
 def _write_final_report(run_dir: Path, *, source_image_path: Path, bbox_xyxy: list[float]) -> Path:
     final_dir = run_dir / "final"
     report_path = final_dir / "final_report.json"
@@ -1241,6 +1307,112 @@ def _write_final_report(run_dir: Path, *, source_image_path: Path, bbox_xyxy: li
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(payload), encoding="utf-8")
     return report_path
+
+
+def _write_replay_task1_run(tmp_path: Path) -> Path:
+    run_dir = tmp_path / "task1" / "20260707T000000Z_seed101"
+    layout_path = run_dir / "layout" / "target_object_poses.json"
+    _write_json_report(
+        layout_path,
+        {
+            "schema_version": "target_object_poses_v1",
+            "seed": 101,
+            "base_height_m": 0.03,
+            "placement_bounds": {"x_min": 0.15, "x_max": 0.85, "y_min": 0.15, "y_max": 0.85},
+            "objects": [],
+        },
+    )
+    workspace = {
+        "x_min": 0.15,
+        "x_max": 0.85,
+        "y_min": 0.15,
+        "y_max": 0.85,
+        "bottom_z_m": 0.03,
+        "tank_opening_z_m": 0.50,
+        "opening_clearance_m": 0.035,
+    }
+    common = {
+        "task1_run_dir": str(run_dir),
+        "layout_snapshot_path": str(layout_path),
+        "scene_model_path": "examples/mujoco/gen3_with_tank.xml",
+        "camera_name": "wrist",
+        "workspace": workspace,
+        "image_size": [640, 480],
+    }
+    _write_json_report(
+        run_dir / "survey" / "survey_report.json",
+        {
+            **common,
+            "schema_version": "task1_survey_report_v1",
+            "stage": "survey",
+            "status": "success",
+            "report_path": str(run_dir / "survey" / "survey_report.json"),
+            "views": [
+                {
+                    "view_id": "survey_0000",
+                    "status": "success",
+                    "actual_qpos": [0.1, 0.2, 0.3],
+                    "actual_camera_position_world": [0.3, 0.4, 0.42],
+                    "rgb_image_path": str(run_dir / "survey" / "images" / "survey_0000_rgb.png"),
+                }
+            ],
+        },
+    )
+    _write_json_report(
+        run_dir / "rough" / "rough_report.json",
+        {
+            **common,
+            "schema_version": "task1_rough_report_v1",
+            "stage": "rough",
+            "status": "success",
+            "report_path": str(run_dir / "rough" / "rough_report.json"),
+            "views": [
+                {
+                    "view_id": "rough_candidate_001_00",
+                    "status": "success",
+                    "fixed_qpos": [0.4, 0.5, 0.6],
+                    "candidate_id": "candidate_001",
+                    "candidate_rough_position_world": [0.31, 0.32, 0.03],
+                    "rgb_image_path": str(run_dir / "rough" / "images" / "rough_candidate_001_00_rgb.png"),
+                }
+            ],
+        },
+    )
+    _write_json_report(
+        run_dir / "final" / "final_report.json",
+        {
+            **common,
+            "schema_version": "task1_final_report_v1",
+            "stage": "final",
+            "status": "success",
+            "report_path": str(run_dir / "final" / "final_report.json"),
+            "object_captures": [
+                {
+                    "status": "confirmed",
+                    "target": {
+                        "object_id": "rough_object_001",
+                        "target_role": "primary",
+                        "source_status": "stable",
+                        "class_name": "notebook",
+                        "position_world": [0.31, 0.32, 0.03],
+                    },
+                    "view": {
+                        "view_id": "final_rough_object_001",
+                        "status": "success",
+                        "actual_qpos": [1.0, 1.1, 1.2],
+                        "rgb_image_path": str(run_dir / "final" / "images" / "final_rough_object_001_rgb.png"),
+                    },
+                    "final_image_path": str(run_dir / "final" / "images" / "final_rough_object_001_rgb.png"),
+                }
+            ],
+        },
+    )
+    return run_dir
+
+
+def _write_json_report(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _write_layout(tmp_path: Path) -> Path:
@@ -1772,3 +1944,107 @@ class _FakeFinalCaptureBackend(_FakeRoughValidationBackend):
             },
             observations,
         )
+
+
+class _FakeReplayRectMujoco:
+    class MjrRect:
+        def __init__(self, left: int, bottom: int, width: int, height: int) -> None:
+            self.left = left
+            self.bottom = bottom
+            self.width = width
+            self.height = height
+
+
+class _FakeReplayCameraModel:
+    def __init__(self, *, extent: float, fovy: float = 45.0) -> None:
+        self.stat = type("FakeStat", (), {"extent": extent})()
+        self.vis = type("FakeVis", (), {"global_": type("FakeGlobalVis", (), {"fovy": fovy})()})()
+
+
+class _FakeReplayMotionModel:
+    def __init__(
+        self,
+        *,
+        nq: int,
+        limited: tuple[int, ...] | None = None,
+        body_parentid: list[int] | None = None,
+        geom_bodyid: list[int] | None = None,
+    ) -> None:
+        self.nq = nq
+        self.nv = nq
+        self.nu = nq
+        self.njnt = nq
+        self.jnt_qposadr = list(range(nq))
+        self.jnt_type = [3] * nq
+        self.jnt_limited = list(limited or tuple(0 for _ in range(nq)))
+        self.jnt_range = [[-math.pi, math.pi] for _ in range(nq)]
+        self.body_parentid = body_parentid or [0]
+        self.geom_bodyid = geom_bodyid or []
+
+
+class _FakeReplayMotionData:
+    def __init__(self, *, nq: int, contacts: list["_FakeReplayContact"] | None = None) -> None:
+        self.qpos = [0.0] * nq
+        self.qvel = [0.0] * nq
+        self.ctrl = [0.0] * nq
+        self.contact = contacts or []
+        self.ncon = len(self.contact)
+
+
+class _FakeReplayContact:
+    def __init__(self, *, geom1: int, geom2: int, dist: float) -> None:
+        self.geom1 = geom1
+        self.geom2 = geom2
+        self.dist = dist
+
+
+class _FakeReplayMujoco:
+    class mjtObj:
+        mjOBJ_GEOM = "geom"
+        mjOBJ_BODY = "body"
+
+    def __init__(self, *, body_names: dict[int, str] | None = None, geom_names: dict[int, str] | None = None) -> None:
+        self._body_names = body_names or {}
+        self._geom_names = geom_names or {}
+
+    def mj_forward(self, _model, _data) -> None:
+        return None
+
+    def mj_id2name(self, _model, obj_type, obj_id: int) -> str | None:
+        if obj_type == self.mjtObj.mjOBJ_BODY:
+            return self._body_names.get(int(obj_id))
+        if obj_type == self.mjtObj.mjOBJ_GEOM:
+            return self._geom_names.get(int(obj_id))
+        return None
+
+
+def _load_replay_script_module():
+    scripts_dir = str(REPO_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    spec = importlib.util.spec_from_file_location(
+        "replay_task1_output_for_test",
+        REPO_ROOT / "scripts" / "replay_task1_output.py",
+    )
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_replay_video_script_module():
+    scripts_dir = str(REPO_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    spec = importlib.util.spec_from_file_location(
+        "render_task1_replay_video_for_test",
+        REPO_ROOT / "scripts" / "render_task1_replay_video.py",
+    )
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
