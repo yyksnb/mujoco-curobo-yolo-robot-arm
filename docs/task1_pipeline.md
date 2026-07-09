@@ -102,6 +102,7 @@ python scripts/run_task1_recognition.py \
 - 以 `stable_objects` 作为 primary targets。
 - 在稳定数量不足时，使用 `tentative_objects + ambiguous_objects` 作为 follow-up targets。
 - 为每个目标规划多个精拍候选视角。
+- 先按入口 portal、wrist roll、角度、距离和高度对候选排序，再依次做 IK/collision 验证；默认不硬截断候选。
 - 通过 IK + collision validation 后选择最终拍照姿态。
 - 使用近距离图像重新确认类别、框和稳定性。
 
@@ -118,7 +119,7 @@ python scripts/run_task1_recognition.py \
 
 - wrist camera 来自 `examples/mujoco/kinova_gen3/gen3.xml` 的 `camera name="wrist"`。
 - 最终拍照相机位姿必须在油箱内部，且 z 低于油箱上口高度。
-- 正式 report 只保留 selected candidate、统计摘要和少量失败样例；完整 trace 需要显式打开 debug。
+- 正式 report 只保留 selected candidate、候选排序/可选裁剪统计摘要和少量失败样例；完整 trace 需要显式打开 debug。
 
 最小命令：
 
@@ -167,3 +168,8 @@ python scripts/run_task1_recognition.py \
 ```
 
 最好显式指定 report；如果省略 `--survey-report`、`--rough-report` 或 `--final-report`，脚本会从 `--output-dir` 下寻找最新对应 report。
+
+## 已知风险
+
+- Final 阶段的 MuJoCo IK 连续验证会受候选顺序 warm-start 影响，后续可改为每个候选使用固定 nominal qpos 初始化。
+- Final 阶段默认不硬截断候选会优先保 recall；类别冲突或无法确认的目标可能拖长耗时。

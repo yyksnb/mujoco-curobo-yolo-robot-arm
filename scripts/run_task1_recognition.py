@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from time import perf_counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,6 +65,34 @@ def _build_yolo_detector(config):
 
 def _value_or_default(value, default):
     return default if value is None else value
+
+
+def _log_stage_event(event: str, stage: str, **fields) -> None:
+    parts = [f"[task1] {event}", f"stage={stage}"]
+    for key, value in fields.items():
+        if value is not None:
+            parts.append(f"{key}={value}")
+    print(" ".join(parts), file=sys.stderr, flush=True)
+
+
+def _run_timed_stage(stage: str, fn):
+    _log_stage_event("start", stage)
+    started = perf_counter()
+    try:
+        report = fn()
+    except BaseException:
+        duration_s = perf_counter() - started
+        _log_stage_event("failed", stage, duration_s=f"{duration_s:.3f}")
+        raise
+    duration_s = perf_counter() - started
+    _log_stage_event(
+        "done",
+        stage,
+        status=report.get("status"),
+        duration_s=f"{duration_s:.3f}",
+        report=report.get("report_path"),
+    )
+    return report, duration_s
 
 
 def _task1_run_name(created_utc: str, seed: int) -> str:
@@ -272,14 +302,32 @@ def _run_zoom_stage(args: argparse.Namespace, *, final_report_path: Path | None 
 
 def _run_full_pipeline(args: argparse.Namespace) -> dict:
     created_utc = datetime.now(timezone.utc).isoformat()
-    layout_report = _run_layout_stage(args, created_utc=created_utc)
+    stage_durations: dict[str, float] = {}
+    total_started = perf_counter()
+    layout_report, stage_durations["layout"] = _run_timed_stage(
+        "layout",
+        lambda: _run_layout_stage(args, created_utc=created_utc),
+    )
     layout_path = Path(str(layout_report["layout_path"]))
     run_dir_value = layout_report.get("task1_run_dir")
     run_dir = Path(str(run_dir_value)) if run_dir_value else None
-    survey_report = _run_survey_stage(args, layout_path=layout_path, run_dir=run_dir, created_utc=created_utc)
-    rough_report = _run_rough_stage(args, survey_report_path=Path(str(survey_report["report_path"])))
-    final_report = _run_final_stage(args, rough_report_path=Path(str(rough_report["report_path"])))
-    zoom_report = _run_zoom_stage(args, final_report_path=Path(str(final_report["report_path"])))
+    survey_report, stage_durations["survey"] = _run_timed_stage(
+        "survey",
+        lambda: _run_survey_stage(args, layout_path=layout_path, run_dir=run_dir, created_utc=created_utc),
+    )
+    rough_report, stage_durations["rough"] = _run_timed_stage(
+        "rough",
+        lambda: _run_rough_stage(args, survey_report_path=Path(str(survey_report["report_path"]))),
+    )
+    final_report, stage_durations["final"] = _run_timed_stage(
+        "final",
+        lambda: _run_final_stage(args, rough_report_path=Path(str(rough_report["report_path"]))),
+    )
+    zoom_report, stage_durations["zoom"] = _run_timed_stage(
+        "zoom",
+        lambda: _run_zoom_stage(args, final_report_path=Path(str(final_report["report_path"]))),
+    )
+    stage_durations["total"] = perf_counter() - total_started
     reports = {
         "layout": survey_report.get("layout_snapshot_path") or layout_report["layout_path"],
         "survey": survey_report["report_path"],
@@ -316,7 +364,12 @@ def _run_full_pipeline(args: argparse.Namespace) -> dict:
         + ", ".join(f"{name}={stage_statuses[name]}" for name in reports),
         "report_path": zoom_report["report_path"],
         "stage_reports": reports,
+        "stage_durations_seconds": _rounded_durations(stage_durations),
     }
+
+
+def _rounded_durations(durations: dict[str, float]) -> dict[str, float]:
+    return {stage: round(duration, 3) for stage, duration in durations.items()}
 
 
 def main() -> None:
@@ -448,18 +501,25 @@ def main() -> None:
     if args.stage is None:
         report = _run_full_pipeline(args)
     elif args.stage == "layout":
-        report = _run_layout_stage(args)
+        report, duration_s = _run_timed_stage("layout", lambda: _run_layout_stage(args))
+        report["stage_durations_seconds"] = _rounded_durations({"layout": duration_s, "total": duration_s})
     elif args.stage == "survey":
-        report = _run_survey_stage(args)
+        report, duration_s = _run_timed_stage("survey", lambda: _run_survey_stage(args))
+        report["stage_durations_seconds"] = _rounded_durations({"survey": duration_s, "total": duration_s})
     elif args.stage == "rough":
-        report = _run_rough_stage(args)
+        report, duration_s = _run_timed_stage("rough", lambda: _run_rough_stage(args))
+        report["stage_durations_seconds"] = _rounded_durations({"rough": duration_s, "total": duration_s})
     elif args.stage == "final":
-        report = _run_final_stage(args)
+        report, duration_s = _run_timed_stage("final", lambda: _run_final_stage(args))
+        report["stage_durations_seconds"] = _rounded_durations({"final": duration_s, "total": duration_s})
     else:
-        report = _run_zoom_stage(args)
+        report, duration_s = _run_timed_stage("zoom", lambda: _run_zoom_stage(args))
+        report["stage_durations_seconds"] = _rounded_durations({"zoom": duration_s, "total": duration_s})
     summary = {"status": report["status"], "message": report["message"]}
     if "stage_reports" in report:
         summary["stage_reports"] = report["stage_reports"]
+    if "stage_durations_seconds" in report:
+        summary["stage_durations_seconds"] = report["stage_durations_seconds"]
     print(json.dumps(summary, ensure_ascii=False))
     print(f"report={report['report_path']}")
 

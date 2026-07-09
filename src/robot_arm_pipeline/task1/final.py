@@ -62,6 +62,9 @@ DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5)
 DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M = (0.0, -0.04, -0.08, -0.12, 0.04, 0.08, 0.12)
 DEFAULT_FINAL_VIEW_ROLL_OFFSETS_DEG = (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0)
 DEFAULT_FINAL_CENTERLINE_VIEW_ANGLE_OFFSETS_DEG = (0.0, 45.0, -45.0)
+DEFAULT_FINAL_VIEW_CAMERA_POSITION_LIMIT = None
+DEFAULT_FINAL_VIEW_CANDIDATE_LIMIT = None
+DEFAULT_FINAL_VIEW_PRIMARY_CANDIDATE_COUNT = 24
 DEFAULT_FINAL_ENTRY_SIDE = "y-max"
 DEFAULT_FINAL_YOLO_CONFIDENCE = 0.20
 DEFAULT_FINAL_YOLO_MAX_DETECTIONS = 12
@@ -69,6 +72,7 @@ DEFAULT_FINAL_YOLO_TILE_GRID_SIZE = 1
 FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE = "final_reachable_capture_plan_v1"
 FINAL_STABLE_SELECTION_POLICY_VERSION = "final_stable_selection_policy_v1"
 FINAL_BBOX_QUALITY_POLICY_VERSION = "final_bbox_quality_policy_v1"
+FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION = "final_view_candidate_pruning_policy_v3"
 DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO = 0.15
 DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX = 8.0
 DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M = DEFAULT_FINAL_TARGET_MATCH_RADIUS_M
@@ -127,6 +131,9 @@ class FinalConfig:
     final_view_camera_z_offsets_m: tuple[float, ...] = DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M
     final_view_roll_offsets_deg: tuple[float, ...] = DEFAULT_FINAL_VIEW_ROLL_OFFSETS_DEG
     centerline_view_angle_offsets_deg: tuple[float, ...] = DEFAULT_FINAL_CENTERLINE_VIEW_ANGLE_OFFSETS_DEG
+    final_view_camera_position_limit: int | None = DEFAULT_FINAL_VIEW_CAMERA_POSITION_LIMIT
+    final_view_candidate_limit: int | None = DEFAULT_FINAL_VIEW_CANDIDATE_LIMIT
+    final_view_primary_candidate_count: int = DEFAULT_FINAL_VIEW_PRIMARY_CANDIDATE_COUNT
     yolo_confidence: float = DEFAULT_FINAL_YOLO_CONFIDENCE
     yolo_iou: float | None = None
     yolo_image_size: int | None = None
@@ -221,6 +228,12 @@ class FinalConfig:
             self.final_view_standoff_multipliers,
             field_name="final_view_standoff_multipliers",
         )
+        if self.final_view_camera_position_limit is not None and self.final_view_camera_position_limit <= 0:
+            raise ValueError("final_view_camera_position_limit must be positive when provided")
+        if self.final_view_candidate_limit is not None and self.final_view_candidate_limit <= 0:
+            raise ValueError("final_view_candidate_limit must be positive when provided")
+        if self.final_view_primary_candidate_count <= 0:
+            raise ValueError("final_view_primary_candidate_count must be positive")
         if not 0.0 <= self.yolo_confidence <= 1.0:
             raise ValueError("yolo_confidence must be between 0 and 1")
         if self.yolo_tile_grid_size <= 0:
@@ -350,6 +363,7 @@ class FinalPlannedCapture:
     direction_adjusted: bool
     evaluated_camera_positions: tuple[dict[str, Any], ...]
     view_candidates: tuple[FinalViewCandidate, ...]
+    candidate_generation_summary: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -361,6 +375,7 @@ class FinalPlannedCapture:
             "direction_adjusted": self.direction_adjusted,
             "evaluated_camera_positions": list(self.evaluated_camera_positions),
             "view_candidates": [candidate.to_dict() for candidate in self.view_candidates],
+            "candidate_generation_summary": self.candidate_generation_summary,
         }
 
 
@@ -443,7 +458,7 @@ def build_final_plan(
             config=config,
         )
         view_id = f"final_{_safe_id(target.object_id)}"
-        view_candidates = _view_candidates_for_target(
+        view_candidates, view_candidate_generation_summary = _view_candidates_for_target(
             target_index=target_index,
             view_id_prefix=view_id,
             camera_candidates=camera_candidates,
@@ -453,6 +468,12 @@ def build_final_plan(
             config=config,
         )
         primary_candidate = view_candidates[0]
+        candidate_generation_summary = _candidate_generation_summary(
+            evaluated_camera_positions=evaluated,
+            retained_camera_candidates=camera_candidates,
+            view_candidate_summary=view_candidate_generation_summary,
+            config=config,
+        )
         planned.append(
             FinalPlannedCapture(
                 target=target,
@@ -463,6 +484,7 @@ def build_final_plan(
                 direction_adjusted=primary_candidate.direction_adjusted,
                 evaluated_camera_positions=tuple(evaluated),
                 view_candidates=view_candidates,
+                candidate_generation_summary=candidate_generation_summary,
             )
         )
     return workspace, tuple(planned)
@@ -772,7 +794,8 @@ def _capture_first_reachable_candidate(
 ) -> dict[str, Any]:
     candidate_attempts: list[dict[str, Any]] = []
     best_captured_result: dict[str, Any] | None = None
-    for candidate in planned.view_candidates:
+    for candidate_index, candidate in enumerate(planned.view_candidates):
+        search_phase = _final_candidate_search_phase(candidate_index, config=config)
         entry_results = _validate_entry_views(backend, planned, candidate)
         failed_entry = next((entry for entry in entry_results if entry.get("status") != "success"), None)
         if failed_entry is not None:
@@ -784,6 +807,7 @@ def _capture_first_reachable_candidate(
                     final_pose_validation=None,
                     status="entry_validation_failed",
                     message=str(failed_entry.get("message") or "entry validation failed"),
+                    search_phase=search_phase,
                 )
             )
             continue
@@ -798,6 +822,7 @@ def _capture_first_reachable_candidate(
                     final_pose_validation=final_pose_validation,
                     status="final_pose_failed",
                     message=str(final_pose_validation.get("message") or "final pose validation failed"),
+                    search_phase=search_phase,
                 )
             )
             continue
@@ -815,6 +840,7 @@ def _capture_first_reachable_candidate(
                     final_pose_validation=final_pose_validation,
                     status="final_pose_failed",
                     message=str(final_pose_validation["message"]),
+                    search_phase=search_phase,
                 )
             )
             continue
@@ -836,6 +862,7 @@ def _capture_first_reachable_candidate(
             final_pose_validation=final_pose_validation,
             status="captured" if view_result.get("status") == "success" else "final_pose_failed",
             message=str(view_result.get("message") or "captured"),
+            search_phase=search_phase,
         )
         candidate_attempts.append(attempt)
         if view_result.get("status") != "success":
@@ -884,15 +911,21 @@ def _candidate_attempt_payload(
     final_pose_validation: dict[str, Any] | None,
     status: str,
     message: str,
+    search_phase: str,
 ) -> dict[str, Any]:
     return {
         "candidate": candidate.to_dict(),
         "status": status,
         "message": message,
+        "search_phase": search_phase,
         "entry_validation": entry_results,
         "final_pose_validation": final_pose_validation,
         "view": view_result,
     }
+
+
+def _final_candidate_search_phase(candidate_index: int, *, config: FinalConfig) -> str:
+    return "primary" if candidate_index < config.final_view_primary_candidate_count else "extended"
 
 
 def _targets_from_rough_report(report: Task1RoughReport) -> tuple[FinalTarget, ...]:
@@ -1157,6 +1190,10 @@ def _select_camera_position_candidates(
                         }
                     )
     if valid_candidates:
+        valid_candidates.sort(key=lambda candidate: _camera_position_candidate_sort_key(candidate, workspace=workspace))
+        limit = config.final_view_camera_position_limit
+        if limit is not None:
+            valid_candidates = valid_candidates[:limit]
         return (tuple(valid_candidates), evaluated)
     raise ValueError(f"could not place final camera inside tank for target near {target}")
 
@@ -1170,18 +1207,21 @@ def _view_candidates_for_target(
     look_at: tuple[float, float, float],
     workspace: SurveyWorkspace,
     config: FinalConfig,
-) -> tuple[FinalViewCandidate, ...]:
+) -> tuple[tuple[FinalViewCandidate, ...], dict[str, Any]]:
     view_candidates: list[FinalViewCandidate] = []
     roll_offsets = _unique_float_records(config.final_view_roll_offsets_deg)
     entry_portal_modes = _unique_text_records(config.entry_portal_modes)
+    candidate_limit = config.final_view_candidate_limit
+    generated_view_candidate_count = len(camera_candidates) * len(roll_offsets) * len(entry_portal_modes)
     candidate_index = 0
-    for candidate in camera_candidates:
-        camera_position = _position_from_value(candidate["camera_position_world"])
-        base_transform = _make_look_at_transform(camera_position, look_at)
-        candidate_transform = candidate.get("T_world_camera")
-        candidate_roll_offsets = (0.0,) if candidate_transform is not None else roll_offsets
-        for roll_offset_deg in candidate_roll_offsets:
-            for entry_portal_mode in entry_portal_modes:
+    for roll_offset_deg in roll_offsets:
+        for entry_portal_mode in entry_portal_modes:
+            for candidate in camera_candidates:
+                camera_position = _position_from_value(candidate["camera_position_world"])
+                base_transform = _make_look_at_transform(camera_position, look_at)
+                candidate_transform = candidate.get("T_world_camera")
+                if candidate_transform is not None and abs(float(roll_offset_deg)) > 1e-9:
+                    continue
                 suffix = "primary" if candidate_index == 0 else f"alt_{candidate_index:02d}"
                 view_id = view_id_prefix if candidate_index == 0 else f"{view_id_prefix}_{suffix}"
                 transform = (
@@ -1228,7 +1268,28 @@ def _view_candidates_for_target(
                     )
                 )
                 candidate_index += 1
-    return tuple(view_candidates)
+    view_candidates.sort(key=_final_view_candidate_sort_key)
+    retained_view_candidates = (
+        view_candidates[:candidate_limit] if candidate_limit is not None else view_candidates
+    )
+    return tuple(retained_view_candidates), {
+        "roll_offset_count": len(roll_offsets),
+        "entry_portal_mode_count": len(entry_portal_modes),
+        "generated_view_candidate_count_before_limit": generated_view_candidate_count,
+        "retained_view_candidate_count": len(retained_view_candidates),
+        "view_candidate_limit": candidate_limit,
+        "view_candidate_limit_applied": candidate_limit is not None and generated_view_candidate_count > candidate_limit,
+        "primary_candidate_count": min(config.final_view_primary_candidate_count, len(retained_view_candidates)),
+        "expansion_order": "generate_all_then_priority_sort",
+        "selection_order": "profile_priority_then_angle_standoff_height",
+        "view_candidate_sort_keys": [
+            "entry_portal_and_wrist_roll_profile",
+            "rough_evidence_angles_before_centerline_angles",
+            "smaller_angle_offset",
+            "moderate_standoff_before_long_standoff",
+            "camera_height_near_default_or_high_clearance",
+        ],
+    }
 
 
 def _camera_position_validity(
@@ -1245,6 +1306,147 @@ def _camera_position_validity(
     except ValueError as exc:
         return False, str(exc)
     return True, "accepted"
+
+
+def _final_view_candidate_sort_key(candidate: FinalViewCandidate) -> tuple[Any, ...]:
+    return (
+        _final_view_profile_priority(candidate.roll_offset_deg, candidate.entry_portal_mode),
+        _final_view_angle_priority(candidate.angle_source, candidate.angle_offset_deg),
+        _final_view_standoff_priority(candidate.standoff_multiplier),
+        _final_view_camera_z_priority(candidate.camera_z_offset_m),
+        candidate.candidate_id,
+    )
+
+
+def _final_view_profile_priority(roll_offset_deg: float, entry_portal_mode: str) -> int:
+    roll = _normalize_degrees(float(roll_offset_deg))
+    preferred_profiles = (
+        (0.0, "opening-grid-nearest"),
+        (0.0, "final-vertical"),
+        (-90.0, "opening-grid-nearest"),
+        (-135.0, "workspace-center"),
+        (135.0, "final-vertical"),
+        (45.0, "final-vertical"),
+        (-45.0, "final-vertical"),
+        (0.0, "workspace-center"),
+        (90.0, "opening-grid-nearest"),
+        (135.0, "opening-grid-nearest"),
+        (-135.0, "opening-grid-nearest"),
+        (-90.0, "workspace-center"),
+        (90.0, "workspace-center"),
+    )
+    for index, (preferred_roll, preferred_mode) in enumerate(preferred_profiles):
+        if abs(_normalize_degrees(roll - preferred_roll)) <= 1e-6 and entry_portal_mode == preferred_mode:
+            return index
+    mode_priority = {
+        "opening-grid-nearest": 0,
+        "workspace-center": 1,
+        "final-vertical": 2,
+    }.get(entry_portal_mode, 3)
+    return len(preferred_profiles) + int(abs(roll) // 45.0) * 4 + mode_priority
+
+
+def _final_view_angle_priority(angle_source: str, angle_offset_deg: float) -> int:
+    offset = abs(float(angle_offset_deg))
+    if angle_source == "rough_evidence_offset":
+        if offset <= 1e-6:
+            return 0
+        if abs(offset - 22.5) <= 1e-6:
+            return 1
+        if abs(offset - 45.0) <= 1e-6:
+            return 3
+        if abs(offset - 67.5) <= 1e-6:
+            return 5
+        if abs(offset - 90.0) <= 1e-6:
+            return 7
+        if abs(offset - 135.0) <= 1e-6:
+            return 9
+        return 10
+    if angle_source == "workspace_centerline_offset":
+        if offset <= 1e-6:
+            return 2
+        if abs(offset - 45.0) <= 1e-6:
+            return 6
+        return 8
+    return 99
+
+
+def _final_view_standoff_priority(standoff_multiplier: float) -> int:
+    return _nearest_priority_index(float(standoff_multiplier), (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
+
+
+def _final_view_camera_z_priority(camera_z_offset_m: float) -> int:
+    return _nearest_priority_index(float(camera_z_offset_m), (0.0, 0.12, 0.08, 0.04, -0.04, -0.08, -0.12))
+
+
+def _nearest_priority_index(value: float, preferred_values: tuple[float, ...]) -> int:
+    if not preferred_values:
+        return 0
+    return min(range(len(preferred_values)), key=lambda index: abs(value - preferred_values[index]))
+
+
+def _normalize_degrees(value: float) -> float:
+    normalized = (float(value) + 180.0) % 360.0 - 180.0
+    if abs(normalized + 180.0) <= 1e-9:
+        return 180.0
+    return normalized
+
+
+def _camera_position_candidate_sort_key(candidate: dict[str, Any], *, workspace: SurveyWorkspace) -> tuple[Any, ...]:
+    position = _position_from_value(candidate["camera_position_world"])
+    source_priority = 0 if candidate.get("angle_source") == "rough_evidence_offset" else 1
+    border_margin = min(
+        position[0] - workspace.x_min,
+        workspace.x_max - position[0],
+        position[1] - workspace.y_min,
+        workspace.y_max - position[1],
+    )
+    return (
+        source_priority,
+        abs(float(candidate.get("angle_offset_deg") or 0.0)),
+        abs(float(candidate.get("standoff_multiplier") or 1.0) - 1.0),
+        abs(float(candidate.get("camera_z_offset_m") or 0.0)),
+        -border_margin,
+        float(candidate.get("standoff_m") or 0.0),
+        float(candidate.get("angle_rad") or 0.0),
+    )
+
+
+def _candidate_generation_summary(
+    *,
+    evaluated_camera_positions: list[dict[str, Any]],
+    retained_camera_candidates: tuple[dict[str, Any], ...],
+    view_candidate_summary: dict[str, Any],
+    config: FinalConfig,
+) -> dict[str, Any]:
+    valid_camera_position_count = sum(1 for item in evaluated_camera_positions if item.get("valid") is True)
+    camera_position_limit = config.final_view_camera_position_limit
+    summary = {
+        "policy_version": FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION,
+        "evaluated_camera_position_count": len(evaluated_camera_positions),
+        "valid_camera_position_count": valid_camera_position_count,
+        "rejected_camera_position_count": len(evaluated_camera_positions) - valid_camera_position_count,
+        "retained_camera_position_count": len(retained_camera_candidates),
+        "camera_position_limit": camera_position_limit,
+        "camera_position_limit_applied": (
+            camera_position_limit is not None and valid_camera_position_count > camera_position_limit
+        ),
+        "geometry_sort_keys": [
+            "rough_evidence_angle_before_workspace_centerline",
+            "smaller_angle_offset",
+            "default_standoff_first",
+            "default_camera_height_first",
+            "larger_workspace_border_margin",
+        ],
+        "camera_position_selection_order": "geometry_sorted_then_optional_camera_position_limit",
+    }
+    summary.update(view_candidate_summary)
+    summary["potential_view_candidate_count_before_camera_position_limit"] = (
+        valid_camera_position_count
+        * int(summary.get("roll_offset_count") or 0)
+        * int(summary.get("entry_portal_mode_count") or 0)
+    )
+    return summary
 
 
 def _entry_validation_views(
@@ -1557,6 +1759,7 @@ def _object_capture_result(
         "source_status": planned.target.source_status,
         "target_role": planned.target.target_role,
         "selected_view_candidate": selected_candidate.to_dict(),
+        "view_candidate_summary": _planned_view_candidate_summary(planned),
         "view_candidate_attempts": candidate_attempts,
         "view": view_result,
         "entry_validation": entry_results,
@@ -1718,6 +1921,7 @@ def _all_candidates_failed_capture_result(
         "source_status": planned.target.source_status,
         "target_role": planned.target.target_role,
         "selected_view_candidate": None,
+        "view_candidate_summary": _planned_view_candidate_summary(planned),
         "view_candidate_attempts": candidate_attempts,
         "view": last_attempt.get("view", _planned_view_result(planned.view)),
         "entry_validation": last_attempt.get("entry_validation", []),
@@ -2393,8 +2597,14 @@ def _final_reachable_planning_summary(
     planned_captures: tuple[FinalPlannedCapture, ...],
     object_captures: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    candidate_generation_summaries = [
+        planned.candidate_generation_summary
+        for planned in planned_captures
+        if isinstance(planned.candidate_generation_summary, dict)
+    ]
     attempt_count = 0
     attempt_status_counts: dict[str, int] = {}
+    attempt_search_phase_counts: dict[str, int] = {}
     rejection_counts = {
         "entry_collision": 0,
         "entry_ik_failed": 0,
@@ -2419,6 +2629,8 @@ def _final_reachable_planning_summary(
             attempt_count += 1
             status = str(attempt.get("status") or "unknown")
             attempt_status_counts[status] = attempt_status_counts.get(status, 0) + 1
+            search_phase = str(attempt.get("search_phase") or "unknown")
+            attempt_search_phase_counts[search_phase] = attempt_search_phase_counts.get(search_phase, 0) + 1
             for entry in attempt.get("entry_validation", []):
                 if isinstance(entry, dict):
                     _accumulate_final_validation_rejection(
@@ -2444,14 +2656,36 @@ def _final_reachable_planning_summary(
         "strategy": "whole_arm_final_view_candidate_selection_v1",
         "planned_target_count": len(planned_captures),
         "planned_view_candidate_count": sum(len(planned.view_candidates) for planned in planned_captures),
+        "potential_view_candidate_count_before_camera_position_limit": sum(
+            int(summary.get("potential_view_candidate_count_before_camera_position_limit") or 0)
+            for summary in candidate_generation_summaries
+        ),
+        "generated_view_candidate_count_before_limit": sum(
+            int(summary.get("generated_view_candidate_count_before_limit") or 0)
+            for summary in candidate_generation_summaries
+        ),
+        "retained_view_candidate_count": sum(
+            int(summary.get("retained_view_candidate_count") or 0)
+            for summary in candidate_generation_summaries
+        ),
+        "view_candidate_limit": (
+            planned_captures[0].candidate_generation_summary.get("view_candidate_limit")
+            if planned_captures
+            else None
+        ),
+        "candidate_pruning_policy_version": FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION,
         "captured_target_count": sum(1 for capture in object_captures if capture.get("view", {}).get("status") == "success"),
         "selected_fixed_qpos_count": selected_fixed_qpos_count,
         "attempt_count": attempt_count,
         "attempt_status_counts": attempt_status_counts,
+        "attempt_search_phase_counts": attempt_search_phase_counts,
         "rejection_counts": rejection_counts,
         "rules": [
-            "Final candidates enumerate standoff, approach angle, camera height, and camera roll from FinalConfig.",
-            "Entry portal modes are also candidate-level policy choices from FinalConfig, including the optional nearest opening-grid portal.",
+            "Final candidates enumerate standoff, approach angle, camera height, camera roll, and entry portal mode from FinalConfig.",
+            "Camera positions are sorted by geometric quality; final_view_camera_position_limit can optionally cap this cheap geometric list before view expansion.",
+            "Expanded view candidates are priority-sorted by entry portal and wrist-roll profile before geometric preferences.",
+            "final_view_candidate_limit is optional; when unset, ordered candidates are validated until one succeeds or the candidate set is exhausted.",
+            "When final_view_candidate_limit is set, omitted candidates remain represented by summary counts and the target fails explicitly if none pass.",
             "Each candidate is accepted only after all top-opening portal entry waypoints and the final photo pose pass MuJoCo IK and robot collision checks.",
             "The rendered final photo reuses the validated qpos through fixed_pose_source instead of solving a new pose silently.",
             "If no candidate passes, the target remains failed or partial and is not promoted to stable_objects.",
@@ -2555,6 +2789,7 @@ def _planned_view_candidate_summary(planned: FinalPlannedCapture) -> dict[str, A
         "evaluated_camera_position_count": len(planned.evaluated_camera_positions),
         "entry_view_count": len(planned.entry_views),
         "first_candidate": _view_candidate_compact_payload(first_candidate) if first_candidate is not None else None,
+        "candidate_generation": planned.candidate_generation_summary,
         "full_candidate_trace_in_formal_output": False,
     }
 
@@ -2615,6 +2850,7 @@ def _attempt_failure_sample_payload(attempt: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": attempt.get("status"),
         "message": attempt.get("message"),
+        "search_phase": attempt.get("search_phase"),
         "candidate": _view_candidate_compact_payload(attempt.get("candidate")),
         "entry_validation": [
             _validation_compact_payload(entry)
@@ -2764,6 +3000,10 @@ def _plan_payload(
             "multiple_final_view_standoff_distances": True,
             "multiple_final_camera_height_candidates": True,
             "multiple_final_camera_roll_candidates": True,
+            "candidate_pruning_policy_version": FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION,
+            "final_view_camera_position_limit": config.final_view_camera_position_limit,
+            "final_view_candidate_limit": config.final_view_candidate_limit,
+            "final_view_primary_candidate_count": config.final_view_primary_candidate_count,
             "entry_path": (
                 "discrete whole-arm entry waypoints from the configured top-opening portal to each final photo pose, "
                 "with portal-descent waypoints using entry_orientation_policy and lateral waypoints using "

@@ -31,6 +31,7 @@ from robot_arm_pipeline.task1.rough import (
 from robot_arm_pipeline.task1.final import (
     DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M,
     FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE,
+    FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION,
     FinalTarget,
     FinalConfig,
     _capture_first_reachable_candidate,
@@ -465,6 +466,9 @@ def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
         final_view_camera_z_offsets_m=(0.0,),
         final_view_roll_offsets_deg=(0.0,),
         centerline_view_angle_offsets_deg=(),
+        final_view_camera_position_limit=2,
+        final_view_candidate_limit=5,
+        final_view_primary_candidate_count=3,
         save_debug_trace=True,
     )
 
@@ -503,7 +507,15 @@ def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
         assert len(item.view_candidates) >= 2
         assert item.view_candidates[0].view.view_id == item.view.view_id
         assert item.view_candidates[0].standoff_multiplier == pytest.approx(1.0)
-        assert item.view_candidates[0].entry_portal_mode == "final-vertical"
+        assert item.view_candidates[0].entry_portal_mode == "opening-grid-nearest"
+        assert len(item.view_candidates) <= config.final_view_candidate_limit
+        candidate_generation = item.candidate_generation_summary
+        assert candidate_generation["policy_version"] == FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION
+        assert candidate_generation["retained_camera_position_count"] <= config.final_view_camera_position_limit
+        assert candidate_generation["retained_view_candidate_count"] == len(item.view_candidates)
+        assert candidate_generation["view_candidate_limit"] == config.final_view_candidate_limit
+        assert candidate_generation["selection_order"] == "profile_priority_then_angle_standoff_height"
+        assert candidate_generation["primary_candidate_count"] == 3
         assert all(candidate.entry_views for candidate in item.view_candidates)
         assert all("camera_z_offset_m" in candidate.to_dict() for candidate in item.view_candidates)
         assert all("roll_offset_deg" in candidate.to_dict() for candidate in item.view_candidates)
@@ -522,6 +534,10 @@ def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
     assert "view_candidates" not in report_payload["object_captures"][0]
     assert "view_candidate_attempts" not in report_payload["object_captures"][0]
     assert plan_payload["planned_captures"][0]["view_candidate_summary"]["candidate_count"] >= 2
+    assert (
+        plan_payload["planned_captures"][0]["view_candidate_summary"]["candidate_generation"]["policy_version"]
+        == FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION
+    )
     assert report_payload["object_captures"][0]["view_candidate_attempt_summary"]["attempt_count"] == 0
     assert plan_payload["debug_trace_policy"]["formal_outputs_include_full_candidate_trace"] is False
     assert report_payload["debug_trace_policy"]["debug_trace_path"] == str(capture_dir / "final_debug_trace.json")
@@ -547,6 +563,7 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
         final_view_camera_z_offsets_m=(0.0,),
         final_view_roll_offsets_deg=(0.0,),
         centerline_view_angle_offsets_deg=(),
+        final_view_primary_candidate_count=1,
     )
     _, planned = build_final_plan(rough_report, config)
     backend = _FakeFinalCaptureBackend(("collision", "success", "collision", "success", "success"))
@@ -569,6 +586,11 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
         "final_pose_failed",
         "captured",
     ]
+    assert [attempt["search_phase"] for attempt in result["view_candidate_attempts"]] == [
+        "primary",
+        "extended",
+        "extended",
+    ]
     assert result["selected_view_candidate"]["view"]["fixed_pose_source"] == FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE
     assert backend.captured_view is not None
     assert backend.captured_view.fixed_pose_source == FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE
@@ -579,6 +601,7 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
         "final_pose_failed": 1,
         "captured": 1,
     }
+    assert summary["attempt_search_phase_counts"] == {"primary": 1, "extended": 2}
     assert summary["rejection_counts"]["entry_collision"] == 1
     assert summary["rejection_counts"]["final_collision"] == 1
     assert summary["selected_fixed_qpos_count"] == 1
