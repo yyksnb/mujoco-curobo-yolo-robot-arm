@@ -84,6 +84,7 @@
 边界：
 
 - Final 不应默认补齐到固定数量。
+- `expected_object_count_hint` 只能作为 task1 的 follow-up 优化和过量弱证据审查 hint，不能作为 `stable_objects` 必须等于该数量的契约。
 - Final 只能确认真实拍到、类别一致、位置合理、bbox 质量和 evidence quality 都合格的对象。
 - Follow-up 目标只有在证据足够时才能升级为 stable；否则应保留 unstable/partial。
 - 如果存在多个同类或近邻观测，选框策略不能只按 bbox 面积或单一距离决定，应兼顾类别一致、目标距离、边界安全、bbox 完整性和置信度。

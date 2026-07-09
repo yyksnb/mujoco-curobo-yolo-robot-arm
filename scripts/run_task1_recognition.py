@@ -95,6 +95,38 @@ def _run_timed_stage(stage: str, fn):
     return report, duration_s
 
 
+def _combine_task1_stage_statuses(statuses: list[str]) -> str:
+    if not statuses:
+        return "failed"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if any(status == "partial" for status in statuses):
+        return "partial"
+    if statuses and all(status == "plan_only" for status in statuses):
+        return "plan_only"
+    if any(status == "plan_only" for status in statuses):
+        return "partial"
+    if any(status != "success" for status in statuses):
+        return "partial"
+    return "success"
+
+
+def _task1_pipeline_status_summary(stage_statuses: dict[str, str]) -> dict[str, str]:
+    recognition_status = _combine_task1_stage_statuses(
+        [
+            stage_statuses.get("survey", ""),
+            stage_statuses.get("rough", ""),
+            stage_statuses.get("final", ""),
+        ]
+    )
+    artifact_status = _combine_task1_stage_statuses([stage_statuses.get("zoom", "")])
+    return {
+        "status": recognition_status,
+        "recognition_status": recognition_status,
+        "artifact_status": artifact_status,
+    }
+
+
 def _task1_run_name(created_utc: str, seed: int) -> str:
     timestamp = created_utc.replace("+00:00", "Z").replace("-", "").replace(":", "").replace(".", "")
     return f"{timestamp}_seed{seed}"
@@ -335,22 +367,6 @@ def _run_full_pipeline(args: argparse.Namespace) -> dict:
         "final": final_report["report_path"],
         "zoom": zoom_report["report_path"],
     }
-    recognition_statuses = [
-        str(survey_report.get("status")),
-        str(rough_report.get("status")),
-        str(final_report.get("status")),
-        str(zoom_report.get("status")),
-    ]
-    if any(status == "failed" for status in recognition_statuses):
-        status = "failed"
-    elif any(status == "partial" for status in recognition_statuses):
-        status = "partial"
-    elif all(status == "plan_only" for status in recognition_statuses):
-        status = "plan_only"
-    elif any(status == "plan_only" for status in recognition_statuses):
-        status = "partial"
-    else:
-        status = "success"
     stage_statuses = {
         "layout": str(layout_report.get("status")),
         "survey": str(survey_report.get("status")),
@@ -358,12 +374,14 @@ def _run_full_pipeline(args: argparse.Namespace) -> dict:
         "final": str(final_report.get("status")),
         "zoom": str(zoom_report.get("status")),
     }
+    status_summary = _task1_pipeline_status_summary(stage_statuses)
     return {
-        "status": status,
+        **status_summary,
         "message": "Ran task1 recognition pipeline: "
         + ", ".join(f"{name}={stage_statuses[name]}" for name in reports),
         "report_path": zoom_report["report_path"],
         "stage_reports": reports,
+        "stage_statuses": stage_statuses,
         "stage_durations_seconds": _rounded_durations(stage_durations),
     }
 

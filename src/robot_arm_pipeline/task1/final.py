@@ -82,7 +82,7 @@ DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE = DEFAULT_FINAL_YOLO_CONFIDENCE
 DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE = 0.60
 DEFAULT_FINAL_STRICT_MATCH_RADIUS_RATIO = 0.40
 DEFAULT_FINAL_STRICT_MATCH_MIN_CONFIDENCE_RATIO = 0.50
-DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT = 5
+DEFAULT_FINAL_EXPECTED_OBJECT_COUNT_HINT = 5
 DEFAULT_FINAL_FOLLOW_UP_CANDIDATE_ATTEMPT_LIMIT = 3000
 DEFAULT_FINAL_FOLLOW_UP_MAX_UNSATISFIED_CAPTURES = 8
 DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS = True
@@ -132,7 +132,7 @@ class FinalConfig:
     entry_orientation_policy: str = DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY
     entry_lateral_orientation_policy: str = DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY
     entry_path_policy: str = DEFAULT_FINAL_ENTRY_PATH_POLICY
-    desired_stable_object_count: int | None = DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT
+    expected_object_count_hint: int | None = DEFAULT_FINAL_EXPECTED_OBJECT_COUNT_HINT
     final_view_angle_offsets_deg: tuple[float, ...] = DEFAULT_FINAL_VIEW_ANGLE_OFFSETS_DEG
     final_view_standoff_multipliers: tuple[float, ...] = DEFAULT_FINAL_VIEW_STANDOFF_MULTIPLIERS
     final_view_camera_z_offsets_m: tuple[float, ...] = DEFAULT_FINAL_VIEW_CAMERA_Z_OFFSETS_M
@@ -211,8 +211,8 @@ class FinalConfig:
             raise ValueError("entry_lateral_orientation_policy must be entry-orientation or final-look-at")
         if self.entry_path_policy not in {"portal-descent-then-lateral", "direct-interpolate"}:
             raise ValueError("entry_path_policy must be portal-descent-then-lateral or direct-interpolate")
-        if self.desired_stable_object_count is not None and self.desired_stable_object_count <= 0:
-            raise ValueError("desired_stable_object_count must be positive when provided")
+        if self.expected_object_count_hint is not None and self.expected_object_count_hint <= 0:
+            raise ValueError("expected_object_count_hint must be positive when provided")
         if self.target_match_radius_m <= 0.0:
             raise ValueError("target_match_radius_m must be positive")
         if self.entry_validation_samples <= 0:
@@ -669,9 +669,9 @@ def run_task1_final(
             object_captures.append(capture_result)
 
         for planned in follow_up_plans:
-            if _desired_stable_count_reached(
+            if _expected_object_count_hint_reached(
                 object_captures,
-                desired_stable_object_count=config.desired_stable_object_count,
+                expected_object_count_hint=config.expected_object_count_hint,
                 single_observation_min_confidence=config.single_observation_min_confidence,
             ):
                 object_captures.append(_skipped_follow_up_capture_result(planned))
@@ -753,7 +753,7 @@ def run_task1_final(
 def select_stable_final_objects(
     object_captures: list[dict[str, Any]],
     *,
-    desired_stable_object_count: int | None = DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
+    expected_object_count_hint: int | None = DEFAULT_FINAL_EXPECTED_OBJECT_COUNT_HINT,
     single_observation_min_confidence: float = DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE,
 ) -> dict[str, Any]:
     if not object_captures:
@@ -761,7 +761,7 @@ def select_stable_final_objects(
             [],
             [],
             status="not_run",
-            desired_stable_object_count=desired_stable_object_count,
+            expected_object_count_hint=expected_object_count_hint,
             single_observation_min_confidence=single_observation_min_confidence,
         )
     if all(capture.get("status") == "planned" for capture in object_captures):
@@ -769,7 +769,7 @@ def select_stable_final_objects(
             [],
             [],
             status="not_run",
-            desired_stable_object_count=desired_stable_object_count,
+            expected_object_count_hint=expected_object_count_hint,
             single_observation_min_confidence=single_observation_min_confidence,
         )
 
@@ -788,16 +788,16 @@ def select_stable_final_objects(
 
     stable_objects, overcomplete_rejections = _split_overcomplete_primary_objects(
         primary_objects,
-        desired_stable_object_count=desired_stable_object_count,
+        expected_object_count_hint=expected_object_count_hint,
         single_observation_min_confidence=single_observation_min_confidence,
     )
     rejected_objects.extend(overcomplete_rejections)
     for stable_object, capture in follow_up_objects:
-        if desired_stable_object_count is not None and len(stable_objects) >= desired_stable_object_count:
+        if expected_object_count_hint is not None and len(stable_objects) >= expected_object_count_hint:
             rejected_objects.append(
                 _follow_up_not_needed_rejection_payload(
                     capture,
-                    desired_stable_object_count=desired_stable_object_count,
+                    expected_object_count_hint=expected_object_count_hint,
                     stable_object_count=len(stable_objects),
                 )
             )
@@ -822,7 +822,7 @@ def select_stable_final_objects(
         stable_objects,
         rejected_objects,
         status="success",
-        desired_stable_object_count=desired_stable_object_count,
+        expected_object_count_hint=expected_object_count_hint,
         single_observation_min_confidence=single_observation_min_confidence,
     )
 
@@ -2194,33 +2194,34 @@ def _skipped_follow_up_capture_result(planned: FinalPlannedCapture) -> dict[str,
         "best_observation": None,
         "recognition": {
             "status": "not_run",
-            "reason": "desired_stable_object_count_already_reached",
+            "reason": "expected_object_count_hint_already_reached",
         },
         "final_image_path": None,
         "depth_path": None,
         "annotated_image_path": None,
         "yolo_raw_path": None,
         "notes": [
-            "This follow-up target was not rendered because confirmed primary/follow-up objects already reached the configured desired stable count.",
+            "This follow-up target was not rendered because stable close-capture evidence already reached the task expected object count hint.",
+            "The hint only gates optional follow-up capture and does not guarantee a fixed final stable object count.",
             "Skipped follow-up targets remain visible in object_captures and unstable_objects instead of being treated as successful detections.",
         ],
     }
 
 
-def _desired_stable_count_reached(
+def _expected_object_count_hint_reached(
     object_captures: list[dict[str, Any]],
     *,
-    desired_stable_object_count: int | None,
+    expected_object_count_hint: int | None,
     single_observation_min_confidence: float = DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE,
 ) -> bool:
-    if desired_stable_object_count is None:
+    if expected_object_count_hint is None:
         return False
     selection = select_stable_final_objects(
         object_captures,
-        desired_stable_object_count=desired_stable_object_count,
+        expected_object_count_hint=expected_object_count_hint,
         single_observation_min_confidence=single_observation_min_confidence,
     )
-    return int(selection["stable_object_selection"]["stable_object_count"]) >= desired_stable_object_count
+    return int(selection["stable_object_selection"]["stable_object_count"]) >= expected_object_count_hint
 
 
 def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -2332,10 +2333,10 @@ def _matching_stable_object(
 def _split_overcomplete_primary_objects(
     primary_objects: list[dict[str, Any]],
     *,
-    desired_stable_object_count: int | None,
+    expected_object_count_hint: int | None,
     single_observation_min_confidence: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if desired_stable_object_count is None or len(primary_objects) <= desired_stable_object_count:
+    if expected_object_count_hint is None or len(primary_objects) <= expected_object_count_hint:
         return list(primary_objects), []
 
     stable_objects = list(primary_objects)
@@ -2351,13 +2352,13 @@ def _split_overcomplete_primary_objects(
 
     rejected_objects: list[dict[str, Any]] = []
     for stable_object in weak_single_objects:
-        if len(stable_objects) <= desired_stable_object_count:
+        if len(stable_objects) <= expected_object_count_hint:
             break
         stable_objects.remove(stable_object)
         rejected_objects.append(
             _overcomplete_single_observation_rejection_payload(
                 stable_object,
-                desired_stable_object_count=desired_stable_object_count,
+                expected_object_count_hint=expected_object_count_hint,
                 single_observation_min_confidence=single_observation_min_confidence,
             )
         )
@@ -2398,7 +2399,7 @@ def _weak_single_observation_sort_key(stable_object: dict[str, Any]) -> tuple[fl
 def _overcomplete_single_observation_rejection_payload(
     stable_object: dict[str, Any],
     *,
-    desired_stable_object_count: int,
+    expected_object_count_hint: int,
     single_observation_min_confidence: float,
 ) -> dict[str, Any]:
     selection = stable_object.get("selection") if isinstance(stable_object.get("selection"), dict) else {}
@@ -2417,7 +2418,7 @@ def _overcomplete_single_observation_rejection_payload(
         "final_image_path": stable_object.get("final_image_path"),
         "source_observation_count": selection.get("source_observation_count") if isinstance(selection, dict) else None,
         "single_observation_min_confidence": _round(single_observation_min_confidence),
-        "desired_stable_object_count": int(desired_stable_object_count),
+        "expected_object_count_hint": int(expected_object_count_hint),
         "notes": [
             "This confirmed primary target was excluded because the final stable set was overcomplete and this object had only weak single-observation close-view evidence.",
         ],
@@ -2464,14 +2465,15 @@ def _duplicate_follow_up_rejection_payload(
 def _follow_up_not_needed_rejection_payload(
     capture: dict[str, Any],
     *,
-    desired_stable_object_count: int,
+    expected_object_count_hint: int,
     stable_object_count: int,
 ) -> dict[str, Any]:
     rejection = _rejected_stable_object_payload(capture, reason="follow_up_not_needed")
-    rejection["desired_stable_object_count"] = int(desired_stable_object_count)
+    rejection["expected_object_count_hint"] = int(expected_object_count_hint)
     rejection["current_stable_object_count"] = int(stable_object_count)
     rejection["notes"] = [
-        "This follow-up target was observed but excluded from stable_objects because primary confirmed objects already reached the configured desired count.",
+        "This follow-up target was observed but excluded from stable_objects because existing stable evidence already reached the task expected object count hint.",
+        "The hint is not used to fabricate or hard-trim stable objects.",
     ]
     return rejection
 
@@ -2525,7 +2527,7 @@ def _stable_selection_payload(
     rejected_objects: list[dict[str, Any]],
     *,
     status: str,
-    desired_stable_object_count: int | None,
+    expected_object_count_hint: int | None,
     single_observation_min_confidence: float,
 ) -> dict[str, Any]:
     rejected_counts: dict[str, int] = {}
@@ -2541,15 +2543,16 @@ def _stable_selection_payload(
             "stable_object_count": len(stable_objects),
             "unstable_object_count": len(rejected_objects),
             "rejected_reason_counts": rejected_counts,
-            "desired_stable_object_count": desired_stable_object_count,
+            "expected_object_count_hint": expected_object_count_hint,
             "follow_up_duplicate_radius_m": _round(DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M),
             "follow_up_promotion_min_confidence": _round(DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE),
             "single_observation_min_confidence": _round(single_observation_min_confidence),
             "rules": [
+                "expected_object_count_hint is a task hint for optional follow-up gating and weak overcomplete review, not a required stable_objects size.",
                 "Primary rough-stable targets enter stable_objects only when close capture confirms the same class and passes bbox/evidence quality.",
-                "If confirmed primary targets exceed the configured desired stable count, weak single-observation confirmations are excluded first instead of hard-trimming arbitrary objects.",
-                "Follow-up targets are promotion candidates only while the stable object list is below the configured desired count.",
-                "Follow-up targets are not rendered once the configured desired stable count has already been reached.",
+                "If confirmed primary targets exceed the hint, only weak single-observation confirmations may be excluded instead of hard-trimming arbitrary objects.",
+                "Follow-up targets are promotion candidates only while the stable object list is below the configured expected object count hint.",
+                "Follow-up targets may be skipped once the hint has already been reached, but skipped targets remain visible as unstable evidence.",
                 "Tentative targets enter stable_objects only when close capture observes the same class and passes bbox/evidence quality, or when no tentative class was supplied.",
                 "Ambiguous targets enter stable_objects only when close capture resolves to one of the candidate classes and passes bbox/evidence quality.",
                 "Resolved follow-up targets are kept out of stable_objects when they duplicate an already confirmed same-class object within the configured XY radius.",
@@ -3441,7 +3444,7 @@ def _plan_payload(
             "entry_orientation_policy": config.entry_orientation_policy,
             "entry_lateral_orientation_policy": config.entry_lateral_orientation_policy,
             "entry_path_policy": config.entry_path_policy,
-            "desired_stable_object_count": config.desired_stable_object_count,
+            "expected_object_count_hint": config.expected_object_count_hint,
             "final_view_not_top_down_only": True,
             "multiple_final_view_candidates": True,
             "multiple_final_view_standoff_distances": True,
@@ -3502,7 +3505,7 @@ def _report_payload(
     follow_up_targets = [planned.target.to_dict() for planned in planned_captures if planned.target.source_status != "stable"]
     stable_selection = select_stable_final_objects(
         object_captures,
-        desired_stable_object_count=config.desired_stable_object_count,
+        expected_object_count_hint=config.expected_object_count_hint,
         single_observation_min_confidence=config.single_observation_min_confidence,
     )
     reachable_planning_summary = _final_reachable_planning_summary(
@@ -3559,7 +3562,7 @@ def _report_payload(
         ],
         "notes": [
             "Stable rough objects are consumed as primary final capture targets.",
-            "Tentative and ambiguous rough objects are consumed as explicit follow-up targets only when the configured desired stable count still needs rescue candidates.",
+            "Tentative and ambiguous rough objects are consumed as explicit follow-up targets; the expected object count hint may stop optional follow-up once enough stable evidence exists.",
             "Each target keeps its own capture status; unconfirmed and class-conflict results are kept out of stable_objects.",
             "When confirmed primary targets are overcomplete, weak single-observation confirmations are reported as unstable rather than being silently kept.",
             "Final capture views are rendered only from fixed qpos values produced by successful whole-arm IK and collision validation.",

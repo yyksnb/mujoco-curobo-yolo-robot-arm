@@ -1095,7 +1095,7 @@ def test_final_stable_selection_follow_up_guardrails() -> None:
                 confidence=0.91,
             )
         ],
-        desired_stable_object_count=5,
+        expected_object_count_hint=5,
     )
 
     assert [obj["object_id"] for obj in not_needed_selection["stable_objects"]] == [
@@ -1108,6 +1108,8 @@ def test_final_stable_selection_follow_up_guardrails() -> None:
     assert not_needed_selection["stable_object_selection"]["rejected_reason_counts"] == {
         "follow_up_not_needed": 1
     }
+    assert not_needed_selection["stable_object_selection"]["expected_object_count_hint"] == 5
+    assert "desired_stable_object_count" not in not_needed_selection["stable_object_selection"]
     assert not_needed_selection["unstable_objects"][0]["object_id"] == "rough_tentative_001"
 
     captures = [
@@ -1137,13 +1139,13 @@ def test_final_stable_selection_follow_up_guardrails() -> None:
             "target_role": "follow_up",
             "recognition": {
                 "status": "not_run",
-                "reason": "desired_stable_object_count_already_reached",
+                "reason": "expected_object_count_hint_already_reached",
             },
             "view": {"status": "planned"},
         }
     )
 
-    skipped_selection = select_stable_final_objects(captures, desired_stable_object_count=5)
+    skipped_selection = select_stable_final_objects(captures, expected_object_count_hint=5)
 
     assert skipped_selection["stable_object_selection"]["stable_object_count"] == 5
     assert skipped_selection["stable_object_selection"]["rejected_reason_counts"] == {
