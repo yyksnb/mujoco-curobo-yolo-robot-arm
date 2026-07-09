@@ -515,11 +515,14 @@ def test_final_plan_consumes_layered_rough_report(tmp_path: Path) -> None:
         assert candidate_generation["retained_view_candidate_count"] == len(item.view_candidates)
         assert candidate_generation["view_candidate_limit"] == config.final_view_candidate_limit
         assert candidate_generation["selection_order"] == "profile_priority_then_angle_standoff_height"
+        assert candidate_generation["early_camera_position_count"] == config.final_view_early_camera_position_count
+        assert candidate_generation["follow_up_candidate_attempt_limit"] == config.follow_up_candidate_attempt_limit
         assert candidate_generation["primary_candidate_count"] == 3
         assert all(candidate.entry_views for candidate in item.view_candidates)
         assert all("camera_z_offset_m" in candidate.to_dict() for candidate in item.view_candidates)
         assert all("roll_offset_deg" in candidate.to_dict() for candidate in item.view_candidates)
         assert all("entry_portal_mode" in candidate.to_dict() for candidate in item.view_candidates)
+        assert all("camera_position_rank" in candidate.to_dict() for candidate in item.view_candidates)
 
     capture_dir = rough_report.task1_run_dir / "final"
     plan_path = capture_dir / "final_plan.json"
@@ -698,6 +701,62 @@ def test_final_capture_continues_until_confirmed_candidate(tmp_path: Path) -> No
                 result["view_candidate_attempts"][0]["recognition"]["bbox_quality"]["reasons"]
                 == scenario["expected_quality_reasons"]
             )
+
+
+def test_final_follow_up_capture_stops_after_unresolved_budget(tmp_path: Path) -> None:
+    layout_path = _write_layout(tmp_path)
+    rough_report_path = _write_rough_report(tmp_path, layout_path)
+    rough_report = load_task1_rough_report(rough_report_path)
+    config = FinalConfig(
+        camera_z_m=0.30,
+        standoff_m=0.12,
+        min_oblique_distance_m=0.06,
+        entry_validation_samples=1,
+        final_view_angle_offsets_deg=(0.0, 30.0),
+        final_view_standoff_multipliers=(1.0,),
+        final_view_camera_z_offsets_m=(0.0,),
+        final_view_roll_offsets_deg=(0.0,),
+        centerline_view_angle_offsets_deg=(),
+        follow_up_max_unsatisfied_captures=2,
+        follow_up_candidate_attempt_limit=20,
+    )
+    _, planned = build_final_plan(rough_report, config)
+    follow_up = next(item for item in planned if item.target.source_status == "tentative")
+    low_confidence_observation = SurveyObservation(
+        view_id="final_follow_up_low_confidence",
+        image_path="follow_up_low_confidence.png",
+        bbox_xyxy=(100.0, 120.0, 180.0, 220.0),
+        confidence=0.25,
+        class_id=1,
+        class_name=follow_up.target.class_name,
+        rough_position_world=follow_up.target.position_world,
+    )
+    backend = _FakeFinalCaptureBackend(
+        ("success",) * 8,
+        capture_observations=([low_confidence_observation], [low_confidence_observation]),
+    )
+
+    result = _capture_first_reachable_candidate(
+        backend=backend,
+        planned=follow_up,
+        images_dir=tmp_path / "images",
+        depth_dir=tmp_path / "depth",
+        yolo_dir=tmp_path / "yolo",
+        annotated_dir=tmp_path / "annotated",
+        raw_annotated_dir=tmp_path / "raw_annotated",
+        tiles_dir=tmp_path / "tiles",
+        config=config,
+    )
+
+    assert result["status"] == "quality_limited"
+    assert result["recognition"]["reason"] == "evidence_quality_limited"
+    assert result["search_stop"]["reason"] == "follow_up_unsatisfied_capture_limit_reached"
+    assert result["search_stop"]["unsatisfied_captured_count"] == 2
+    assert backend.capture_calls == 2
+    assert [attempt["status"] for attempt in result["view_candidate_attempts"]] == [
+        "captured_quality_limited",
+        "captured_quality_limited",
+    ]
 
 
 def test_final_filtered_annotation_uses_selected_observation_only() -> None:
@@ -887,6 +946,59 @@ def test_final_stable_selection_follow_up_guardrails() -> None:
     ]
     assert normal_count_selection["stable_object_selection"]["rejected_reason_counts"] == {}
 
+    fragmented_low_confidence_selection = select_stable_final_objects(
+        [
+            _final_payload(
+                object_id="rough_object_001",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="notebook",
+                detected_class_name="notebook",
+                position_world=[0.65, 0.44, 0.03],
+                source_transform=None,
+                confidence=0.35,
+                source_observation_count=2,
+                observation_kind="merged_same_class_bbox_fragments",
+            )
+        ],
+        single_observation_min_confidence=0.60,
+    )
+
+    assert fragmented_low_confidence_selection["stable_objects"] == []
+    assert fragmented_low_confidence_selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "evidence_quality_limited": 1
+    }
+    assert fragmented_low_confidence_selection["unstable_objects"][0]["evidence_quality"]["reasons"] == [
+        "merged_fragment_requires_strong_confidence"
+    ]
+
+    single_too_low_confidence_selection = select_stable_final_objects(
+        [
+            _final_payload(
+                object_id="rough_object_001",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="notebook",
+                detected_class_name="notebook",
+                position_world=[0.65, 0.44, 0.03],
+                source_transform=None,
+                confidence=0.25,
+                target_xy_distance_m=0.01,
+            )
+        ],
+        single_observation_min_confidence=0.60,
+    )
+
+    assert single_too_low_confidence_selection["stable_objects"] == []
+    assert single_too_low_confidence_selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "evidence_quality_limited": 1
+    }
+    assert single_too_low_confidence_selection["unstable_objects"][0]["evidence_quality"]["reasons"] == [
+        "strict_match_confidence_too_low"
+    ]
+
     duplicate_selection = select_stable_final_objects(
         [
             _final_payload(
@@ -1041,7 +1153,7 @@ def test_final_stable_selection_follow_up_guardrails() -> None:
     assert _overall_status(captures) == "success"
 
 
-def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> None:
+def test_final_matching_prefers_safe_close_box_before_larger_edge_box() -> None:
     target = FinalTarget(
         object_id="rough_object_004",
         target_role="primary",
@@ -1079,9 +1191,10 @@ def test_final_matching_prefers_larger_same_class_box_before_safe_fragment() -> 
 
     matched = _matched_observations(target, observations, config=FinalConfig(image_width=1920, image_height=1080))
 
-    assert matched[0]["bbox_xyxy"] == [902.0, 507.0, 1422.0, 1079.0]
-    assert matched[0]["selection_score"]["border_safe"] is False
-    assert matched[0]["selection_score"]["bbox_area_px"] > matched[1]["selection_score"]["bbox_area_px"]
+    assert matched[0]["bbox_xyxy"] == [784.0, 305.0, 1017.0, 565.0]
+    assert matched[0]["selection_score"]["border_safe"] is True
+    assert matched[1]["selection_score"]["border_safe"] is False
+    assert matched[1]["selection_score"]["bbox_area_px"] > matched[0]["selection_score"]["bbox_area_px"]
 
 
 def test_task1_zoom_writes_selected_image_and_reports_missing_source(tmp_path: Path) -> None:
@@ -1785,6 +1898,9 @@ def _final_payload(
     candidate_class_names: list[str] | None = None,
     confidence: float = 0.82,
     source_observation_count: int | None = None,
+    target_xy_distance_m: float = 0.01,
+    bbox_quality_accepted: bool = True,
+    observation_kind: str = "single_detection",
 ) -> dict[str, object]:
     target = {
         "object_id": object_id,
@@ -1794,6 +1910,32 @@ def _final_payload(
         "class_name": source_class_name,
         "candidate_class_names": candidate_class_names or ([source_class_name] if source_class_name else []),
         "T_world_object": source_transform,
+    }
+    source_count = source_observation_count if source_observation_count is not None else 1
+    strong_confidence = confidence >= 0.60
+    moderate_confidence = confidence >= 0.30
+    strict_position_match = target_xy_distance_m <= 0.028
+    evidence_reasons = []
+    if observation_kind == "merged_same_class_bbox_fragments" and not strong_confidence:
+        evidence_reasons.append("merged_fragment_requires_strong_confidence")
+    if not strong_confidence and not strict_position_match:
+        evidence_reasons.append("low_confidence_without_strict_position_match")
+    if not strong_confidence and strict_position_match and not moderate_confidence:
+        evidence_reasons.append("strict_match_confidence_too_low")
+    if source_status != "stable" and confidence < 0.20:
+        evidence_reasons.append("follow_up_below_promotion_confidence")
+    evidence_quality_accepted = not evidence_reasons and (strong_confidence or (strict_position_match and moderate_confidence))
+    bbox_quality = {
+        "status": "accepted" if bbox_quality_accepted else "limited",
+        "accepted": bbox_quality_accepted,
+        "reasons": [] if bbox_quality_accepted else ["bbox_too_close_to_image_boundary"],
+    }
+    evidence_quality = {
+        "status": "accepted" if evidence_quality_accepted else "limited",
+        "accepted": evidence_quality_accepted,
+        "observation_kind": observation_kind,
+        "source_observation_count": source_count,
+        "reasons": evidence_reasons,
     }
     return {
         "target": target,
@@ -1808,16 +1950,21 @@ def _final_payload(
             "candidate_class_names": candidate_class_names or ([source_class_name] if source_class_name else []),
             "confidence": confidence,
             "position_world": position_world,
-            "target_xy_distance_m": 0.01,
+            "target_xy_distance_m": target_xy_distance_m,
             "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
             "target_match_radius_m": 0.07,
+            "bbox_quality": bbox_quality,
+            "evidence_quality": evidence_quality,
+            "observation_kind": observation_kind,
+            "source_observation_count": source_count,
         },
         "best_observation": {
             "class_name": detected_class_name,
             "confidence": confidence,
             "rough_position_world": position_world,
             "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
-            **({"source_observation_count": source_observation_count} if source_observation_count is not None else {}),
+            "observation_kind": observation_kind,
+            "source_observation_count": source_count,
         },
         "final_image_path": "outputs/single.png",
         "depth_path": "outputs/single.npy",

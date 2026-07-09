@@ -65,6 +65,7 @@ DEFAULT_FINAL_CENTERLINE_VIEW_ANGLE_OFFSETS_DEG = (0.0, 45.0, -45.0)
 DEFAULT_FINAL_VIEW_CAMERA_POSITION_LIMIT = None
 DEFAULT_FINAL_VIEW_CANDIDATE_LIMIT = None
 DEFAULT_FINAL_VIEW_PRIMARY_CANDIDATE_COUNT = 24
+DEFAULT_FINAL_VIEW_EARLY_CAMERA_POSITION_COUNT = 0
 DEFAULT_FINAL_ENTRY_SIDE = "y-max"
 DEFAULT_FINAL_YOLO_CONFIDENCE = 0.20
 DEFAULT_FINAL_YOLO_MAX_DETECTIONS = 12
@@ -72,13 +73,18 @@ DEFAULT_FINAL_YOLO_TILE_GRID_SIZE = 1
 FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE = "final_reachable_capture_plan_v1"
 FINAL_STABLE_SELECTION_POLICY_VERSION = "final_stable_selection_policy_v1"
 FINAL_BBOX_QUALITY_POLICY_VERSION = "final_bbox_quality_policy_v1"
+FINAL_EVIDENCE_QUALITY_POLICY_VERSION = "final_evidence_quality_policy_v1"
 FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION = "final_view_candidate_pruning_policy_v3"
 DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO = 0.15
 DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX = 8.0
 DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M = DEFAULT_FINAL_TARGET_MATCH_RADIUS_M
 DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE = DEFAULT_FINAL_YOLO_CONFIDENCE
 DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE = 0.60
+DEFAULT_FINAL_STRICT_MATCH_RADIUS_RATIO = 0.40
+DEFAULT_FINAL_STRICT_MATCH_MIN_CONFIDENCE_RATIO = 0.50
 DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT = 5
+DEFAULT_FINAL_FOLLOW_UP_CANDIDATE_ATTEMPT_LIMIT = 3000
+DEFAULT_FINAL_FOLLOW_UP_MAX_UNSATISFIED_CAPTURES = 8
 DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS = True
 DEFAULT_SAVE_FINAL_DEBUG_TRACE = False
 DEFAULT_FINAL_FAILURE_SAMPLE_LIMIT = 5
@@ -135,6 +141,7 @@ class FinalConfig:
     final_view_camera_position_limit: int | None = DEFAULT_FINAL_VIEW_CAMERA_POSITION_LIMIT
     final_view_candidate_limit: int | None = DEFAULT_FINAL_VIEW_CANDIDATE_LIMIT
     final_view_primary_candidate_count: int = DEFAULT_FINAL_VIEW_PRIMARY_CANDIDATE_COUNT
+    final_view_early_camera_position_count: int = DEFAULT_FINAL_VIEW_EARLY_CAMERA_POSITION_COUNT
     yolo_confidence: float = DEFAULT_FINAL_YOLO_CONFIDENCE
     yolo_iou: float | None = None
     yolo_image_size: int | None = None
@@ -149,6 +156,10 @@ class FinalConfig:
     bbox_fragment_min_overlap_ratio: float = DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO
     selection_border_margin_px: float = DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX
     single_observation_min_confidence: float = DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE
+    strict_match_radius_ratio: float = DEFAULT_FINAL_STRICT_MATCH_RADIUS_RATIO
+    strict_match_min_confidence_ratio: float = DEFAULT_FINAL_STRICT_MATCH_MIN_CONFIDENCE_RATIO
+    follow_up_candidate_attempt_limit: int | None = DEFAULT_FINAL_FOLLOW_UP_CANDIDATE_ATTEMPT_LIMIT
+    follow_up_max_unsatisfied_captures: int | None = DEFAULT_FINAL_FOLLOW_UP_MAX_UNSATISFIED_CAPTURES
     save_filtered_annotations: bool = DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS
     save_raw_yolo_annotations: bool = DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS
     save_debug_trace: bool = DEFAULT_SAVE_FINAL_DEBUG_TRACE
@@ -236,6 +247,8 @@ class FinalConfig:
             raise ValueError("final_view_candidate_limit must be positive when provided")
         if self.final_view_primary_candidate_count <= 0:
             raise ValueError("final_view_primary_candidate_count must be positive")
+        if self.final_view_early_camera_position_count < 0:
+            raise ValueError("final_view_early_camera_position_count must be non-negative")
         if not 0.0 <= self.yolo_confidence <= 1.0:
             raise ValueError("yolo_confidence must be between 0 and 1")
         if self.yolo_tile_grid_size <= 0:
@@ -252,6 +265,14 @@ class FinalConfig:
             raise ValueError("selection_border_margin_px must be non-negative")
         if not 0.0 <= self.single_observation_min_confidence <= 1.0:
             raise ValueError("single_observation_min_confidence must be between 0 and 1")
+        if not 0.0 < self.strict_match_radius_ratio <= 1.0:
+            raise ValueError("strict_match_radius_ratio must be in the range (0, 1]")
+        if not 0.0 <= self.strict_match_min_confidence_ratio <= 1.0:
+            raise ValueError("strict_match_min_confidence_ratio must be between 0 and 1")
+        if self.follow_up_candidate_attempt_limit is not None and self.follow_up_candidate_attempt_limit <= 0:
+            raise ValueError("follow_up_candidate_attempt_limit must be positive when provided")
+        if self.follow_up_max_unsatisfied_captures is not None and self.follow_up_max_unsatisfied_captures <= 0:
+            raise ValueError("follow_up_max_unsatisfied_captures must be positive when provided")
         if self.failure_sample_limit < 0:
             raise ValueError("failure_sample_limit must be non-negative")
 
@@ -337,6 +358,7 @@ class FinalViewCandidate:
     candidate_source: str
     direction_adjusted: bool
     camera_position_world: tuple[float, float, float]
+    camera_position_rank: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -354,6 +376,7 @@ class FinalViewCandidate:
             "candidate_source": self.candidate_source,
             "direction_adjusted": self.direction_adjusted,
             "camera_position_world": [_round(value) for value in self.camera_position_world],
+            "camera_position_rank": self.camera_position_rank,
         }
 
 
@@ -818,7 +841,19 @@ def _capture_first_reachable_candidate(
 ) -> dict[str, Any]:
     candidate_attempts: list[dict[str, Any]] = []
     best_captured_result: dict[str, Any] | None = None
+    unsatisfied_captured_count = 0
+    search_stop: dict[str, Any] | None = None
     for candidate_index, candidate in enumerate(planned.view_candidates):
+        if _follow_up_candidate_attempt_limit_reached(planned.target, candidate_attempts, config=config):
+            search_stop = _search_stop_payload(
+                reason="follow_up_candidate_attempt_limit_reached",
+                message="Stopped follow-up final search after the configured candidate attempt limit.",
+                planned=planned,
+                candidate_attempts=candidate_attempts,
+                config=config,
+                unsatisfied_captured_count=unsatisfied_captured_count,
+            )
+            break
         search_phase = _final_candidate_search_phase(candidate_index, config=config)
         entry_results = _validate_entry_views(backend, planned, candidate)
         failed_entry = next((entry for entry in entry_results if entry.get("status") != "success"), None)
@@ -917,13 +952,32 @@ def _capture_first_reachable_candidate(
             best_captured_result
         ):
             best_captured_result = capture_result
+        unsatisfied_captured_count += 1
+        if _follow_up_unsatisfied_capture_limit_reached(
+            planned.target,
+            unsatisfied_captured_count,
+            config=config,
+        ):
+            search_stop = _search_stop_payload(
+                reason="follow_up_unsatisfied_capture_limit_reached",
+                message="Stopped follow-up final search after repeated captured views did not satisfy confirmation policy.",
+                planned=planned,
+                candidate_attempts=candidate_attempts,
+                config=config,
+                unsatisfied_captured_count=unsatisfied_captured_count,
+            )
+            break
 
     if best_captured_result is not None:
         best_captured_result["view_candidate_attempts"] = candidate_attempts
         best_captured_result["notes"] = list(best_captured_result.get("notes", [])) + [
             "No later collision-safe final candidate confirmed this target; this is the best captured but unresolved result.",
         ]
+        if search_stop is not None:
+            _attach_search_stop(best_captured_result, search_stop)
         return best_captured_result
+    if search_stop is not None:
+        return _candidate_search_stopped_capture_result(planned, candidate_attempts, search_stop)
     return _all_candidates_failed_capture_result(planned, candidate_attempts)
 
 
@@ -946,6 +1000,59 @@ def _candidate_attempt_payload(
         "final_pose_validation": final_pose_validation,
         "view": view_result,
     }
+
+
+def _follow_up_candidate_attempt_limit_reached(
+    target: FinalTarget,
+    candidate_attempts: list[dict[str, Any]],
+    *,
+    config: FinalConfig,
+) -> bool:
+    limit = config.follow_up_candidate_attempt_limit
+    return target.source_status != "stable" and limit is not None and len(candidate_attempts) >= limit
+
+
+def _follow_up_unsatisfied_capture_limit_reached(
+    target: FinalTarget,
+    unsatisfied_captured_count: int,
+    *,
+    config: FinalConfig,
+) -> bool:
+    limit = config.follow_up_max_unsatisfied_captures
+    return target.source_status != "stable" and limit is not None and unsatisfied_captured_count >= limit
+
+
+def _search_stop_payload(
+    *,
+    reason: str,
+    message: str,
+    planned: FinalPlannedCapture,
+    candidate_attempts: list[dict[str, Any]],
+    config: FinalConfig,
+    unsatisfied_captured_count: int,
+) -> dict[str, Any]:
+    return {
+        "policy_version": "final_follow_up_bounded_confirmation_v1",
+        "reason": reason,
+        "message": message,
+        "source_status": planned.target.source_status,
+        "target_role": planned.target.target_role,
+        "attempt_count": len(candidate_attempts),
+        "candidate_count": len(planned.view_candidates),
+        "unsatisfied_captured_count": unsatisfied_captured_count,
+        "follow_up_candidate_attempt_limit": config.follow_up_candidate_attempt_limit,
+        "follow_up_max_unsatisfied_captures": config.follow_up_max_unsatisfied_captures,
+        "notes": [
+            "Follow-up targets are bounded confirmation targets; stopping leaves the target unstable instead of fabricating a stable object.",
+        ],
+    }
+
+
+def _attach_search_stop(capture_result: dict[str, Any], search_stop: dict[str, Any]) -> None:
+    capture_result["search_stop"] = search_stop
+    capture_result["notes"] = list(capture_result.get("notes", [])) + [
+        str(search_stop.get("message") or "Final candidate search stopped by policy."),
+    ]
 
 
 def _final_candidate_search_phase(candidate_index: int, *, config: FinalConfig) -> str:
@@ -1215,6 +1322,13 @@ def _select_camera_position_candidates(
                     )
     if valid_candidates:
         valid_candidates.sort(key=lambda candidate: _camera_position_candidate_sort_key(candidate, workspace=workspace))
+        valid_candidates = [
+            {
+                **candidate,
+                "camera_position_rank": rank,
+            }
+            for rank, candidate in enumerate(valid_candidates)
+        ]
         limit = config.final_view_camera_position_limit
         if limit is not None:
             valid_candidates = valid_candidates[:limit]
@@ -1289,10 +1403,11 @@ def _view_candidates_for_target(
                         candidate_source=str(candidate.get("candidate_source") or "generated_final_policy"),
                         direction_adjusted=abs(_normalize_angle(angle - preferred_angle)) > 1e-6,
                         camera_position_world=camera_position,
+                        camera_position_rank=int(candidate.get("camera_position_rank", candidate_index)),
                     )
                 )
                 candidate_index += 1
-    view_candidates.sort(key=_final_view_candidate_sort_key)
+    view_candidates.sort(key=lambda candidate: _final_view_candidate_sort_key(candidate, config=config))
     retained_view_candidates = (
         view_candidates[:candidate_limit] if candidate_limit is not None else view_candidates
     )
@@ -1305,8 +1420,20 @@ def _view_candidates_for_target(
         "view_candidate_limit_applied": candidate_limit is not None and generated_view_candidate_count > candidate_limit,
         "primary_candidate_count": min(config.final_view_primary_candidate_count, len(retained_view_candidates)),
         "expansion_order": "generate_all_then_priority_sort",
-        "selection_order": "profile_priority_then_angle_standoff_height",
+        "selection_order": (
+            "early_camera_position_interleave_then_profile_priority"
+            if config.final_view_early_camera_position_count > 0
+            else "profile_priority_then_angle_standoff_height"
+        ),
+        "early_camera_position_count": config.final_view_early_camera_position_count,
+        "follow_up_candidate_attempt_limit": config.follow_up_candidate_attempt_limit,
+        "follow_up_max_unsatisfied_captures": config.follow_up_max_unsatisfied_captures,
         "view_candidate_sort_keys": [
+            *(
+                ["early geometry-ranked camera positions are interleaved across roll and entry profiles"]
+                if config.final_view_early_camera_position_count > 0
+                else []
+            ),
             "entry_portal_and_wrist_roll_profile",
             "rough_evidence_angles_before_centerline_angles",
             "smaller_angle_offset",
@@ -1332,12 +1459,37 @@ def _camera_position_validity(
     return True, "accepted"
 
 
-def _final_view_candidate_sort_key(candidate: FinalViewCandidate) -> tuple[Any, ...]:
+def _final_view_candidate_sort_key(candidate: FinalViewCandidate, *, config: FinalConfig) -> tuple[Any, ...]:
+    profile_priority = _final_view_profile_priority(candidate.roll_offset_deg, candidate.entry_portal_mode)
+    angle_priority = _final_view_angle_priority(candidate.angle_source, candidate.angle_offset_deg)
+    standoff_priority = _final_view_standoff_priority(candidate.standoff_multiplier)
+    camera_z_priority = _final_view_camera_z_priority(candidate.camera_z_offset_m)
+    early_count = config.final_view_early_camera_position_count
+    if early_count <= 0:
+        return (
+            profile_priority,
+            angle_priority,
+            standoff_priority,
+            camera_z_priority,
+            candidate.candidate_id,
+        )
+    if early_count > 0 and candidate.camera_position_rank < early_count:
+        return (
+            0,
+            candidate.camera_position_rank,
+            profile_priority,
+            angle_priority,
+            standoff_priority,
+            camera_z_priority,
+            candidate.candidate_id,
+        )
     return (
-        _final_view_profile_priority(candidate.roll_offset_deg, candidate.entry_portal_mode),
-        _final_view_angle_priority(candidate.angle_source, candidate.angle_offset_deg),
-        _final_view_standoff_priority(candidate.standoff_multiplier),
-        _final_view_camera_z_priority(candidate.camera_z_offset_m),
+        1,
+        profile_priority,
+        angle_priority,
+        standoff_priority,
+        camera_z_priority,
+        candidate.camera_position_rank,
         candidate.candidate_id,
     )
 
@@ -1739,6 +1891,7 @@ def _copy_final_view_candidate_with_fixed_qpos(
         candidate_source=candidate.candidate_source,
         direction_adjusted=candidate.direction_adjusted,
         camera_position_world=candidate.camera_position_world,
+        camera_position_rank=candidate.camera_position_rank,
     )
 
 
@@ -1966,6 +2119,41 @@ def _all_candidates_failed_capture_result(
     }
 
 
+def _candidate_search_stopped_capture_result(
+    planned: FinalPlannedCapture,
+    candidate_attempts: list[dict[str, Any]],
+    search_stop: dict[str, Any],
+) -> dict[str, Any]:
+    any_final_pose_attempt = any(attempt.get("status") == "final_pose_failed" for attempt in candidate_attempts)
+    status = "capture_failed" if any_final_pose_attempt else "entry_validation_failed"
+    last_attempt = candidate_attempts[-1] if candidate_attempts else {}
+    return {
+        "target": planned.target.to_dict(),
+        "status": status,
+        "source_status": planned.target.source_status,
+        "target_role": planned.target.target_role,
+        "selected_view_candidate": None,
+        "view_candidate_summary": _planned_view_candidate_summary(planned),
+        "view_candidate_attempts": candidate_attempts,
+        "view": last_attempt.get("view", _planned_view_result(planned.view)),
+        "entry_validation": last_attempt.get("entry_validation", []),
+        "matched_observations": [],
+        "best_observation": None,
+        "recognition": {
+            "status": "not_run",
+            "reason": search_stop.get("reason"),
+        },
+        "final_image_path": None,
+        "depth_path": None,
+        "annotated_image_path": None,
+        "yolo_raw_path": None,
+        "search_stop": search_stop,
+        "notes": [
+            "Final candidate search stopped by configured follow-up confirmation budget before any usable capture was found.",
+        ],
+    }
+
+
 def _planned_capture_result(planned: FinalPlannedCapture) -> dict[str, Any]:
     return {
         "target": planned.target.to_dict(),
@@ -2052,6 +2240,10 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
     recognition = capture.get("recognition")
     if not isinstance(recognition, dict):
         return None, _rejected_stable_object_payload(capture, reason="missing_recognition")
+    if not _recognition_bbox_quality_accepted(recognition):
+        return None, _rejected_stable_object_payload(capture, reason="bbox_quality_limited")
+    if not _recognition_evidence_quality_accepted(recognition):
+        return None, _rejected_stable_object_payload(capture, reason="evidence_quality_limited")
     object_id = _optional_text(target.get("object_id"))
     if object_id is None:
         return None, _rejected_stable_object_payload(capture, reason="missing_object_id")
@@ -2096,6 +2288,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
                 "target_xy_distance_m": recognition.get("target_xy_distance_m"),
                 "target_match_radius_m": recognition.get("target_match_radius_m"),
                 "bbox_quality": recognition.get("bbox_quality"),
+                "evidence_quality": recognition.get("evidence_quality"),
                 "source_observation_count": source_observation_count,
             },
             "pose_quality": {
@@ -2353,12 +2546,12 @@ def _stable_selection_payload(
             "follow_up_promotion_min_confidence": _round(DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE),
             "single_observation_min_confidence": _round(single_observation_min_confidence),
             "rules": [
-                "Primary rough-stable targets enter stable_objects only when close capture confirms the same class.",
+                "Primary rough-stable targets enter stable_objects only when close capture confirms the same class and passes bbox/evidence quality.",
                 "If confirmed primary targets exceed the configured desired stable count, weak single-observation confirmations are excluded first instead of hard-trimming arbitrary objects.",
                 "Follow-up targets are promotion candidates only while the stable object list is below the configured desired count.",
                 "Follow-up targets are not rendered once the configured desired stable count has already been reached.",
-                "Tentative targets enter stable_objects only when close capture observes the same class with enough confidence, or when no tentative class was supplied.",
-                "Ambiguous targets enter stable_objects only when close capture resolves to one of the candidate classes with enough confidence.",
+                "Tentative targets enter stable_objects only when close capture observes the same class and passes bbox/evidence quality, or when no tentative class was supplied.",
+                "Ambiguous targets enter stable_objects only when close capture resolves to one of the candidate classes and passes bbox/evidence quality.",
                 "Resolved follow-up targets are kept out of stable_objects when they duplicate an already confirmed same-class object within the configured XY radius.",
                 "Quality-limited, unconfirmed, class-conflict, skipped, and failed captures are kept out of stable_objects.",
             ],
@@ -2380,6 +2573,9 @@ def _rejected_stable_object_payload(capture: dict[str, Any], *, reason: str) -> 
         "candidate_class_names": recognition.get("candidate_class_names", []),
         "bbox_xyxy": recognition.get("bbox_xyxy"),
         "bbox_quality": recognition.get("bbox_quality"),
+        "evidence_quality": recognition.get("evidence_quality"),
+        "confidence": recognition.get("confidence"),
+        "observation_kind": recognition.get("observation_kind"),
         "target_xy_distance_m": recognition.get("target_xy_distance_m"),
         "final_image_path": capture.get("final_image_path"),
         "notes": [
@@ -2454,6 +2650,7 @@ def _recognition_payload(
     else:
         class_match = detected_class == target.class_name
     bbox_quality = _bbox_quality_payload(best_observation, config=config)
+    evidence_quality = _evidence_quality_payload(target, best_observation, config=config)
     payload = {
         "status": "observed",
         "source_class_name": target.class_name,
@@ -2464,11 +2661,16 @@ def _recognition_payload(
         "position_world": best_observation.get("rough_position_world"),
         "target_xy_distance_m": best_observation.get("target_xy_distance_m"),
         "bbox_xyxy": best_observation.get("bbox_xyxy"),
+        "observation_kind": best_observation.get("observation_kind"),
+        "source_observation_count": best_observation.get("source_observation_count", 1),
         "target_match_radius_m": _round(config.target_match_radius_m),
         "bbox_quality": bbox_quality,
+        "evidence_quality": evidence_quality,
     }
     if not bbox_quality["accepted"]:
         payload["reason"] = "bbox_quality_limited"
+    elif not evidence_quality["accepted"]:
+        payload["reason"] = "evidence_quality_limited"
     return payload
 
 
@@ -2508,6 +2710,76 @@ def _bbox_quality_payload(
 def _recognition_bbox_quality_accepted(recognition: dict[str, Any]) -> bool:
     bbox_quality = recognition.get("bbox_quality")
     return isinstance(bbox_quality, dict) and bbox_quality.get("accepted") is True
+
+
+def _evidence_quality_payload(
+    target: FinalTarget,
+    observation: dict[str, Any],
+    *,
+    config: FinalConfig,
+) -> dict[str, Any]:
+    confidence = _optional_float(observation.get("confidence"))
+    distance = _optional_float(observation.get("target_xy_distance_m"))
+    observation_kind = _optional_text(observation.get("observation_kind")) or "single_detection"
+    source_count = _source_observation_count_from_observation(observation)
+    strict_match_radius_m = config.target_match_radius_m * config.strict_match_radius_ratio
+    strict_match_min_confidence = config.single_observation_min_confidence * config.strict_match_min_confidence_ratio
+    strong_confidence = confidence is not None and confidence >= config.single_observation_min_confidence
+    moderate_confidence = confidence is not None and confidence >= strict_match_min_confidence
+    strict_position_match = distance is not None and distance <= strict_match_radius_m
+    merged_fragment = observation_kind == "merged_same_class_bbox_fragments"
+    reasons: list[str] = []
+    if confidence is None:
+        reasons.append("missing_confidence")
+    if distance is None:
+        reasons.append("missing_target_distance")
+    if merged_fragment and not strong_confidence:
+        reasons.append("merged_fragment_requires_strong_confidence")
+    if not strong_confidence and not strict_position_match:
+        reasons.append("low_confidence_without_strict_position_match")
+    if not strong_confidence and strict_position_match and not moderate_confidence:
+        reasons.append("strict_match_confidence_too_low")
+    accepted = not reasons and (strong_confidence or (strict_position_match and moderate_confidence))
+    if target.source_status != "stable" and confidence is not None and confidence < DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE:
+        reasons.append("follow_up_below_promotion_confidence")
+        accepted = False
+    return {
+        "policy_version": FINAL_EVIDENCE_QUALITY_POLICY_VERSION,
+        "status": "accepted" if accepted else "limited",
+        "accepted": accepted,
+        "confidence": _round(confidence) if confidence is not None else None,
+        "single_observation_min_confidence": _round(config.single_observation_min_confidence),
+        "strict_match_min_confidence": _round(strict_match_min_confidence),
+        "strict_match_min_confidence_ratio": _round(config.strict_match_min_confidence_ratio),
+        "target_xy_distance_m": _round(distance) if distance is not None else None,
+        "target_match_radius_m": _round(config.target_match_radius_m),
+        "strict_match_radius_m": _round(strict_match_radius_m),
+        "strict_match_radius_ratio": _round(config.strict_match_radius_ratio),
+        "strict_position_match": strict_position_match,
+        "observation_kind": observation_kind,
+        "source_observation_count": source_count,
+        "reasons": reasons,
+        "rules": [
+            "Strong-confidence observations may confirm a final target when bbox quality also passes.",
+            "Lower-confidence single detections may confirm only when their projected XY position is a strict match and confidence is at least the configured strict-match minimum.",
+            "Merged same-class bbox fragments require strong confidence before they can confirm a final target.",
+        ],
+    }
+
+
+def _recognition_evidence_quality_accepted(recognition: dict[str, Any]) -> bool:
+    evidence_quality = recognition.get("evidence_quality")
+    return isinstance(evidence_quality, dict) and evidence_quality.get("accepted") is True
+
+
+def _source_observation_count_from_observation(observation: dict[str, Any]) -> int:
+    value = observation.get("source_observation_count")
+    if value is None:
+        return 1
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _merge_same_class_observation_fragments(
@@ -2615,29 +2887,37 @@ def _final_observation_selection_score(
     merged_count = int(item.get("source_observation_count", 1) or 1)
     distance = float(item.get("target_xy_distance_m", float("inf")))
     confidence = float(item.get("confidence", 0.0))
+    normalized_distance = max(0.0, 1.0 - min(distance, config.target_match_radius_m) / config.target_match_radius_m)
+    observation_kind = _optional_text(item.get("observation_kind")) or "single_detection"
+    merged_fragment = observation_kind == "merged_same_class_bbox_fragments"
+    strong_confidence = confidence >= config.single_observation_min_confidence
     item["selection_score"] = {
-        "policy_version": "final_observation_selection_policy_v3",
+        "policy_version": "final_observation_selection_policy_v4",
         "class_match": class_match,
         "bbox_area_px": _round(bbox_area),
         "bbox_min_border_margin_px": _round(margin),
         "border_safe": border_safe,
         "source_observation_count": merged_count,
+        "observation_kind": observation_kind,
         "target_xy_distance_m": _round(distance),
+        "normalized_target_distance_score": _round(normalized_distance),
         "confidence": _round(confidence),
+        "strong_confidence": strong_confidence,
         "rules": [
             "Prefer detections whose class matches the final target.",
-            "Prefer bbox fragments merged from same-class overlapping detections when available.",
-            "Prefer larger bbox area before treating image-border margin as a tie-breaker.",
-            "Prefer detections with enough image-border margin before using target distance as a tie-breaker.",
+            "Prefer detections with enough image-border margin before comparing target distance.",
+            "Prefer observations whose projected XY position is closer to the final target.",
+            "Prefer stronger confidence before using merged-fragment count and bbox area as tie-breakers.",
         ],
     }
     return (
         1.0 if class_match else 0.0,
+        1.0 if border_safe else 0.0,
+        normalized_distance,
+        confidence,
+        0.0 if merged_fragment and not strong_confidence else 1.0,
         float(merged_count),
         bbox_area,
-        1.0 if border_safe else 0.0,
-        -distance,
-        confidence,
     )
 
 
@@ -2660,11 +2940,15 @@ def _capture_status(
         if class_match is True:
             if not _recognition_bbox_quality_accepted(recognition):
                 return "quality_limited"
+            if not _recognition_evidence_quality_accepted(recognition):
+                return "quality_limited"
             return "confirmed"
         if class_match is False:
             return "class_conflict"
         return "unconfirmed"
     if not _recognition_bbox_quality_accepted(recognition):
+        return "quality_limited"
+    if not _recognition_evidence_quality_accepted(recognition):
         return "quality_limited"
     return "follow_up_observed"
 
@@ -2705,7 +2989,9 @@ def _capture_notes(target: FinalTarget, status: str) -> list[str]:
     if status == "class_conflict":
         notes.append("The closest close-view YOLO observation did not match the source stable class name.")
     if status == "quality_limited":
-        notes.append("The closest close-view YOLO observation was kept in the report but its bbox did not satisfy final confirmation quality.")
+        notes.append(
+            "The closest close-view YOLO observation was kept in the report but bbox/evidence quality did not satisfy final confirmation."
+        )
     if status == "unconfirmed":
         notes.append("No close YOLO-depth observation confirmed this target within the configured association radius.")
     return notes
@@ -2813,6 +3099,21 @@ def _final_reachable_planning_summary(
             if planned_captures
             else None
         ),
+        "early_camera_position_count": (
+            planned_captures[0].candidate_generation_summary.get("early_camera_position_count")
+            if planned_captures
+            else None
+        ),
+        "follow_up_candidate_attempt_limit": (
+            planned_captures[0].candidate_generation_summary.get("follow_up_candidate_attempt_limit")
+            if planned_captures
+            else None
+        ),
+        "follow_up_max_unsatisfied_captures": (
+            planned_captures[0].candidate_generation_summary.get("follow_up_max_unsatisfied_captures")
+            if planned_captures
+            else None
+        ),
         "candidate_pruning_policy_version": FINAL_VIEW_CANDIDATE_PRUNING_POLICY_VERSION,
         "captured_target_count": sum(1 for capture in object_captures if capture.get("view", {}).get("status") == "success"),
         "selected_fixed_qpos_count": selected_fixed_qpos_count,
@@ -2823,8 +3124,10 @@ def _final_reachable_planning_summary(
         "rules": [
             "Final candidates enumerate standoff, approach angle, camera height, camera roll, and entry portal mode from FinalConfig.",
             "Camera positions are sorted by geometric quality; final_view_camera_position_limit can optionally cap this cheap geometric list before view expansion.",
+            "When configured, the top geometry-ranked camera positions are interleaved across roll and entry profiles before the remaining profile-priority search.",
             "Expanded view candidates are priority-sorted by entry portal and wrist-roll profile before geometric preferences.",
             "final_view_candidate_limit is optional; when unset, ordered candidates are validated until one succeeds or the candidate set is exhausted.",
+            "Follow-up targets use bounded confirmation budgets so tentative or ambiguous targets cannot dominate final runtime when repeated captures remain unresolved.",
             "When final_view_candidate_limit is set, omitted candidates remain represented by summary counts and the target fails explicitly if none pass.",
             "Each candidate is accepted only after all top-opening portal entry waypoints and the final photo pose pass MuJoCo IK and robot collision checks.",
             "The rendered final photo reuses the validated qpos through fixed_pose_source instead of solving a new pose silently.",
@@ -2950,10 +3253,11 @@ def _object_capture_public_payload(capture: dict[str, Any], *, config: FinalConf
         "recognition",
         "final_image_path",
         "depth_path",
-        "annotated_image_path",
-        "yolo_raw_path",
-        "notes",
-    ):
+            "annotated_image_path",
+            "yolo_raw_path",
+            "search_stop",
+            "notes",
+        ):
         if key in capture:
             payload[key] = capture[key]
     payload["view_candidate_attempt_summary"] = _view_candidate_attempt_summary(
@@ -3007,6 +3311,7 @@ def _attempt_failure_sample_payload(attempt: dict[str, Any]) -> dict[str, Any]:
             "status": recognition.get("status"),
             "reason": recognition.get("reason"),
             "bbox_quality": recognition.get("bbox_quality"),
+            "evidence_quality": recognition.get("evidence_quality"),
         }
     return payload
 
@@ -3026,6 +3331,7 @@ def _view_candidate_compact_payload(value: Any) -> dict[str, Any]:
             "candidate_source": value.candidate_source,
             "direction_adjusted": value.direction_adjusted,
             "camera_position_world": [_round(component) for component in value.camera_position_world],
+            "camera_position_rank": value.camera_position_rank,
             "view_id": value.view.view_id,
             "entry_view_count": len(value.entry_views),
         }
@@ -3044,6 +3350,7 @@ def _view_candidate_compact_payload(value: Any) -> dict[str, Any]:
         "candidate_source": value.get("candidate_source"),
         "direction_adjusted": value.get("direction_adjusted"),
         "camera_position_world": value.get("camera_position_world"),
+        "camera_position_rank": value.get("camera_position_rank"),
         "view_id": (value.get("view") if isinstance(value.get("view"), dict) else {}).get("view_id"),
         "entry_view_count": len(value.get("entry_views", [])) if isinstance(value.get("entry_views"), list) else None,
     }
