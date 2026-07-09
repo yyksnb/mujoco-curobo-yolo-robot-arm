@@ -38,7 +38,7 @@ DEFAULT_FINAL_MIN_OBLIQUE_DISTANCE_M = 0.06
 DEFAULT_FINAL_LOOK_AT_HEIGHT_OFFSET_M = 0.025
 DEFAULT_FINAL_TARGET_MATCH_RADIUS_M = 0.07
 DEFAULT_FINAL_ENTRY_VALIDATION_SAMPLES = 3
-DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M = 0.02
+DEFAULT_FINAL_ENTRY_CLEARANCE_MARGIN_M = 0.04
 DEFAULT_FINAL_ENTRY_PORTAL_MODES = ("final-vertical", "opening-grid-nearest", "workspace-center")
 DEFAULT_FINAL_ENTRY_ORIENTATION_POLICY = "vertical-descent"
 DEFAULT_FINAL_ENTRY_LATERAL_ORIENTATION_POLICY = "final-look-at"
@@ -77,6 +77,7 @@ DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO = 0.15
 DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX = 8.0
 DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M = DEFAULT_FINAL_TARGET_MATCH_RADIUS_M
 DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE = DEFAULT_FINAL_YOLO_CONFIDENCE
+DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE = 0.60
 DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT = 5
 DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS = True
 DEFAULT_SAVE_FINAL_DEBUG_TRACE = False
@@ -147,6 +148,7 @@ class FinalConfig:
     depth_component_split_distance_m: float = DEFAULT_DEPTH_COMPONENT_SPLIT_DISTANCE_M
     bbox_fragment_min_overlap_ratio: float = DEFAULT_FINAL_BBOX_FRAGMENT_MIN_OVERLAP_RATIO
     selection_border_margin_px: float = DEFAULT_FINAL_SELECTION_BORDER_MARGIN_PX
+    single_observation_min_confidence: float = DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE
     save_filtered_annotations: bool = DEFAULT_SAVE_FINAL_FILTERED_ANNOTATIONS
     save_raw_yolo_annotations: bool = DEFAULT_SAVE_RAW_YOLO_ANNOTATIONS
     save_debug_trace: bool = DEFAULT_SAVE_FINAL_DEBUG_TRACE
@@ -248,6 +250,8 @@ class FinalConfig:
             raise ValueError("bbox_fragment_min_overlap_ratio must be between 0 and 1")
         if self.selection_border_margin_px < 0.0:
             raise ValueError("selection_border_margin_px must be non-negative")
+        if not 0.0 <= self.single_observation_min_confidence <= 1.0:
+            raise ValueError("single_observation_min_confidence must be between 0 and 1")
         if self.failure_sample_limit < 0:
             raise ValueError("failure_sample_limit must be non-negative")
 
@@ -645,6 +649,7 @@ def run_task1_final(
             if _desired_stable_count_reached(
                 object_captures,
                 desired_stable_object_count=config.desired_stable_object_count,
+                single_observation_min_confidence=config.single_observation_min_confidence,
             ):
                 object_captures.append(_skipped_follow_up_capture_result(planned))
                 continue
@@ -726,11 +731,24 @@ def select_stable_final_objects(
     object_captures: list[dict[str, Any]],
     *,
     desired_stable_object_count: int | None = DEFAULT_FINAL_DESIRED_STABLE_OBJECT_COUNT,
+    single_observation_min_confidence: float = DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE,
 ) -> dict[str, Any]:
     if not object_captures:
-        return _stable_selection_payload([], [], status="not_run", desired_stable_object_count=desired_stable_object_count)
+        return _stable_selection_payload(
+            [],
+            [],
+            status="not_run",
+            desired_stable_object_count=desired_stable_object_count,
+            single_observation_min_confidence=single_observation_min_confidence,
+        )
     if all(capture.get("status") == "planned" for capture in object_captures):
-        return _stable_selection_payload([], [], status="not_run", desired_stable_object_count=desired_stable_object_count)
+        return _stable_selection_payload(
+            [],
+            [],
+            status="not_run",
+            desired_stable_object_count=desired_stable_object_count,
+            single_observation_min_confidence=single_observation_min_confidence,
+        )
 
     primary_objects: list[dict[str, Any]] = []
     follow_up_objects: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -745,7 +763,12 @@ def select_stable_final_objects(
         elif rejection is not None:
             rejected_objects.append(rejection)
 
-    stable_objects = list(primary_objects)
+    stable_objects, overcomplete_rejections = _split_overcomplete_primary_objects(
+        primary_objects,
+        desired_stable_object_count=desired_stable_object_count,
+        single_observation_min_confidence=single_observation_min_confidence,
+    )
+    rejected_objects.extend(overcomplete_rejections)
     for stable_object, capture in follow_up_objects:
         if desired_stable_object_count is not None and len(stable_objects) >= desired_stable_object_count:
             rejected_objects.append(
@@ -777,6 +800,7 @@ def select_stable_final_objects(
         rejected_objects,
         status="success",
         desired_stable_object_count=desired_stable_object_count,
+        single_observation_min_confidence=single_observation_min_confidence,
     )
 
 
@@ -1999,12 +2023,14 @@ def _desired_stable_count_reached(
     object_captures: list[dict[str, Any]],
     *,
     desired_stable_object_count: int | None,
+    single_observation_min_confidence: float = DEFAULT_FINAL_SINGLE_OBSERVATION_MIN_CONFIDENCE,
 ) -> bool:
     if desired_stable_object_count is None:
         return False
     selection = select_stable_final_objects(
         object_captures,
         desired_stable_object_count=desired_stable_object_count,
+        single_observation_min_confidence=single_observation_min_confidence,
     )
     return int(selection["stable_object_selection"]["stable_object_count"]) >= desired_stable_object_count
 
@@ -2035,6 +2061,8 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
     confidence = recognition.get("confidence")
     if confidence is None:
         return None, _rejected_stable_object_payload(capture, reason="missing_confidence")
+    confidence_float = float(confidence)
+    source_observation_count = _final_source_observation_count(capture)
     bbox = _optional_bbox(recognition.get("bbox_xyxy"))
     if bbox is None:
         return None, _rejected_stable_object_payload(capture, reason="missing_bbox_xyxy")
@@ -2047,7 +2075,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
     detection = ObjectDetection(
         object_id=object_id,
         class_name=detected_class,
-        confidence=float(confidence),
+        confidence=confidence_float,
         bbox_xyxy=bbox,
         T_world_object=transform,
     )
@@ -2068,6 +2096,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
                 "target_xy_distance_m": recognition.get("target_xy_distance_m"),
                 "target_match_radius_m": recognition.get("target_match_radius_m"),
                 "bbox_quality": recognition.get("bbox_quality"),
+                "source_observation_count": source_observation_count,
             },
             "pose_quality": {
                 "position_source": "final_close_yolo_depth_observation",
@@ -2105,6 +2134,114 @@ def _matching_stable_object(
         if best is None or distance < best[0]:
             best = (distance, item)
     return best[1] if best is not None else None
+
+
+def _split_overcomplete_primary_objects(
+    primary_objects: list[dict[str, Any]],
+    *,
+    desired_stable_object_count: int | None,
+    single_observation_min_confidence: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if desired_stable_object_count is None or len(primary_objects) <= desired_stable_object_count:
+        return list(primary_objects), []
+
+    stable_objects = list(primary_objects)
+    weak_single_objects = [
+        stable_object
+        for stable_object in stable_objects
+        if _is_weak_single_observation_stable_object(
+            stable_object,
+            single_observation_min_confidence=single_observation_min_confidence,
+        )
+    ]
+    weak_single_objects.sort(key=_weak_single_observation_sort_key)
+
+    rejected_objects: list[dict[str, Any]] = []
+    for stable_object in weak_single_objects:
+        if len(stable_objects) <= desired_stable_object_count:
+            break
+        stable_objects.remove(stable_object)
+        rejected_objects.append(
+            _overcomplete_single_observation_rejection_payload(
+                stable_object,
+                desired_stable_object_count=desired_stable_object_count,
+                single_observation_min_confidence=single_observation_min_confidence,
+            )
+        )
+
+    return stable_objects, rejected_objects
+
+
+def _is_weak_single_observation_stable_object(
+    stable_object: dict[str, Any],
+    *,
+    single_observation_min_confidence: float,
+) -> bool:
+    selection = stable_object.get("selection")
+    if not isinstance(selection, dict):
+        return False
+    source_count = selection.get("source_observation_count")
+    try:
+        source_observation_count = int(source_count)
+    except (TypeError, ValueError):
+        source_observation_count = 1
+    if source_observation_count > 1:
+        return False
+    confidence = _optional_float(stable_object.get("confidence"))
+    return confidence is not None and confidence < single_observation_min_confidence
+
+
+def _weak_single_observation_sort_key(stable_object: dict[str, Any]) -> tuple[float, float, str]:
+    confidence = _optional_float(stable_object.get("confidence"))
+    selection = stable_object.get("selection") if isinstance(stable_object.get("selection"), dict) else {}
+    distance = _optional_float(selection.get("target_xy_distance_m")) if isinstance(selection, dict) else None
+    return (
+        confidence if confidence is not None else float("inf"),
+        -(distance if distance is not None else 0.0),
+        str(stable_object.get("object_id") or ""),
+    )
+
+
+def _overcomplete_single_observation_rejection_payload(
+    stable_object: dict[str, Any],
+    *,
+    desired_stable_object_count: int,
+    single_observation_min_confidence: float,
+) -> dict[str, Any]:
+    selection = stable_object.get("selection") if isinstance(stable_object.get("selection"), dict) else {}
+    return {
+        "object_id": stable_object.get("object_id"),
+        "source_status": stable_object.get("source_status"),
+        "target_role": stable_object.get("target_role"),
+        "capture_status": "confirmed",
+        "reason": "overcomplete_single_observation_low_confidence",
+        "detected_class_name": stable_object.get("class_name"),
+        "source_class_name": stable_object.get("class_name"),
+        "candidate_class_names": [],
+        "bbox_xyxy": stable_object.get("bbox_xyxy"),
+        "bbox_quality": selection.get("bbox_quality") if isinstance(selection, dict) else None,
+        "target_xy_distance_m": selection.get("target_xy_distance_m") if isinstance(selection, dict) else None,
+        "final_image_path": stable_object.get("final_image_path"),
+        "source_observation_count": selection.get("source_observation_count") if isinstance(selection, dict) else None,
+        "single_observation_min_confidence": _round(single_observation_min_confidence),
+        "desired_stable_object_count": int(desired_stable_object_count),
+        "notes": [
+            "This confirmed primary target was excluded because the final stable set was overcomplete and this object had only weak single-observation close-view evidence.",
+        ],
+    }
+
+
+def _final_source_observation_count(capture: dict[str, Any]) -> int:
+    observation = capture.get("best_observation")
+    if not isinstance(observation, dict):
+        return 1
+    value = observation.get("source_observation_count")
+    if value is None:
+        return 1
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _duplicate_follow_up_rejection_payload(
@@ -2196,6 +2333,7 @@ def _stable_selection_payload(
     *,
     status: str,
     desired_stable_object_count: int | None,
+    single_observation_min_confidence: float,
 ) -> dict[str, Any]:
     rejected_counts: dict[str, int] = {}
     for rejected in rejected_objects:
@@ -2213,8 +2351,10 @@ def _stable_selection_payload(
             "desired_stable_object_count": desired_stable_object_count,
             "follow_up_duplicate_radius_m": _round(DEFAULT_FINAL_FOLLOW_UP_DUPLICATE_RADIUS_M),
             "follow_up_promotion_min_confidence": _round(DEFAULT_FINAL_FOLLOW_UP_PROMOTION_MIN_CONFIDENCE),
+            "single_observation_min_confidence": _round(single_observation_min_confidence),
             "rules": [
                 "Primary rough-stable targets enter stable_objects only when close capture confirms the same class.",
+                "If confirmed primary targets exceed the configured desired stable count, weak single-observation confirmations are excluded first instead of hard-trimming arbitrary objects.",
                 "Follow-up targets are promotion candidates only while the stable object list is below the configured desired count.",
                 "Follow-up targets are not rendered once the configured desired stable count has already been reached.",
                 "Tentative targets enter stable_objects only when close capture observes the same class with enough confidence, or when no tentative class was supplied.",
@@ -3056,6 +3196,7 @@ def _report_payload(
     stable_selection = select_stable_final_objects(
         object_captures,
         desired_stable_object_count=config.desired_stable_object_count,
+        single_observation_min_confidence=config.single_observation_min_confidence,
     )
     reachable_planning_summary = _final_reachable_planning_summary(
         planned_captures=planned_captures,
@@ -3113,6 +3254,7 @@ def _report_payload(
             "Stable rough objects are consumed as primary final capture targets.",
             "Tentative and ambiguous rough objects are consumed as explicit follow-up targets only when the configured desired stable count still needs rescue candidates.",
             "Each target keeps its own capture status; unconfirmed and class-conflict results are kept out of stable_objects.",
+            "When confirmed primary targets are overcomplete, weak single-observation confirmations are reported as unstable rather than being silently kept.",
             "Final capture views are rendered only from fixed qpos values produced by successful whole-arm IK and collision validation.",
             "Formal outputs keep selected candidates, summaries, and limited failure samples; full candidate and attempt traces are written only when save_debug_trace is enabled.",
             "The report intentionally supports any number of rough targets.",

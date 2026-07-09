@@ -809,6 +809,84 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
 
 
 def test_final_stable_selection_follow_up_guardrails() -> None:
+    overcomplete_captures = [
+        _final_payload(
+            object_id=f"rough_object_{index:03d}",
+            source_status="stable",
+            target_role="primary",
+            capture_status="confirmed",
+            source_class_name=f"class_{index}",
+            detected_class_name=f"class_{index}",
+            position_world=[0.20 + index * 0.08, 0.30 + index * 0.04, 0.03],
+            source_transform=None,
+        )
+        for index in range(1, 6)
+    ]
+    overcomplete_captures.append(
+        _final_payload(
+            object_id="rough_object_006",
+            source_status="stable",
+            target_role="primary",
+            capture_status="confirmed",
+            source_class_name="extra_class",
+            detected_class_name="extra_class",
+            position_world=[0.76, 0.72, 0.03],
+            source_transform=None,
+            confidence=0.55,
+        )
+    )
+    overcomplete_selection = select_stable_final_objects(
+        overcomplete_captures,
+        single_observation_min_confidence=0.60,
+    )
+
+    assert [obj["object_id"] for obj in overcomplete_selection["stable_objects"]] == [
+        "rough_object_001",
+        "rough_object_002",
+        "rough_object_003",
+        "rough_object_004",
+        "rough_object_005",
+    ]
+    assert overcomplete_selection["stable_object_selection"]["rejected_reason_counts"] == {
+        "overcomplete_single_observation_low_confidence": 1
+    }
+    assert overcomplete_selection["unstable_objects"][0]["object_id"] == "rough_object_006"
+
+    normal_count_selection = select_stable_final_objects(
+        [
+            _final_payload(
+                object_id="rough_object_001",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="tape",
+                detected_class_name="tape",
+                position_world=[0.65, 0.44, 0.03],
+                source_transform=None,
+                confidence=0.55,
+            ),
+            _final_payload(
+                object_id="rough_object_002",
+                source_status="stable",
+                target_role="primary",
+                capture_status="confirmed",
+                source_class_name="marker",
+                detected_class_name="marker",
+                position_world=[0.47, 0.50, 0.03],
+                source_transform=None,
+                confidence=0.55,
+                source_observation_count=2,
+            ),
+        ],
+        single_observation_min_confidence=0.60,
+    )
+
+    assert [obj["object_id"] for obj in normal_count_selection["stable_objects"]] == [
+        "rough_object_001",
+        "rough_object_002",
+    ]
+    assert normal_count_selection["stable_object_selection"]["rejected_reason_counts"] == {}
+
     duplicate_selection = select_stable_final_objects(
         [
             _final_payload(
@@ -1706,6 +1784,7 @@ def _final_payload(
     source_transform: list[list[float]] | None,
     candidate_class_names: list[str] | None = None,
     confidence: float = 0.82,
+    source_observation_count: int | None = None,
 ) -> dict[str, object]:
     target = {
         "object_id": object_id,
@@ -1738,6 +1817,7 @@ def _final_payload(
             "confidence": confidence,
             "rough_position_world": position_world,
             "bbox_xyxy": [100.0, 110.0, 220.0, 240.0],
+            **({"source_observation_count": source_observation_count} if source_observation_count is not None else {}),
         },
         "final_image_path": "outputs/single.png",
         "depth_path": "outputs/single.npy",

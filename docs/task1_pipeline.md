@@ -120,6 +120,7 @@ python scripts/run_task1_recognition.py \
 - wrist camera 来自 `examples/mujoco/kinova_gen3/gen3.xml` 的 `camera name="wrist"`。
 - 最终拍照相机位姿必须在油箱内部，且 z 低于油箱上口高度。
 - 正式 report 只保留 selected candidate、候选排序/可选裁剪统计摘要和少量失败样例；完整 trace 需要显式打开 debug。
+- 当 primary confirmed 对象数量超过配置目标数量时，final 会优先把低置信单观测候选降为 `unstable_objects`。
 
 最小命令：
 
@@ -173,3 +174,5 @@ python scripts/run_task1_recognition.py \
 
 - Final 阶段的 MuJoCo IK 连续验证会受候选顺序 warm-start 影响，后续可改为每个候选使用固定 nominal qpos 初始化。
 - Final 阶段默认不硬截断候选会优先保 recall；类别冲突或无法确认的目标可能拖长耗时。
+- Survey/Rough 对 `standard_part` 等小目标仍可能漏召回，导致后续 Final 没有目标可拍。
+- 钻头和标准件等近邻小目标仍可能在 Rough 阶段进入同一个 ambiguous/fused 目标，Final follow-up 目前只能确认其中一个观测。
