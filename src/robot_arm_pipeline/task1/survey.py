@@ -1031,6 +1031,11 @@ class MujocoSurveyBackend:
                 self._set_body_geom_alpha(body_id, alpha=0.0)
         mujoco.mj_forward(model, data)
 
+    def reset_robot_pose(self) -> str:
+        source = self._apply_home_keyframe()
+        self._mujoco().mj_forward(self._model(), self._data())
+        return source
+
     def validate_view_pose(self, view: SurveyView) -> dict[str, Any]:
         if view.fixed_qpos is not None:
             if view.fixed_pose_source == FIXED_MIXED_4X4_POSE_SOURCE:
@@ -1713,7 +1718,7 @@ class MujocoSurveyBackend:
                 return int(camera_id), candidate
         raise ValueError(f"camera not found in MuJoCo scene: {camera_name} (also tried gen3_{camera_name})")
 
-    def _apply_home_keyframe(self) -> None:
+    def _apply_home_keyframe(self) -> str:
         mujoco = self._mujoco()
         model = self._model()
         data = self._data()
@@ -1721,7 +1726,9 @@ class MujocoSurveyBackend:
             key_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, name)
             if key_id >= 0:
                 mujoco.mj_resetDataKeyframe(model, data, key_id)
-                return
+                return f"keyframe:{name}"
+        mujoco.mj_resetData(model, data)
+        return "model_default"
 
     def _target_body_names(self) -> tuple[str, ...]:
         mujoco = self._mujoco()

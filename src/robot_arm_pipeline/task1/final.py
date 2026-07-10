@@ -1831,12 +1831,17 @@ def _validate_entry_views(
     candidate: FinalViewCandidate | None = None,
 ) -> list[dict[str, Any]]:
     active_candidate = candidate or planned.view_candidates[0]
+    initialization_source = backend.reset_robot_pose()
     results: list[dict[str, Any]] = []
     for view in active_candidate.entry_views:
         result = backend.validate_view_pose(view)
         result["validation_role"] = "top_opening_entry_sample"
         result["target_object_id"] = planned.target.object_id
         result["view_candidate_id"] = active_candidate.candidate_id
+        result["path_initialization"] = {
+            "strategy": "reset_before_candidate_entry_path",
+            "source": initialization_source,
+        }
         if result.get("status") == "success" and _actual_qpos_from_validation(result) is None:
             result = dict(result)
             result["status"] = "failed"
@@ -3125,6 +3130,7 @@ def _final_reachable_planning_summary(
         "attempt_search_phase_counts": attempt_search_phase_counts,
         "rejection_counts": rejection_counts,
         "rules": [
+            "Every candidate entry path starts from the deterministic robot home pose instead of inheriting a failed prior candidate state.",
             "Final candidates enumerate standoff, approach angle, camera height, camera roll, and entry portal mode from FinalConfig.",
             "Camera positions are sorted by geometric quality; final_view_camera_position_limit can optionally cap this cheap geometric list before view expansion.",
             "When configured, the top geometry-ranked camera positions are interleaved across roll and entry profiles before the remaining profile-priority search.",

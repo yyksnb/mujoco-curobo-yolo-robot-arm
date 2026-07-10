@@ -598,6 +598,12 @@ def test_final_capture_selects_whole_arm_collision_safe_candidate(tmp_path: Path
     assert backend.captured_view is not None
     assert backend.captured_view.fixed_pose_source == FINAL_REACHABLE_CAPTURE_FIXED_POSE_SOURCE
     assert backend.captured_view.fixed_qpos is not None
+    assert backend.reset_calls == 3
+    assert all(
+        attempt["entry_validation"][0]["path_initialization"]
+        == {"strategy": "reset_before_candidate_entry_path", "source": "test_home"}
+        for attempt in result["view_candidate_attempts"]
+    )
     summary = _final_reachable_planning_summary(planned_captures=(planned[0],), object_captures=[result])
     assert summary["attempt_status_counts"] == {
         "entry_validation_failed": 1,
@@ -2166,7 +2172,12 @@ class _FakeFinalCaptureBackend(_FakeRoughValidationBackend):
         super().__init__(outcomes)
         self.captured_view = None
         self.capture_calls = 0
+        self.reset_calls = 0
         self.capture_observations = capture_observations or ([],)
+
+    def reset_robot_pose(self) -> str:
+        self.reset_calls += 1
+        return "test_home"
 
     def capture_view(
         self,

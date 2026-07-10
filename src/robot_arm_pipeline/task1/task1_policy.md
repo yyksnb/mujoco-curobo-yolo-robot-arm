@@ -89,6 +89,7 @@
 - Follow-up 目标只有在证据足够时才能升级为 stable；否则应保留 unstable/partial。
 - 如果存在多个同类或近邻观测，选框策略不能只按 bbox 面积或单一距离决定，应兼顾类别一致、目标距离、边界安全、bbox 完整性和置信度。
 - Follow-up 搜索可以设置候选尝试预算，但预算耗尽必须写入 report，且只能产生 unstable/partial 结果。
+- 每个 Final candidate 的 entry path 必须从确定的机器人初始姿态开始验证，不能继承前一个失败或未确认 candidate 留下的关节状态。
 
 失败语义：
 
