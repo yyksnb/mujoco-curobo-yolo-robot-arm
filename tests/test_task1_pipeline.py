@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from robot_arm_pipeline.task1.attribution import analyze_task1_run
 from robot_arm_pipeline.task1.survey import (
     DEFAULT_GRID_SIZE,
     SurveyConfig,
@@ -56,6 +57,66 @@ from robot_arm_pipeline.task1.replay import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_object_attribution_assigns_dropped_projected_detection_to_survey_fusion(tmp_path: Path) -> None:
+    run_dir = tmp_path / "task1" / "run_seed12"
+    _write_json_report(
+        run_dir / "layout" / "target_object_poses.json",
+        {
+            "schema_version": "target_object_pose_layout_v1",
+            "seed": 12,
+            "objects": [
+                {
+                    "object_id": "target_standard_part",
+                    "class_name": "standard_part",
+                    "position": [0.50, 0.40, 0.03],
+                }
+            ],
+        },
+    )
+    _write_json_report(
+        run_dir / "survey" / "yolo_raw" / "survey_0000.json",
+        {"detections": [{"class_name": "标准件", "confidence": 0.81}]},
+    )
+    _write_json_report(
+        run_dir / "survey" / "survey_report.json",
+        {
+            "schema_version": "task1_survey_report_v1",
+            "observations": [
+                {
+                    "view_id": "survey_0000",
+                    "class_name": "标准件",
+                    "confidence": 0.81,
+                    "rough_position_world": [0.51, 0.40, 0.03],
+                }
+            ],
+            "candidates": [],
+        },
+    )
+    _write_json_report(
+        run_dir / "rough" / "rough_report.json",
+        {
+            "schema_version": "task1_rough_report_v1",
+            "views": [],
+            "rough_observations": [],
+            "stable_objects": [],
+            "tentative_objects": [],
+            "ambiguous_objects": [],
+        },
+    )
+    _write_json_report(
+        run_dir / "final" / "final_report.json",
+        {"schema_version": "task1_final_report_v1", "object_captures": [], "stable_objects": []},
+    )
+
+    report = analyze_task1_run(
+        run_dir,
+        yolo_profile_path=REPO_ROOT / "configs" / "yolo" / "stage3_default.yaml",
+    )
+
+    assert report["objects"][0]["loss_stage"] == "survey_fusion"
+    assert report["objects"][0]["responsibility"] == "pipeline"
 
 
 def test_target_layout_loads_and_grid_survey_plan_stays_inside_tank(tmp_path: Path) -> None:
