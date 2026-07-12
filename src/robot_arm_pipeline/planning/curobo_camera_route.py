@@ -1,29 +1,167 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-
 
 DEFAULT_ROBOT_CONFIG = Path("configs/curobo/gen3/robot.yml")
 DEFAULT_WORLD_CONFIG = Path("configs/curobo/gen3/world.yml")
 DEFAULT_GRAPH_CONFIG = Path("configs/curobo/gen3/graph.yml")
 GEN3_JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7")
 DEFAULT_START_JOINT_POSITIONS = (0.0, 0.26179939, 3.14159265, -2.26892803, 0.0, 0.95993109, 1.57079633)
+CAMERA_ROUTE_PLAN_SCHEMA = "camera_route_plan"
+
+
+def filter_feasible_graph_goals(
+    graph_planner: Any,
+    start_position: Any,
+    goal_positions: Any,
+) -> tuple[Any, Any] | None:
+    start = start_position.reshape(1, goal_positions.shape[-1])
+    if not _all_true(graph_planner.check_samples_feasibility(start)):
+        return None
+    goals = goal_positions[graph_planner.check_samples_feasibility(goal_positions)]
+    if goals.shape[0] == 0:
+        return None
+    return start[[0] * goals.shape[0]], goals
+
+
+def _all_true(values: Any) -> bool:
+    result = values.all()
+    return bool(result.item() if hasattr(result, "item") else result)
+
+
+def create_collision_filtered_motion_planner(config: Any) -> Any:
+    from curobo._src.graph_planner.graph_planner_prm import TrajInterpolationType
+    from curobo.motion_planner import MotionPlanner
+
+    class CollisionFilteredMotionPlanner(MotionPlanner):
+        def _get_graph_seed_trajectories(self, current_state: Any, seed_config: Any) -> Any:
+            dof = self.trajopt_solver.action_dim
+            graph_goals = seed_config.reshape(-1, dof)
+            queries = filter_feasible_graph_goals(
+                self.graph_planner,
+                current_state.position,
+                graph_goals,
+            )
+            if queries is None:
+                return None
+            graph_starts, graph_goals = queries
+            result = self.graph_planner.find_path(
+                graph_starts.clone(),
+                graph_goals.clone(),
+                interpolate_waypoints=True,
+                interpolation_steps=self.trajopt_solver.action_horizon,
+                interpolation_type=TrajInterpolationType.LINEAR,
+                validate_interpolated_trajectory=False,
+            )
+            if not bool(result.success.any().item()):
+                return None
+            return result.interpolated_waypoints[result.success, :, :].unsqueeze(0)
+
+    return CollisionFilteredMotionPlanner(config)
+
+
+def _require_mapping(value: object, context: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{context} must be an object with string keys")
+    return value
+
+
+def _require_keys(value: Mapping[str, object], expected: set[str], context: str) -> None:
+    missing = expected - value.keys()
+    unknown = value.keys() - expected
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"missing={sorted(missing)}")
+        if unknown:
+            details.append(f"unknown={sorted(unknown)}")
+        raise ValueError(f"{context} has invalid fields: {', '.join(details)}")
+
+
+def _require_string(value: object, context: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError(f"{context} must be a{' possibly empty' if allow_empty else ' non-empty'} string")
+    return value
+
+
+def _require_bool(value: object, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{context} must be a boolean")
+    return value
+
+
+def _require_int(value: object, context: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{context} must be an integer >= {minimum}")
+    return value
+
+
+def _require_float(value: object, context: str, *, minimum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{context} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result) or (minimum is not None and result < minimum):
+        suffix = f" >= {minimum}" if minimum is not None else ""
+        raise ValueError(f"{context} must be a finite number{suffix}")
+    return result
+
+
+def _require_optional_float(
+    value: object, context: str, *, minimum: float | None = None
+) -> float | None:
+    return None if value is None else _require_float(value, context, minimum=minimum)
+
+
+def _require_sequence(value: object, context: str) -> Sequence[object]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(f"{context} must be an array")
+    return value
+
+
+def _float_tuple(value: object, context: str) -> tuple[float, ...]:
+    return tuple(
+        _require_float(item, f"{context}[{index}]")
+        for index, item in enumerate(_require_sequence(value, context))
+    )
+
+
+def _float_matrix(value: object, context: str) -> tuple[tuple[float, ...], ...]:
+    return tuple(
+        _float_tuple(row, f"{context}[{index}]")
+        for index, row in enumerate(_require_sequence(value, context))
+    )
 
 
 @dataclass(frozen=True)
 class CameraRouteTarget:
     target_id: str
-    reference_joint_positions: tuple[float, ...]
+    target_position: tuple[float, float, float]
+    target_quaternion_wxyz: tuple[float, float, float, float]
 
     def __post_init__(self) -> None:
-        if not self.target_id:
-            raise ValueError("camera route target_id must not be empty")
-        if len(self.reference_joint_positions) != len(GEN3_JOINT_NAMES):
-            raise ValueError("camera route target must contain all seven Gen3 joint positions")
+        _require_string(self.target_id, "camera route target_id")
+        if len(self.target_position) != 3:
+            raise ValueError("camera route target_position must contain three values")
+        if len(self.target_quaternion_wxyz) != 4:
+            raise ValueError("camera route target_quaternion_wxyz must contain four values")
+        position = tuple(
+            _require_float(value, f"camera route target_position[{index}]")
+            for index, value in enumerate(self.target_position)
+        )
+        quaternion = tuple(
+            _require_float(value, f"camera route target_quaternion_wxyz[{index}]")
+            for index, value in enumerate(self.target_quaternion_wxyz)
+        )
+        if not math.isclose(sum(value * value for value in quaternion), 1.0, abs_tol=1e-5):
+            raise ValueError("camera route target quaternion must be normalized")
+        object.__setattr__(self, "target_position", position)
+        object.__setattr__(self, "target_quaternion_wxyz", quaternion)
 
 
 @dataclass(frozen=True)
@@ -34,8 +172,50 @@ class CameraRouteSegment:
     planning_time_s: float
     waypoint_count: int
     trajectory: tuple[tuple[float, ...], ...] = ()
+    trajectory_time_s: tuple[float, ...] | None = None
+    trajectory_velocity: tuple[tuple[float, ...], ...] | None = None
     target_position_error_m: float | None = None
     target_orientation_error_rad: float | None = None
+
+    def __post_init__(self) -> None:
+        _require_string(self.target_id, "camera route segment target_id")
+        if not isinstance(self.success, bool):
+            raise ValueError("camera route segment success must be a boolean")
+        _require_string(self.message, "camera route segment message", allow_empty=True)
+        _require_float(self.planning_time_s, "camera route segment planning_time_s", minimum=0.0)
+        _require_int(self.waypoint_count, "camera route segment waypoint_count")
+        if self.waypoint_count != len(self.trajectory):
+            raise ValueError("camera route segment waypoint_count must match trajectory length")
+        widths = {len(row) for row in self.trajectory}
+        if len(widths) > 1 or (self.trajectory and 0 in widths):
+            raise ValueError("camera route segment trajectory rows must have one non-zero width")
+        for row_index, row in enumerate(self.trajectory):
+            for value_index, value in enumerate(row):
+                _require_float(value, f"camera route segment trajectory[{row_index}][{value_index}]")
+        if self.trajectory_time_s is not None:
+            if len(self.trajectory_time_s) != self.waypoint_count:
+                raise ValueError("camera route segment trajectory_time_s must match trajectory length")
+            previous = -math.inf
+            for index, value in enumerate(self.trajectory_time_s):
+                current = _require_float(value, f"trajectory_time_s[{index}]", minimum=0.0)
+                if current <= previous:
+                    raise ValueError("camera route segment trajectory_time_s must be strictly increasing")
+                previous = current
+        if self.trajectory_velocity is not None:
+            if len(self.trajectory_velocity) != self.waypoint_count:
+                raise ValueError("camera route segment trajectory_velocity must match trajectory length")
+            expected_width = next(iter(widths), 0)
+            for index, row in enumerate(self.trajectory_velocity):
+                if len(row) != expected_width:
+                    raise ValueError("camera route segment velocity rows must match trajectory width")
+                for column, value in enumerate(row):
+                    _require_float(value, f"trajectory_velocity[{index}][{column}]")
+        _require_optional_float(
+            self.target_position_error_m, "target_position_error_m", minimum=0.0
+        )
+        _require_optional_float(
+            self.target_orientation_error_rad, "target_orientation_error_rad", minimum=0.0
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -45,9 +225,45 @@ class CameraRouteSegment:
             "planning_time_s": self.planning_time_s,
             "waypoint_count": self.waypoint_count,
             "trajectory": [list(waypoint) for waypoint in self.trajectory],
+            "trajectory_time_s": (
+                list(self.trajectory_time_s) if self.trajectory_time_s is not None else None
+            ),
+            "trajectory_velocity": (
+                [list(waypoint) for waypoint in self.trajectory_velocity]
+                if self.trajectory_velocity is not None
+                else None
+            ),
             "target_position_error_m": self.target_position_error_m,
             "target_orientation_error_rad": self.target_orientation_error_rad,
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> CameraRouteSegment:
+        value = _require_mapping(payload, "camera route segment")
+        _require_keys(
+            value,
+            {
+                "target_id", "success", "message", "planning_time_s", "waypoint_count",
+                "trajectory", "trajectory_time_s", "trajectory_velocity",
+                "target_position_error_m", "target_orientation_error_rad",
+            },
+            "camera route segment",
+        )
+        trajectory = _float_matrix(value["trajectory"], "trajectory")
+        raw_time = value["trajectory_time_s"]
+        raw_velocity = value["trajectory_velocity"]
+        return cls(
+            target_id=_require_string(value["target_id"], "target_id"),
+            success=_require_bool(value["success"], "success"),
+            message=_require_string(value["message"], "message", allow_empty=True),
+            planning_time_s=_require_float(value["planning_time_s"], "planning_time_s", minimum=0.0),
+            waypoint_count=_require_int(value["waypoint_count"], "waypoint_count"),
+            trajectory=trajectory,
+            trajectory_time_s=None if raw_time is None else _float_tuple(raw_time, "trajectory_time_s"),
+            trajectory_velocity=None if raw_velocity is None else _float_matrix(raw_velocity, "trajectory_velocity"),
+            target_position_error_m=_require_optional_float(value["target_position_error_m"], "target_position_error_m", minimum=0.0),
+            target_orientation_error_rad=_require_optional_float(value["target_orientation_error_rad"], "target_orientation_error_rad", minimum=0.0),
+        )
 
 
 @dataclass(frozen=True)
@@ -60,8 +276,31 @@ class CameraRoutePlan:
     message: str
     reached_target_ids: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.success, bool):
+            raise ValueError("camera route plan success must be a boolean")
+        _require_string(self.planner_name, "camera route planner_name")
+        _require_string(self.message, "camera route plan message", allow_empty=True)
+        if not self.joint_names or len(set(self.joint_names)) != len(self.joint_names):
+            raise ValueError("camera route plan joint_names must be non-empty and unique")
+        for index, name in enumerate(self.joint_names):
+            _require_string(name, f"joint_names[{index}]")
+        target_ids = [segment.target_id for segment in self.segments]
+        if len(set(target_ids)) != len(target_ids):
+            raise ValueError("camera route plan segment target_ids must be unique")
+        for segment in self.segments:
+            if any(len(row) != len(self.joint_names) for row in segment.trajectory):
+                raise ValueError("camera route segment trajectory width must match joint_names")
+        if self.failed_target_id is not None:
+            _require_string(self.failed_target_id, "failed_target_id")
+        if len(set(self.reached_target_ids)) != len(self.reached_target_ids):
+            raise ValueError("camera route plan reached_target_ids must be unique")
+        if any(target_id not in target_ids for target_id in self.reached_target_ids):
+            raise ValueError("camera route plan reached_target_ids must reference segments")
+
     def to_dict(self) -> dict[str, object]:
         return {
+            "schema": CAMERA_ROUTE_PLAN_SCHEMA,
             "success": self.success,
             "planner_name": self.planner_name,
             "joint_names": list(self.joint_names),
@@ -70,6 +309,39 @@ class CameraRoutePlan:
             "message": self.message,
             "reached_target_ids": list(self.reached_target_ids),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> CameraRoutePlan:
+        value = _require_mapping(payload, "camera route plan")
+        _require_keys(
+            value,
+            {"schema", "success", "planner_name", "joint_names", "segments", "failed_target_id", "message", "reached_target_ids"},
+            "camera route plan",
+        )
+        if value["schema"] != CAMERA_ROUTE_PLAN_SCHEMA:
+            raise ValueError(f"unsupported camera route plan schema: {value['schema']!r}")
+        joint_names = tuple(
+            _require_string(item, f"joint_names[{index}]")
+            for index, item in enumerate(_require_sequence(value["joint_names"], "joint_names"))
+        )
+        segments = tuple(
+            CameraRouteSegment.from_dict(item)
+            for item in _require_sequence(value["segments"], "segments")
+        )
+        failed = value["failed_target_id"]
+        reached = tuple(
+            _require_string(item, f"reached_target_ids[{index}]")
+            for index, item in enumerate(_require_sequence(value["reached_target_ids"], "reached_target_ids"))
+        )
+        return cls(
+            success=_require_bool(value["success"], "success"),
+            planner_name=_require_string(value["planner_name"], "planner_name"),
+            joint_names=joint_names,
+            segments=segments,
+            failed_target_id=None if failed is None else _require_string(failed, "failed_target_id"),
+            message=_require_string(value["message"], "message", allow_empty=True),
+            reached_target_ids=reached,
+        )
 
 
 class CameraRoutePlanner(Protocol):
@@ -106,7 +378,7 @@ def _pose_errors(actual_pose: Any, target_pose: Any) -> tuple[float, float]:
 
 
 class CuroboCameraRoutePlanner:
-    planner_name = "curobo_camera_route_planner_v1"
+    planner_name = "curobo_camera_route_planner"
 
     def __init__(
         self,
@@ -137,21 +409,16 @@ class CuroboCameraRoutePlanner:
             torch.tensor([start_joint_positions], device="cuda", dtype=torch.float32),
             joint_names=list(GEN3_JOINT_NAMES),
         )
-        source_states = JointState.from_position(
-            torch.tensor(
-                [target.reference_joint_positions for target in targets],
-                device="cuda",
-                dtype=torch.float32,
-            ),
-            joint_names=list(GEN3_JOINT_NAMES),
-        )
-        target_poses = planner.kinematics.compute_kinematics(source_states).tool_poses
         segments: list[CameraRouteSegment] = []
 
         for index, target in enumerate(targets):
             target_pose = Pose(
-                position=target_poses.position[index].reshape(1, 3),
-                quaternion=target_poses.quaternion[index].reshape(1, 4),
+                position=torch.tensor(
+                    [target.target_position], device="cuda", dtype=torch.float32
+                ),
+                quaternion=torch.tensor(
+                    [target.target_quaternion_wxyz], device="cuda", dtype=torch.float32
+                ),
             )
             goal = GoalToolPose.from_poses(
                 {planner.tool_frames[0]: target_pose},
@@ -185,7 +452,8 @@ class CuroboCameraRoutePlanner:
                     reached_target_ids=tuple(item.target_id for item in targets[:index]),
                 )
 
-            positions_cuda = result.get_interpolated_plan().position.reshape(-1, len(GEN3_JOINT_NAMES))
+            interpolated = result.get_interpolated_plan()
+            positions_cuda = interpolated.position.reshape(-1, len(GEN3_JOINT_NAMES))
             current = JointState.from_position(
                 positions_cuda[-1].reshape(1, len(GEN3_JOINT_NAMES)),
                 joint_names=list(GEN3_JOINT_NAMES),
@@ -194,6 +462,10 @@ class CuroboCameraRoutePlanner:
             position_error, orientation_error = _pose_errors(actual_pose, target_pose)
             positions = positions_cuda.detach().cpu()
             trajectory = tuple(tuple(float(value) for value in row.tolist()) for row in positions)
+            trajectory_velocity = _optional_interpolated_matrix(
+                interpolated, "velocity", len(trajectory), len(GEN3_JOINT_NAMES)
+            )
+            trajectory_time_s = _optional_interpolated_time(interpolated, len(trajectory))
             within_tolerance = (
                 position_error <= self._position_tolerance_m
                 and orientation_error <= self._orientation_tolerance_rad
@@ -210,6 +482,8 @@ class CuroboCameraRoutePlanner:
                     planning_time_s=planning_time,
                     waypoint_count=len(trajectory),
                     trajectory=trajectory,
+                    trajectory_time_s=trajectory_time_s,
+                    trajectory_velocity=trajectory_velocity,
                     target_position_error_m=position_error,
                     target_orientation_error_rad=orientation_error,
                 )
@@ -234,13 +508,12 @@ class CuroboCameraRoutePlanner:
             message=f"cuRobo planned and validated all {len(targets)} camera targets.",
             reached_target_ids=tuple(target.target_id for target in targets),
         )
-
     def _get_planner(self) -> Any:
         if self._planner is not None:
             return self._planner
         self._validate_environment()
         import yaml
-        from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+        from curobo.motion_planner import MotionPlannerCfg
 
         robot = yaml.safe_load(self.robot_config_path.read_text(encoding="utf-8"))
         robot_payload = robot.get("robot_cfg", robot)
@@ -290,7 +563,7 @@ class CuroboCameraRoutePlanner:
             use_cuda_graph=True,
             random_seed=random_seed,
         )
-        self._planner = MotionPlanner(config)
+        self._planner = create_collision_filtered_motion_planner(config)
         return self._planner
 
     def _resolve(self, path: Path) -> Path:
@@ -307,3 +580,33 @@ class CuroboCameraRoutePlanner:
 
         if not torch.cuda.is_available():
             raise RuntimeError("cuRobo camera route planning requires torch CUDA")
+
+
+def _optional_interpolated_matrix(
+    interpolated: Any,
+    attribute: str,
+    waypoint_count: int,
+    joint_count: int,
+) -> tuple[tuple[float, ...], ...] | None:
+    tensor = getattr(interpolated, attribute, None)
+    if tensor is None:
+        return None
+    values = tensor.detach().cpu().reshape(-1, joint_count)
+    if len(values) != waypoint_count:
+        return None
+    return tuple(tuple(float(value) for value in row.tolist()) for row in values)
+
+
+def _optional_interpolated_time(
+    interpolated: Any, waypoint_count: int
+) -> tuple[float, ...] | None:
+    dt_tensor = getattr(interpolated, "dt", None)
+    if dt_tensor is None:
+        return None
+    values = dt_tensor.detach().cpu().reshape(-1)
+    if not len(values):
+        return None
+    dt = float(values[0])
+    if not math.isfinite(dt) or dt <= 0.0:
+        return None
+    return tuple(round(index * dt, 9) for index in range(waypoint_count))

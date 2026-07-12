@@ -20,6 +20,7 @@ def run_ultralytics_yolo_inference(
     camera_name: str | None = None,
     confidence_threshold: float | None = None,
     iou_threshold: float | None = None,
+    class_agnostic_nms: bool = False,
     image_size: int | None = None,
     device: str | None = None,
     max_detections: int | None = None,
@@ -52,6 +53,7 @@ def run_ultralytics_yolo_inference(
         "source": str(image),
         "conf": resolved_confidence,
         "iou": resolved_iou,
+        "agnostic_nms": class_agnostic_nms,
         "imgsz": resolved_image_size,
         "verbose": False,
     }
@@ -72,6 +74,7 @@ def run_ultralytics_yolo_inference(
             "image_size": resolved_image_size,
             "confidence_threshold": resolved_confidence,
             "iou_threshold": resolved_iou,
+            "class_agnostic_nms": class_agnostic_nms,
             "device": device,
             "max_detections": max_detections,
         },

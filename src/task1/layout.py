@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +11,6 @@ import numpy as np
 
 TARGET_BODY_PREFIX = "target_"
 DEFAULT_MODEL_PATH = Path("examples/mujoco/gen3_with_tank.xml")
-DEFAULT_OUTPUT_DIR = Path("outputs/object_poses")
 DEFAULT_OBJECT_COUNT = 5
 DEFAULT_BASE_HEIGHT_M = 0.03
 DEFAULT_COLLISION_MARGIN_M = 0.012
@@ -63,7 +61,6 @@ def make_random_target_object_pose_payload(
     *,
     model_path: Path,
     seed: int,
-    created_utc: str | None = None,
     object_count: int = DEFAULT_OBJECT_COUNT,
     base_height_m: float = DEFAULT_BASE_HEIGHT_M,
     bounds: PlacementBounds = PlacementBounds(),
@@ -83,8 +80,7 @@ def make_random_target_object_pose_payload(
     poses_by_name = {pose.object_id: pose for pose in poses}
     ordered_poses = tuple(poses_by_name[spec.object_id] for spec in selected_specs)
     return {
-        "schema_version": "target_object_pose_layout_v1",
-        "created_utc": created_utc or datetime.now(timezone.utc).isoformat(),
+        "schema": "target_object_pose_layout",
         "model_path": str(model_path),
         "seed": seed,
         "object_count": object_count,
