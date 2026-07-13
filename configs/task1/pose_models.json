@@ -1,0 +1,69 @@
+{
+  "schema_version": "task1_pose_model_registry_v1",
+  "models": [
+    {
+      "model_id": "target_hex_key_v1",
+      "canonical_class_name": "hex_key",
+      "detector_class_names": ["内六角扳手", "hex_key"],
+      "body_name": "target_hex_key",
+      "geom_name": "target_hex_key_geom",
+      "yaw_symmetry": "none"
+    },
+    {
+      "model_id": "target_drill_bit_v1",
+      "canonical_class_name": "drill_bit",
+      "detector_class_names": ["钻头", "drill_bit"],
+      "body_name": "target_drill_bit",
+      "geom_name": "target_drill_bit_geom",
+      "yaw_symmetry": "half_turn"
+    },
+    {
+      "model_id": "target_glove_v1",
+      "canonical_class_name": "glove",
+      "detector_class_names": ["手套", "glove"],
+      "body_name": "target_glove",
+      "geom_name": "target_glove_geom",
+      "yaw_symmetry": "none"
+    },
+    {
+      "model_id": "target_notebook_v1",
+      "canonical_class_name": "notebook",
+      "detector_class_names": ["本子", "notebook"],
+      "body_name": "target_notebook",
+      "geom_name": "target_notebook_geom",
+      "yaw_symmetry": "half_turn"
+    },
+    {
+      "model_id": "target_marker_v1",
+      "canonical_class_name": "marker",
+      "detector_class_names": ["记号笔", "marker"],
+      "body_name": "target_marker",
+      "geom_name": "target_marker_geom",
+      "yaw_symmetry": "half_turn"
+    },
+    {
+      "model_id": "target_rivet_gun_v1",
+      "canonical_class_name": "rivet_gun",
+      "detector_class_names": ["铆枪", "rivet_gun"],
+      "body_name": "target_rivet_gun",
+      "geom_name": "target_rivet_gun_geom",
+      "yaw_symmetry": "none"
+    },
+    {
+      "model_id": "target_standard_part_v1",
+      "canonical_class_name": "standard_part",
+      "detector_class_names": ["标准件", "standard_part"],
+      "body_name": "target_standard_part",
+      "geom_name": "target_standard_part_geom",
+      "yaw_symmetry": "none"
+    },
+    {
+      "model_id": "target_tape_v1",
+      "canonical_class_name": "tape",
+      "detector_class_names": ["纸胶带", "tape"],
+      "body_name": "target_tape",
+      "geom_name": "target_tape_geom",
+      "yaw_symmetry": "continuous"
+    }
+  ]
+}

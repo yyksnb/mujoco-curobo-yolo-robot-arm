@@ -46,6 +46,12 @@ from robot_arm_pipeline.task1.final import (
     run_task1_final,
     select_stable_final_objects,
 )
+from robot_arm_pipeline.task1.pose import (
+    PoseConfig,
+    _run_artifact_path,
+    register_planar_point_clouds,
+    run_task1_pose,
+)
 from robot_arm_pipeline.task1.zoom import ZoomConfig, run_task1_zoom
 from robot_arm_pipeline.task1.replay import (
     TASK1_REPLAY_SCHEMA_VERSION,
@@ -57,6 +63,82 @@ from robot_arm_pipeline.task1.replay import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_pose_registration_recovers_known_planar_transform() -> None:
+    np = pytest.importorskip("numpy")
+    random_source = np.random.default_rng(23)
+    model_points = np.vstack(
+        (
+            random_source.uniform((0.0, 0.0), (0.12, 0.025), size=(120, 2)),
+            random_source.uniform((0.0, 0.025), (0.035, 0.10), size=(80, 2)),
+        )
+    )
+    expected_yaw = 0.73
+    expected_translation = np.asarray((0.41, 0.36))
+    rotation = np.asarray(
+        (
+            (math.cos(expected_yaw), -math.sin(expected_yaw)),
+            (math.sin(expected_yaw), math.cos(expected_yaw)),
+        )
+    )
+    observed_points = model_points @ rotation.T + expected_translation
+
+    result = register_planar_point_clouds(
+        model_points_xy=model_points,
+        observed_points_xy=observed_points,
+        config=PoseConfig(model_sample_points=len(model_points)),
+    )
+
+    assert result["translation_xy"] == pytest.approx(expected_translation, abs=1e-4)
+    yaw_error = (result["yaw_rad"] - expected_yaw + math.pi) % (2.0 * math.pi) - math.pi
+    assert yaw_error == pytest.approx(0.0, abs=1e-3)
+    assert result["model_rmse_m"] < 1e-4
+
+
+def test_pose_requires_formal_final_pose_evidence(tmp_path: Path) -> None:
+    run_dir = tmp_path / "task1" / "run_seed12"
+    final_report_path = run_dir / "final" / "final_report.json"
+    depth_path = run_dir / "final" / "depth" / "capture.npy"
+    depth_path.parent.mkdir(parents=True)
+    depth_path.touch()
+    _write_json_report(
+        final_report_path,
+        {
+            "schema_version": "task1_final_report_v1",
+            "status": "success",
+            "task1_run_dir": "task1/run_seed12",
+            "scene_model_path": str(tmp_path / "not_loaded.xml"),
+            "image_size": [1920, 1080],
+            "workspace": {},
+            "stable_objects": [
+                {
+                    "object_id": "rough_object_001",
+                    "class_name": "钻头",
+                    "confidence": 0.9,
+                    "bbox_xyxy": [100.0, 100.0, 300.0, 300.0],
+                    "position_world": [0.4, 0.4, 0.03],
+                    "T_world_object": [
+                        [1.0, 0.0, 0.0, 0.4],
+                        [0.0, 1.0, 0.0, 0.4],
+                        [0.0, 0.0, 1.0, 0.03],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ],
+                }
+            ],
+        },
+    )
+
+    report = run_task1_pose(
+        final_report_path,
+        PoseConfig(model_registry_path=REPO_ROOT / "configs" / "task1" / "pose_models.json"),
+    )
+
+    assert report["status"] == "failed"
+    assert report["grasp_ready_objects"] == []
+    assert report["unresolved_objects"][0]["reason"] == "pose_evidence_schema_invalid"
+    assert report["task1_run_dir"] == str(run_dir)
+    assert _run_artifact_path(run_dir, "task1/run_seed12/final/depth/capture.npy") == depth_path
 
 
 def test_object_attribution_assigns_dropped_projected_detection_to_survey_fusion(tmp_path: Path) -> None:
@@ -928,6 +1010,8 @@ def test_final_stable_selection_outputs_downstream_object_list() -> None:
     assert stable_objects[0]["bbox_xyxy"] == (100.0, 110.0, 220.0, 240.0)
     assert stable_objects[0]["T_world_object"][0][3] == pytest.approx(0.31)
     assert stable_objects[0]["T_world_object"][0][:3] == tuple(source_transform[0][:3])
+    assert stable_objects[0]["pose_evidence"]["schema_version"] == "task1_final_pose_evidence_v1"
+    assert stable_objects[0]["pose_evidence"]["status"] == "ready"
     assert stable_objects[2]["pose_quality"]["orientation_source"] == "identity_orientation_no_source_pose"
     assert selection["stable_object_selection"]["stable_object_count"] == 3
     assert selection["stable_object_selection"]["unstable_object_count"] == 1
@@ -1997,6 +2081,8 @@ def _final_payload(
     bbox_quality = {
         "status": "accepted" if bbox_quality_accepted else "limited",
         "accepted": bbox_quality_accepted,
+        "image_width": 1920,
+        "image_height": 1080,
         "reasons": [] if bbox_quality_accepted else ["bbox_too_close_to_image_boundary"],
     }
     evidence_quality = {
@@ -2039,7 +2125,17 @@ def _final_payload(
         "depth_path": "outputs/single.npy",
         "annotated_image_path": "outputs/single_annotated.png",
         "yolo_raw_path": "outputs/single.json",
-        "view": {"status": "success"},
+        "view": {
+            "status": "success",
+            "view_id": "final_test_view",
+            "actual_T_world_camera": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            "camera_fovy_rad": 0.73,
+        },
     }
 
 

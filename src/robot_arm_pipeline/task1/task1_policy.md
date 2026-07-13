@@ -9,6 +9,7 @@
 - 不按 seed、类别名、路径片段或当前样例特征写隐藏特判。
 - 新增策略必须进入集中 policy/config，并在 report、notes 或 summary 中可追踪。
 - Debug 输出只能辅助定位，不能改变正式结果。
+- 全流程状态分为 recognition、grasp readiness 和 artifact；Zoom 不影响识别状态，Pose 质量决定抓取就绪状态。
 
 ## 阶段契约
 
@@ -98,6 +99,35 @@
 - 单个低置信观测只有在位置严格贴近且达到配置化置信下限时才可作为确认；多个分片合并观测需要更强证据。
 - 过量 stable 的处理只能基于正式质量规则降级弱证据，不能硬裁剪到目标数量。
 
+### Pose
+
+职责：使用 Final 单物体 RGB-D 证据和注册 CAD 模型，产出供抓取模块消费的规范物体位姿。
+
+正式输入：
+
+- `final_report["stable_objects"]`
+- 每个稳定对象上的 `task1_final_pose_evidence_v1`
+- `configs/task1/pose_models.json` 定义的类别别名、CAD frame 和可观测 yaw 对称性
+
+正式输出：
+
+- `grasp_ready_objects`：通过质量策略的 `T_world_object`。
+- `unresolved_objects`：缺少证据、模型未注册、配准质量不足或姿态不可观测的对象。
+- `pose_summary`：成功数和 unresolved 原因统计。
+
+边界：
+
+- Pose 不得读取 layout 真值或 MuJoCo 目标 body 的当前场景位姿来修正估计。
+- 当前正式能力基于 Task1 物体平放约束，只精化 `x/y/yaw`，z 使用 Final 对象声明的底面 body z。
+- 类别到 CAD 和对称性的关系必须集中在 registry，不得散落类别特判。
+- Final 粗位姿只用于裁剪深度搜索范围，不能在配准失败后作为精位姿 fallback。
+
+失败语义：
+
+- 缺少完整 RGB-D、相机标定或 CAD 模型时必须 unresolved。
+- fitness、双向 RMSE 或多解歧义不满足 policy 时必须 unresolved。
+- CAD frame 的规范 yaw 无法由对称几何唯一观测时，只能输出带 `pose_symmetry` 和必要竞争假设的代表解，不能宣称代表 yaw 是唯一规范方向。
+
 ### Zoom
 
 职责：对 Final stable 对象的精拍图做数字裁剪和放大。
@@ -120,6 +150,8 @@
 ## 固定回归集
 
 逐对象回归归因只消费 layout、Survey、Rough、Final 的正式 JSON。对象身份按 layout footprint 做一对一空间匹配，类别正确性单独判断。raw YOLO 只有二维框，因此 raw 类别命中只能作为类别级证据；没有匹配到世界坐标观测时，不得宣称它是某个真值对象的正确检测。
+
+Pose 离线评估可以在估计完成后使用 layout 计算误差，但 layout 不得进入估计路径。对称对象必须按 registry 声明的 symmetry center 和 yaw 等价类计算误差，不能拿任意 layout body-frame 代表与输出代表解直接作唯一姿态比较。
 
 后续不要只看随机 25 seed 的总体通过率。每次改策略前后，应至少观察以下代表类问题：
 
@@ -160,3 +192,5 @@
 - Final 已收敛 stable evidence gate，但近邻小目标和大物体局部框仍需要继续用回归集观察。
 - Final 的 primary target 候选搜索仍可能偏重，需要继续在性能与 recall 之间收敛。
 - YOLO 对 notebook、standard_part 等目标的局部框和分片框会放大 pipeline 判断压力。
+- Pose 目前只支持 Task1 平放约束下的平面位姿，不覆盖任意 roll/pitch 或堆叠场景。
+- 离散或连续 yaw 对称且 CAD body frame 不在对称中心的物体无法仅凭当前几何证据恢复唯一 layout body pose；输出只能作为对称等价抓取位姿。

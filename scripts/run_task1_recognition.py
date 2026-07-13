@@ -41,6 +41,11 @@ from robot_arm_pipeline.task1.final import (  # noqa: E402
     find_latest_rough_report,
     run_task1_final,
 )
+from robot_arm_pipeline.task1.pose import (  # noqa: E402
+    DEFAULT_POSE_MODEL_REGISTRY,
+    PoseConfig,
+    run_task1_pose,
+)
 from robot_arm_pipeline.task1.zoom import (  # noqa: E402
     ZoomConfig,
     find_latest_final_report,
@@ -119,10 +124,13 @@ def _task1_pipeline_status_summary(stage_statuses: dict[str, str]) -> dict[str, 
             stage_statuses.get("final", ""),
         ]
     )
+    grasp_readiness_status = _combine_task1_stage_statuses([stage_statuses.get("pose", "")])
     artifact_status = _combine_task1_stage_statuses([stage_statuses.get("zoom", "")])
+    overall_status = _combine_task1_stage_statuses([recognition_status, grasp_readiness_status])
     return {
-        "status": recognition_status,
+        "status": overall_status,
         "recognition_status": recognition_status,
+        "grasp_readiness_status": grasp_readiness_status,
         "artifact_status": artifact_status,
     }
 
@@ -332,6 +340,19 @@ def _run_zoom_stage(args: argparse.Namespace, *, final_report_path: Path | None 
     return run_task1_zoom(final_report_path, config)
 
 
+def _run_pose_stage(args: argparse.Namespace, *, final_report_path: Path | None = None) -> dict:
+    if final_report_path is None:
+        try:
+            final_report_path = args.final_report or find_latest_final_report(args.output_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+    config = PoseConfig(
+        model_registry_path=args.pose_model_registry,
+        plan_only=args.plan_only,
+    )
+    return run_task1_pose(final_report_path, config)
+
+
 def _run_full_pipeline(args: argparse.Namespace) -> dict:
     created_utc = datetime.now(timezone.utc).isoformat()
     stage_durations: dict[str, float] = {}
@@ -355,6 +376,10 @@ def _run_full_pipeline(args: argparse.Namespace) -> dict:
         "final",
         lambda: _run_final_stage(args, rough_report_path=Path(str(rough_report["report_path"]))),
     )
+    pose_report, stage_durations["pose"] = _run_timed_stage(
+        "pose",
+        lambda: _run_pose_stage(args, final_report_path=Path(str(final_report["report_path"]))),
+    )
     zoom_report, stage_durations["zoom"] = _run_timed_stage(
         "zoom",
         lambda: _run_zoom_stage(args, final_report_path=Path(str(final_report["report_path"]))),
@@ -365,6 +390,7 @@ def _run_full_pipeline(args: argparse.Namespace) -> dict:
         "survey": survey_report["report_path"],
         "rough": rough_report["report_path"],
         "final": final_report["report_path"],
+        "pose": pose_report["report_path"],
         "zoom": zoom_report["report_path"],
     }
     stage_statuses = {
@@ -372,6 +398,7 @@ def _run_full_pipeline(args: argparse.Namespace) -> dict:
         "survey": str(survey_report.get("status")),
         "rough": str(rough_report.get("status")),
         "final": str(final_report.get("status")),
+        "pose": str(pose_report.get("status")),
         "zoom": str(zoom_report.get("status")),
     }
     status_summary = _task1_pipeline_status_summary(stage_statuses)
@@ -394,9 +421,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Task1 recognition pipeline entrypoint.")
     parser.add_argument(
         "--stage",
-        choices=("layout", "survey", "rough", "final", "zoom"),
+        choices=("layout", "survey", "rough", "final", "pose", "zoom"),
         default=None,
-        help="Recognition stage to run. Omit this option to run layout, survey, rough, final, and zoom in sequence.",
+        help="Task1 stage to run. Omit this option to run layout, survey, rough, final, pose, and zoom in sequence.",
     )
     parser.add_argument(
         "--layout",
@@ -449,7 +476,13 @@ def main() -> None:
         "--final-report",
         type=Path,
         default=None,
-        help="Final report JSON for --stage zoom. Defaults to the latest outputs/task1/*/final/final_report.json.",
+        help="Final report JSON for --stage pose or zoom. Defaults to the latest outputs/task1/*/final/final_report.json.",
+    )
+    parser.add_argument(
+        "--pose-model-registry",
+        type=Path,
+        default=DEFAULT_POSE_MODEL_REGISTRY,
+        help="CAD model and symmetry registry used by the pose stage.",
     )
     parser.add_argument("--scene-model", type=Path, default=DEFAULT_SCENE_MODEL, help="MuJoCo scene MJCF/XML path.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Task1 run output root directory.")
@@ -530,6 +563,9 @@ def main() -> None:
     elif args.stage == "final":
         report, duration_s = _run_timed_stage("final", lambda: _run_final_stage(args))
         report["stage_durations_seconds"] = _rounded_durations({"final": duration_s, "total": duration_s})
+    elif args.stage == "pose":
+        report, duration_s = _run_timed_stage("pose", lambda: _run_pose_stage(args))
+        report["stage_durations_seconds"] = _rounded_durations({"pose": duration_s, "total": duration_s})
     else:
         report, duration_s = _run_timed_stage("zoom", lambda: _run_zoom_stage(args))
         report["stage_durations_seconds"] = _rounded_durations({"zoom": duration_s, "total": duration_s})

@@ -2287,6 +2287,7 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
             "depth_path": capture.get("depth_path"),
             "annotated_image_path": capture.get("annotated_image_path"),
             "yolo_raw_path": capture.get("yolo_raw_path"),
+            "pose_evidence": _pose_evidence_from_capture(capture, recognition),
             "matched_observation": capture.get("best_observation"),
             "selection": {
                 "source": FINAL_STABLE_SELECTION_POLICY_VERSION,
@@ -2309,6 +2310,43 @@ def _stable_object_from_capture(capture: dict[str, Any]) -> tuple[dict[str, Any]
         }
     )
     return stable_object, None
+
+
+def _pose_evidence_from_capture(
+    capture: dict[str, Any],
+    recognition: dict[str, Any],
+) -> dict[str, Any]:
+    view = capture.get("view") if isinstance(capture.get("view"), dict) else {}
+    bbox_quality = (
+        recognition.get("bbox_quality")
+        if isinstance(recognition.get("bbox_quality"), dict)
+        else {}
+    )
+    evidence = {
+        "schema_version": "task1_final_pose_evidence_v1",
+        "source_view_id": view.get("view_id"),
+        "image_path": capture.get("final_image_path"),
+        "depth_path": capture.get("depth_path"),
+        "bbox_xyxy": recognition.get("bbox_xyxy"),
+        "T_world_camera": view.get("actual_T_world_camera"),
+        "camera_fovy_rad": view.get("camera_fovy_rad"),
+        "image_size": [bbox_quality.get("image_width"), bbox_quality.get("image_height")],
+    }
+    required_fields = (
+        "image_path",
+        "depth_path",
+        "bbox_xyxy",
+        "T_world_camera",
+        "camera_fovy_rad",
+        "image_size",
+    )
+    missing_fields = [name for name in required_fields if evidence.get(name) is None]
+    if not all(value is not None for value in evidence["image_size"]):
+        missing_fields.append("image_size")
+    missing_fields = list(dict.fromkeys(missing_fields))
+    evidence["status"] = "ready" if not missing_fields else "incomplete"
+    evidence["missing_fields"] = missing_fields
+    return evidence
 
 
 def _matching_stable_object(

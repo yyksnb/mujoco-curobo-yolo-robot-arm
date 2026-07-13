@@ -95,6 +95,16 @@ from robot_arm_pipeline.task1.zoom import (
     plan_zoom_crop,
     run_task1_zoom,
 )
+from robot_arm_pipeline.task1.pose import (
+    DEFAULT_POSE_MODEL_REGISTRY,
+    PoseConfig,
+    PoseModelSpec,
+    Task1FinalPoseInput,
+    load_pose_model_registry,
+    load_task1_final_pose_input,
+    register_planar_point_clouds,
+    run_task1_pose,
+)
 
 __all__ = [
     "DEFAULT_CAMERA_NAME",
@@ -184,6 +194,14 @@ __all__ = [
     "load_task1_final_report",
     "plan_zoom_crop",
     "run_task1_zoom",
+    "DEFAULT_POSE_MODEL_REGISTRY",
+    "PoseConfig",
+    "PoseModelSpec",
+    "Task1FinalPoseInput",
+    "load_pose_model_registry",
+    "load_task1_final_pose_input",
+    "register_planar_point_clouds",
+    "run_task1_pose",
     "run_task1_survey",
     "survey_scene_from_stage0_layout",
 ]

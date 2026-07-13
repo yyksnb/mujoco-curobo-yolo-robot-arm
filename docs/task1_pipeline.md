@@ -10,7 +10,9 @@
 python scripts/run_task1_recognition.py --seed 21 --output-dir outputs/task1
 ```
 
-不传 `--stage` 时会依次运行：layout -> survey -> rough -> final -> zoom。
+不传 `--stage` 时会依次运行：layout -> survey -> rough -> final -> pose -> zoom。
+
+全流程摘要分别给出 `recognition_status`、`grasp_readiness_status` 和 `artifact_status`；顶层 `status` 由识别与抓取位姿共同决定，Zoom 不影响识别成败。
 
 输出目录：
 
@@ -20,6 +22,7 @@ outputs/task1/<timestamp>_seed<seed>/
   survey/
   rough/
   final/
+  pose/
   zoom/
 ```
 
@@ -114,6 +117,7 @@ python scripts/run_task1_recognition.py \
 - `final/annotated/`：默认只画过滤后的 selected bbox。
 - `stable_objects`：下游正式对象列表。
 - `unstable_objects`：未满足稳定策略的对象。
+- 每个稳定对象的 `pose_evidence`：选中 RGB-D、bbox、实际相机外参、FOV 和图像尺寸。
 
 注意：
 
@@ -128,6 +132,36 @@ python scripts/run_task1_recognition.py \
 python scripts/run_task1_recognition.py \
   --stage final \
   --rough-report outputs/task1/<run>/rough/rough_report.json
+```
+
+## Pose
+
+作用：使用 Final 的单物体 RGB-D 证据与注册 CAD 模型，估计供抓取模块使用的规范物体位姿。
+
+主要流程：
+
+- 只读取 `final.stable_objects[*].pose_evidence`，不读取 layout 真值。
+- 从 `configs/task1/pose_models.json` 获取类别、CAD frame 和 yaw 对称性。
+- 对深度点云与 CAD 表面点云做多初值平面配准。
+- 通过 fitness、双向 RMSE 和多解歧义策略筛选结果。
+
+正式输出：
+
+- `pose/pose_report.json`
+- `grasp_ready_objects`：通过质量策略的 canonical `ObjectDetection` 兼容列表，`class_name` 使用 registry 规范类名。
+- `unresolved_objects`：缺少证据、配准质量不足或姿态不可观测的对象。
+
+注意：
+
+- 当前 Task1 能力基于物体平放约束，精化 `x/y/yaw`，并沿用已声明的底面 body z。
+- 对称物体输出代表位姿、`pose_symmetry` 和必要的竞争 `pose_hypotheses`；抓取模块不能把代表 yaw 当成唯一规范方向。
+
+最小命令：
+
+```bash
+python scripts/run_task1_recognition.py \
+  --stage pose \
+  --final-report outputs/task1/<run>/final/final_report.json
 ```
 
 ## Zoom
@@ -166,13 +200,16 @@ python scripts/run_task1_recognition.py \
 --strict-yolo               YOLO 失败时直接让当前阶段失败
 --save-debug-trace          保存支持 debug 的完整 trace
 --save-raw-yolo-annotations 保存原始 YOLO 标注图
+--pose-model-registry PATH  指定 Pose 使用的 CAD 与对称性 registry
 ```
 
 最好显式指定 report；如果省略 `--survey-report`、`--rough-report` 或 `--final-report`，脚本会从 `--output-dir` 下寻找最新对应 report。
 
 ## 已知风险
 
-- Final 阶段的 MuJoCo IK 连续验证会受候选顺序 warm-start 影响，后续可改为每个候选使用固定 nominal qpos 初始化。
 - Final 阶段默认不硬截断候选会优先保 recall；类别冲突或无法确认的目标可能拖长耗时。
 - Survey/Rough 对 `standard_part` 等小目标仍可能漏召回，导致后续 Final 没有目标可拍。
 - 钻头和标准件等近邻小目标仍可能在 Rough 阶段进入同一个 ambiguous/fused 目标，Final follow-up 目前只能确认其中一个观测。
+- Pose 当前只覆盖 Task1 平放物体的 `x/y/yaw`，不处理任意堆叠物体的完整 6D 姿态。
+- 对称对象的 `T_world_object` 是代表解；下游必须消费 `pose_symmetry/pose_hypotheses`。若要求唯一 layout body frame，仍需语义关键点或非对称外观证据。
+- 空候选的全流程 `--plan-only` 目前会因 Final 的既有状态语义得到顶层 `failed`，但各阶段仍会写出计划报告；正式非 plan-only 流程不受影响。

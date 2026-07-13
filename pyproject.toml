@@ -14,12 +14,20 @@ mujoco = [
     "numpy>=1.24",
     "mujoco>=3.0",
 ]
+pose = [
+    "numpy>=1.24",
+    "mujoco>=3.0",
+    "scipy>=1.10,<2",
+    "trimesh>=4,<5",
+]
 test = [
     "pytest>=7.0",
 ]
 dev = [
     "numpy>=1.24",
     "mujoco>=3.0",
+    "scipy>=1.10,<2",
+    "trimesh>=4,<5",
     "pytest>=7.0",
 ]
 
