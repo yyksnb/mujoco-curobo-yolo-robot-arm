@@ -51,6 +51,14 @@ class SimulationConfig:
         return path.resolve()
 
 
+@dataclass(frozen=True)
+class _SurveyEvaluationCapture:
+    view_id: str
+    joint_positions: tuple[float, ...]
+    ground_z_m: float
+    detections: tuple[Detection2D, ...]
+
+
 class MujocoSurveySimulation:
     """Render survey RGB-D frames in MuJoCo and run the selected detector."""
 
@@ -72,6 +80,8 @@ class MujocoSurveySimulation:
         self._data: Any | None = None
         self._renderer: Any | None = None
         self._selected_objects: dict[str, dict[str, Any]] = {}
+        self._evaluation_captures: list[_SurveyEvaluationCapture] = []
+        self._production_observations: tuple[SurveyObservation, ...] = ()
 
     def run(
         self,
@@ -91,11 +101,11 @@ class MujocoSurveySimulation:
                 localization_policy=policy,
             )
 
+        self._evaluation_captures = []
+        self._production_observations = ()
         view_reports: list[dict[str, Any]] = []
         observations: list[SurveyObservation] = []
         localization_failures: list[dict[str, str]] = []
-        ideal_fusion_observations: list[SurveyObservation] = []
-        yolo_evaluation_frames: list[YoloEvaluationFrame] = []
         try:
             self._load()
             segment_by_view = {segment.target_id: segment for segment in route_plan.segments}
@@ -103,43 +113,16 @@ class MujocoSurveySimulation:
                 segment = segment_by_view.get(view.view_id)
                 if segment is None or not segment.trajectory:
                     raise ValueError(f"route has no executable trajectory for {view.view_id}")
-                frame, detections, ground_truth, paths, detection_report = self._capture(
-                    view, segment.trajectory[-1]
+                terminal_joint_positions = segment.trajectory[-1]
+                frame, detections, paths, detection_report = self._capture(view, terminal_joint_positions)
+                self._evaluation_captures.append(
+                    _SurveyEvaluationCapture(
+                        view_id=view.view_id,
+                        joint_positions=terminal_joint_positions,
+                        ground_z_m=frame.ground_z_m,
+                        detections=detections,
+                    )
                 )
-                yolo_evaluation_frames.append(
-                    YoloEvaluationFrame(view.view_id, ground_truth, detections)
-                )
-                for truth in ground_truth:
-                    if (
-                        self.yolo_evaluation_policy is not None
-                        and truth.visible_pixel_count
-                        < self.yolo_evaluation_policy.min_visible_pixels
-                    ):
-                        continue
-                    reference_xy = _polygon_centroid(
-                        self._selected_objects[truth.object_id]["footprint_polygon_xy"]
-                    )
-                    footprint_polygon, surface_covariance = observation_surface_geometry(
-                        self._selected_objects[truth.object_id]["footprint_polygon_xy"], policy
-                    )
-                    ideal_fusion_observations.append(
-                        SurveyObservation(
-                            view_id=view.view_id,
-                            detection_id=f"{view.view_id}:ideal:{truth.object_id}",
-                            position_world=(reference_xy[0], reference_xy[1], frame.ground_z_m),
-                            confidence=1.0,
-                            class_name=truth.class_name,
-                            foreground_sample_count=truth.visible_pixel_count,
-                            radial_mad_m=0.0,
-                            visible_surface_radius_m=0.0,
-                            footprint_polygon_xy=footprint_polygon,
-                            surface_covariance_xy=surface_covariance,
-                            class_scores={truth.class_name: 1.0},
-                            source_detection_ids=(
-                                f"{view.view_id}:ideal:{truth.object_id}",
-                            ),
-                        )
-                    )
                 localized_count = 0
                 for detection in detections:
                     try:
@@ -166,7 +149,7 @@ class MujocoSurveySimulation:
                 observations=observations,
                 candidates=[],
                 localization_failures=localization_failures,
-                message=f"MuJoCo survey benchmark failed: {type(exc).__name__}: {exc}",
+                message=f"MuJoCo survey production failed: {type(exc).__name__}: {exc}",
                 planner_artifact=planner_artifact,
                 localization_policy=policy,
             )
@@ -176,13 +159,92 @@ class MujocoSurveySimulation:
         fusion_result = fuse_observations_with_report(observations, policy)
         candidates = list(fusion_result.candidates)
         candidate_payloads = [candidate.to_dict() for candidate in candidates]
-        candidate_evaluation = self._evaluate_candidates(candidate_payloads)
+        self._production_observations = tuple(observations)
+        return self._report(
+            status="success",
+            view_reports=view_reports,
+            observations=observations,
+            candidates=candidate_payloads,
+            localization_failures=localization_failures,
+            message=(
+                f"Executed route and captured all {len(SURVEY_VIEWS)} views; localized {len(candidates)} candidates."
+            ),
+            fusion_diagnostics=fusion_result.diagnostics,
+            planner_artifact=planner_artifact,
+            localization_policy=policy,
+        )
+
+    def evaluate(
+        self,
+        production_report: dict[str, Any],
+        policy: CandidateLocalizationPolicy = CandidateLocalizationPolicy(),
+    ) -> dict[str, Any]:
+        """Replay production viewpoints for simulation-only truth evaluation."""
+        if (
+            production_report.get("schema") != "task1_survey_report"
+            or production_report.get("stage") != "survey"
+            or production_report.get("status") != "success"
+        ):
+            raise ValueError("Survey evaluation requires a successful production report")
+        if len(self._evaluation_captures) != len(SURVEY_VIEWS):
+            raise ValueError("Survey evaluation requires all production capture viewpoints")
+        raw_candidates = production_report.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raise ValueError("Survey production report candidates must be a list")
+
+        ideal_fusion_observations: list[SurveyObservation] = []
+        yolo_evaluation_frames: list[YoloEvaluationFrame] = []
+        try:
+            self._load()
+            for capture in self._evaluation_captures:
+                ground_truth = self._capture_ground_truth(capture)
+                yolo_evaluation_frames.append(
+                    YoloEvaluationFrame(
+                        capture.view_id,
+                        ground_truth,
+                        capture.detections,
+                    )
+                )
+                for truth in ground_truth:
+                    if (
+                        self.yolo_evaluation_policy is not None
+                        and truth.visible_pixel_count < self.yolo_evaluation_policy.min_visible_pixels
+                    ):
+                        continue
+                    layout_object = self._selected_objects[truth.object_id]
+                    reference_xy = _polygon_centroid(layout_object["footprint_polygon_xy"])
+                    footprint_polygon, surface_covariance = observation_surface_geometry(
+                        layout_object["footprint_polygon_xy"], policy
+                    )
+                    detection_id = f"{capture.view_id}:ideal:{truth.object_id}"
+                    ideal_fusion_observations.append(
+                        SurveyObservation(
+                            view_id=capture.view_id,
+                            detection_id=detection_id,
+                            position_world=(
+                                reference_xy[0],
+                                reference_xy[1],
+                                capture.ground_z_m,
+                            ),
+                            confidence=1.0,
+                            class_name=truth.class_name,
+                            foreground_sample_count=truth.visible_pixel_count,
+                            radial_mad_m=0.0,
+                            visible_surface_radius_m=0.0,
+                            footprint_polygon_xy=footprint_polygon,
+                            surface_covariance_xy=surface_covariance,
+                            class_scores={truth.class_name: 1.0},
+                            source_detection_ids=(detection_id,),
+                        )
+                    )
+        finally:
+            self.close()
+
+        candidate_evaluation = self._evaluate_candidates(raw_candidates)
         oracle_fusion_evaluation = self._evaluate_candidates(
             [
                 candidate.to_dict()
-                for candidate in fuse_observations_with_report(
-                    ideal_fusion_observations, policy
-                ).candidates
+                for candidate in fuse_observations_with_report(ideal_fusion_observations, policy).candidates
             ]
         )
         yolo_evaluation = (
@@ -197,7 +259,7 @@ class MujocoSurveySimulation:
         detection_diagnosis = (
             diagnose_survey_detection_pipeline(
                 yolo_evaluation=yolo_evaluation,
-                observations=observations,
+                observations=self._production_observations,
                 candidate_evaluation=candidate_evaluation,
                 oracle_fusion_evaluation=oracle_fusion_evaluation,
                 min_supporting_views=policy.min_supporting_views,
@@ -205,28 +267,24 @@ class MujocoSurveySimulation:
             if yolo_evaluation is not None
             else None
         )
-        return self._report(
-            status="success",
-            view_reports=view_reports,
-            observations=observations,
-            candidates=candidate_payloads,
-            localization_failures=localization_failures,
-            message=(
-                f"Executed route and captured all {len(SURVEY_VIEWS)} views; "
-                f"localized {len(candidates)} candidates."
-            ),
-            candidate_evaluation=candidate_evaluation,
-            yolo_evaluation=yolo_evaluation,
-            detection_diagnosis=detection_diagnosis,
-            fusion_diagnostics=fusion_result.diagnostics,
-            planner_artifact=planner_artifact,
-            localization_policy=policy,
-        )
+        return {
+            "candidate_position_evaluation": candidate_evaluation,
+            "yolo_evaluation": yolo_evaluation,
+            "detection_diagnosis": detection_diagnosis,
+            "simulation_evaluation": {
+                "status": "completed",
+                "evaluation_only": True,
+                "used_for_production_control": False,
+            },
+        }
 
     def close(self) -> None:
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
+        self._mujoco = None
+        self._model = None
+        self._data = None
 
     def _load(self) -> None:
         try:
@@ -268,8 +326,7 @@ class MujocoSurveySimulation:
     ) -> tuple[
         RgbdFrame,
         tuple[Detection2D, ...],
-        tuple[GroundTruthBox, ...],
-        dict[str, str],
+        dict[str, Any],
         dict[str, Any],
     ]:
         mujoco, model, data = self._required_runtime()
@@ -303,12 +360,6 @@ class MujocoSurveySimulation:
             depth_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(depth_path, depth)
 
-        renderer.enable_segmentation_rendering()
-        renderer.update_scene(data, camera=self.config.camera_name)
-        segmentation = np.asarray(renderer.render()).copy()
-        renderer.disable_segmentation_rendering()
-        ground_truth = self._ground_truth_boxes(segmentation)
-
         camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, self.config.camera_name)
         if camera_id < 0:
             raise ValueError(f"MuJoCo camera does not exist: {self.config.camera_name}")
@@ -336,20 +387,50 @@ class MujocoSurveySimulation:
         detections = batch.detections
         detection_report = batch.source_report
         annotated_rgb_path = self.output_dir / "annotated" / f"{view.view_id}.png"
-        render_detection_overlay(rgb_path, detections, annotated_rgb_path)
+        artifact_failures: list[dict[str, str]] = []
+        try:
+            render_detection_overlay(rgb_path, detections, annotated_rgb_path)
+        except Exception as exc:
+            artifact_failures.append(
+                {
+                    "artifact": "annotated_rgb",
+                    "failure_stage": "detection_annotation",
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            )
         artifact_paths = {
             "rgb_path": str(rgb_path),
-            "annotated_rgb_path": str(annotated_rgb_path),
+            "annotated_rgb_path": (str(annotated_rgb_path) if not artifact_failures else None),
+            "artifact_status": "failed" if artifact_failures else "success",
+            "artifact_failures": artifact_failures,
         }
         if depth_path is not None:
             artifact_paths["depth_path"] = str(depth_path)
         return (
             frame,
             detections,
-            ground_truth,
             artifact_paths,
             detection_report,
         )
+
+    def _capture_ground_truth(
+        self,
+        capture: _SurveyEvaluationCapture,
+    ) -> tuple[GroundTruthBox, ...]:
+        mujoco, model, data = self._required_runtime()
+        renderer = self._renderer
+        if renderer is None:
+            raise RuntimeError("MuJoCo renderer is not loaded")
+        data.qpos[: len(capture.joint_positions)] = capture.joint_positions
+        mujoco.mj_forward(model, data)
+        renderer.disable_depth_rendering()
+        renderer.enable_segmentation_rendering()
+        try:
+            renderer.update_scene(data, camera=self.config.camera_name)
+            segmentation = np.asarray(renderer.render()).copy()
+        finally:
+            renderer.disable_segmentation_rendering()
+        return self._ground_truth_boxes(segmentation)
 
     def _required_runtime(self) -> tuple[Any, Any, Any]:
         if self._mujoco is None or self._model is None or self._data is None:
@@ -367,9 +448,6 @@ class MujocoSurveySimulation:
         message: str,
         planner_artifact: str,
         localization_policy: CandidateLocalizationPolicy,
-        candidate_evaluation: dict[str, Any] | None = None,
-        yolo_evaluation: dict[str, Any] | None = None,
-        detection_diagnosis: dict[str, Any] | None = None,
         fusion_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         report = {
@@ -398,10 +476,12 @@ class MujocoSurveySimulation:
             "observations": [observation.to_dict() for observation in observations],
             "candidates": candidates,
             "localization_failures": localization_failures,
-            "candidate_position_evaluation": candidate_evaluation,
-            "yolo_evaluation": yolo_evaluation,
-            "detection_diagnosis": detection_diagnosis,
+            "artifact_generation_failure_count": sum(len(view.get("artifact_failures", [])) for view in view_reports),
+            "candidate_position_evaluation": None,
+            "yolo_evaluation": None,
+            "detection_diagnosis": None,
             "fusion_diagnostics": fusion_diagnostics,
+            "simulation_evaluation": None,
         }
         return report
 

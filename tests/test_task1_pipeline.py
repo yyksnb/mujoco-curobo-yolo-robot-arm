@@ -952,15 +952,15 @@ def test_survey_report_separates_execution_status_from_truth_evaluation(
 
     def capture_without_detections(view, _joint_positions):
         frame = _rgbd_frame(view_id=view.view_id)
-        return frame, (), (), {}, {"view_id": view.view_id, "detections": []}
+        return frame, (), {}, {"view_id": view.view_id, "detections": []}
 
     monkeypatch.setattr(benchmark, "_load", load_without_mujoco)
     monkeypatch.setattr(benchmark, "_capture", capture_without_detections)
     completed = benchmark.run(successful_route, planner_artifact="curobo_route_plan.json")
 
     assert completed["status"] == "success"
-    assert completed["candidate_position_evaluation"]["success"] is False
-    assert completed["candidate_position_evaluation"]["missing_object_ids"] == ["target_marker"]
+    assert completed["candidate_position_evaluation"] is None
+    assert completed["simulation_evaluation"] is None
 
 
 def test_survey_route_artifact_rejects_stale_or_non_executable_data(tmp_path: Path) -> None:

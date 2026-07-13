@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from robot_arm_pipeline.planning import CameraRoutePlan
 from task1.final.processing import (
     DEFAULT_FINAL_CONFIG_PATH,
     FINAL_REPORT_SCHEMA,
@@ -31,7 +32,11 @@ from task1.survey.route import (
     DEFAULT_SURVEY_ROUTE_PLAN_PATH,
     load_survey_route_plan,
 )
-from task1.survey.config import DEFAULT_CONFIG_PATH, load_survey_detection_config
+from task1.survey.config import (
+    DEFAULT_CONFIG_PATH,
+    SurveyDetectionConfig,
+    load_survey_detection_config,
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,45 @@ class _Stage:
     run: Callable[[], bool]
 
 
+def _run_survey_worker(
+    *,
+    simulation_config: SimulationConfig,
+    survey_config: SurveyDetectionConfig,
+    layout_path: Path,
+    survey_dir: Path,
+    route: CameraRoutePlan,
+    planner_artifact: str,
+) -> None:
+    """Persist Survey production output before simulation-only evaluation."""
+    simulation = MujocoSurveySimulation(
+        simulation_config,
+        layout_path=layout_path,
+        output_dir=survey_dir,
+        detector=YoloDetector(survey_config),
+        yolo_evaluation_policy=survey_config.evaluation.yolo,
+    )
+    report = simulation.run(
+        route,
+        planner_artifact=planner_artifact,
+        policy=survey_config.localization,
+    )
+    report_path = survey_dir / "survey_report.json"
+    _write_json(report_path, report)
+    if report.get("status") != "success":
+        return
+
+    try:
+        report.update(simulation.evaluate(report, policy=survey_config.localization))
+    except Exception as exc:
+        report.update(
+            _survey_evaluation_error(
+                primary_stage="evaluation_module",
+                message=f"{type(exc).__name__}: {exc}",
+            )
+        )
+    _write_json(report_path, report)
+
+
 def _run_final_worker(
     *,
     repo_root: Path,
@@ -87,7 +131,7 @@ def _run_final_worker(
     start_joint_positions: tuple[float, ...],
     source_survey_report: Path,
 ) -> None:
-    """Keep native CUDA/OpenGL runtimes out of the Survey process."""
+    """Keep native CUDA/OpenGL runtimes out of the orchestrator process."""
     report_path = final_dir / "final_report.json"
     capture = None
     try:
@@ -204,6 +248,23 @@ def _final_evaluation_error(*, primary_stage: str, message: str) -> dict[str, An
     }
 
 
+def _survey_evaluation_error(*, primary_stage: str, message: str) -> dict[str, Any]:
+    return {
+        "candidate_position_evaluation": None,
+        "yolo_evaluation": None,
+        "detection_diagnosis": None,
+        "simulation_evaluation": {
+            "status": "error",
+            "evaluation_only": True,
+            "used_for_production_control": False,
+            "diagnosis": {
+                "primary_stage": primary_stage,
+                "message": message,
+            },
+        },
+    }
+
+
 def _attach_final_evaluation(
     final_dir: Path,
     report: dict[str, Any],
@@ -252,6 +313,42 @@ def _load_valid_final_report(path: Path) -> dict[str, Any] | None:
         not isinstance(value, dict)
         or value.get("schema") != FINAL_REPORT_SCHEMA
         or value.get("stage") != "final"
+        or value.get("status") not in {"success", "partial", "failed"}
+        or not required_fields.issubset(value)
+    ):
+        return None
+    return value
+
+
+def _load_valid_survey_report(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    required_fields = {
+        "planner_artifact",
+        "detection_source",
+        "candidate_localization_policy",
+        "simulation",
+        "artifact_retention",
+        "layout_path",
+        "views",
+        "observations",
+        "candidates",
+        "localization_failures",
+        "artifact_generation_failure_count",
+        "candidate_position_evaluation",
+        "yolo_evaluation",
+        "detection_diagnosis",
+        "fusion_diagnostics",
+        "simulation_evaluation",
+    }
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "task1_survey_report"
+        or value.get("stage") != "survey"
         or value.get("status") not in {"success", "partial", "failed"}
         or not required_fields.issubset(value)
     ):
@@ -357,6 +454,10 @@ class Task1Pipeline:
         if source_route_path.resolve() != route_path.resolve():
             shutil.copyfile(source_route_path, route_path)
         planner_artifact = route_path.name
+        report_path = survey_dir / "survey_report.json"
+        survey_config = load_survey_detection_config(
+            self.options.survey_config, repo_root=self.repo_root
+        )
 
         if self.options.capture_manifest is not None:
             if self.options.retain_survey_depth:
@@ -364,9 +465,6 @@ class Task1Pipeline:
                     "--retain-survey-depth applies only to generated MuJoCo depth; "
                     "capture-manifest depth files remain owned by their source manifest"
                 )
-            survey_config = load_survey_detection_config(
-                self.options.survey_config, repo_root=self.repo_root
-            )
             report = {
                 **localize_capture_manifest(
                     self.options.capture_manifest,
@@ -378,31 +476,48 @@ class Task1Pipeline:
                 "stage": "survey",
                 "planner_artifact": planner_artifact,
             }
+            _write_json(report_path, report)
         else:
-            survey_config = load_survey_detection_config(
-                self.options.survey_config, repo_root=self.repo_root
-            )
-            simulation = MujocoSurveySimulation(
-                SimulationConfig(
-                    repo_root=self.repo_root,
-                    candidate_position_tolerance_m=(
-                        survey_config.evaluation.candidate.position_tolerance_m
+            worker = multiprocessing.get_context("spawn").Process(
+                target=_run_survey_worker,
+                kwargs={
+                    "simulation_config": SimulationConfig(
+                        repo_root=self.repo_root,
+                        candidate_position_tolerance_m=(
+                            survey_config.evaluation.candidate.position_tolerance_m
+                        ),
+                        retain_depth_artifacts=self.options.retain_survey_depth,
                     ),
-                    retain_depth_artifacts=self.options.retain_survey_depth,
-                ),
-                layout_path=self.layout_path,
-                output_dir=survey_dir,
-                detector=YoloDetector(survey_config),
-                yolo_evaluation_policy=survey_config.evaluation.yolo,
+                    "survey_config": survey_config,
+                    "layout_path": self.layout_path.resolve(),
+                    "survey_dir": survey_dir,
+                    "route": route,
+                    "planner_artifact": planner_artifact,
+                },
             )
-            report = simulation.run(
-                route,
-                planner_artifact=planner_artifact,
-                policy=survey_config.localization,
-            )
+            worker.start()
+            worker.join()
+            report = _load_valid_survey_report(report_path)
+            if worker.exitcode != 0:
+                if report is None:
+                    raise RuntimeError(
+                        "Task1 Survey worker exited abnormally with code "
+                        f"{worker.exitcode} before producing a valid production report."
+                    )
+                if report["status"] == "success":
+                    report.update(
+                        _survey_evaluation_error(
+                            primary_stage="evaluation_worker_process",
+                            message=(
+                                "Survey production completed, but its evaluation process "
+                                f"exited abnormally with code {worker.exitcode}."
+                            ),
+                        )
+                    )
+                    _write_json(report_path, report)
+            if report is None:
+                raise ValueError("Task1 Survey worker produced an invalid report contract")
 
-        report_path = survey_dir / "survey_report.json"
-        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         self.survey_report_path = report_path
         return report["status"] == "success"
 

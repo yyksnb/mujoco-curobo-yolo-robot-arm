@@ -18,8 +18,8 @@
 Survey 固定使用 16 个相机位，日常运行只校验并加载带输入指纹的离线路线，不在线调用 cuRobo。
 scene、基座位姿、机器人配置、URDF、碰撞网格、固定起点或相机位变化后，必须显式重新生成路线。
 
-MuJoCo 在各路线终点采集 1920x1080 RGB-D。RGB 和中文框图落盘；深度默认仅在内存使用，显式开启
-诊断时才保存。
+MuJoCo 在各路线终点采集 1920x1080 RGB-D。RGB 原图用于正式检测，中文框图是展示 artifact；框图
+生成失败会显式记录，但不丢弃检测、定位或融合结果。深度默认仅在内存使用，显式开启诊断时才保存。
 
 正式链路为 `YOLO -> 同帧深度定位 -> 多视角融合`。定位使用检测框、深度、相机内参和
 `T_world_camera_optical`，生成底面位置、footprint、表面协方差和软类别证据。融合先在不同 view
@@ -50,9 +50,10 @@ YOLO CUDA 和 cuRobo native runtime。
 
 ## 评估边界
 
-Final 生产拍照只生成 RGB-D 和正式相机变换，并先原子落盘生产报告；仿真随后回放已拍摄关节状态，
-采集 segmentation 和实际相机位姿。layout、segmentation、真值 bbox 和 benchmark 聚合只用于评估，
-不参与生产控制。评估异常只写评估错误，不覆盖生产 `status`。
+Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并先原子落盘生产报告；仿真随后回放
+已拍摄关节状态，采集 segmentation 和评估所需真值。layout、segmentation、真值 bbox 和 benchmark
+聚合只用于评估，不参与生产控制。两个阶段都在独立 spawn 子进程中运行；评估异常或 native 进程
+崩溃只写评估错误，不覆盖已经持久化的生产 `status`。
 
 ## 逻辑分类
 

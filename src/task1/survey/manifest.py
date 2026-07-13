@@ -31,17 +31,35 @@ def localize_capture_manifest(
     observations: list[SurveyObservation] = []
     failures: list[dict[str, str]] = []
     detection_reports: list[dict[str, Any]] = []
+    artifact_failures: list[dict[str, str]] = []
     for frame in frames:
         batch = detector.detect(frame)
         if frame.rgb_path is None:
             raise ValueError(f"{frame.view_id}: RGB image is required to render detections")
-        annotated_rgb_path = render_detection_overlay(
-            Path(frame.rgb_path),
-            batch.detections,
-            annotated_image_dir / f"{frame.view_id}.png",
-        )
+        annotated_rgb_path: Path | None = None
+        view_artifact_failures: list[dict[str, str]] = []
+        try:
+            annotated_rgb_path = render_detection_overlay(
+                Path(frame.rgb_path),
+                batch.detections,
+                annotated_image_dir / f"{frame.view_id}.png",
+            )
+        except Exception as exc:
+            failure = {
+                "view_id": frame.view_id,
+                "artifact": "annotated_rgb",
+                "failure_stage": "detection_annotation",
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+            artifact_failures.append(failure)
+            view_artifact_failures.append(failure)
         detection_reports.append(
-            {**batch.source_report, "annotated_rgb_path": str(annotated_rgb_path)}
+            {
+                **batch.source_report,
+                "annotated_rgb_path": (str(annotated_rgb_path) if annotated_rgb_path is not None else None),
+                "artifact_status": ("failed" if view_artifact_failures else "success"),
+                "artifact_failures": view_artifact_failures,
+            }
         )
         for detection in batch.detections:
             try:
@@ -61,6 +79,7 @@ def localize_capture_manifest(
         "candidates": [candidate.to_dict() for candidate in fusion_result.candidates],
         "fusion_diagnostics": fusion_result.diagnostics,
         "localization_failures": failures,
+        "artifact_generation_failure_count": len(artifact_failures),
     }
 
 
