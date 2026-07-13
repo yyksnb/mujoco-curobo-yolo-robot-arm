@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from robot_arm_pipeline.perception.yolo_adapter import (
@@ -11,6 +12,8 @@ from robot_arm_pipeline.perception.yolo_adapter import (
 
 
 RAW_SCHEMA_VERSION = "yolo_raw_detections_v1"
+_MODEL_CACHE: dict[tuple[Path, Any], Any] = {}
+_MODEL_CACHE_LOCK = Lock()
 
 
 def run_ultralytics_yolo_inference(
@@ -48,7 +51,7 @@ def run_ultralytics_yolo_inference(
     resolved_iou = float(iou_threshold) if iou_threshold is not None else float(inference_config.get("iou_threshold", 0.7))
     resolved_image_size = int(image_size) if image_size is not None else int(inference_config.get("image_size", 640))
 
-    model = YOLO(str(profile.model_path))
+    model = _cached_yolo_model(profile.model_path, YOLO)
     predict_kwargs: dict[str, Any] = {
         "source": str(image),
         "conf": resolved_confidence,
@@ -79,6 +82,16 @@ def run_ultralytics_yolo_inference(
             "max_detections": max_detections,
         },
     )
+
+
+def _cached_yolo_model(model_path: Path, model_factory: Any) -> Any:
+    cache_key = (model_path.resolve(), model_factory)
+    with _MODEL_CACHE_LOCK:
+        model = _MODEL_CACHE.get(cache_key)
+        if model is None:
+            model = model_factory(str(cache_key[0]))
+            _MODEL_CACHE[cache_key] = model
+        return model
 
 
 def build_yolo_raw_payload(

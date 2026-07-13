@@ -2,57 +2,69 @@
 
 ## 模块边界
 
-- `pipeline.py`：阶段编排和 artifact 交接，不实现检测、定位或规划。
-- `layout.py`：从 MuJoCo 目标物体模型生成无碰撞布局。
-- `survey/route.py`：固定 16 个相机位、离线路线 artifact 及输入指纹校验。
-- `survey/detection.py`：正式 YOLO 适配和中文检测框图。
-- `survey/localization.py`：RGB-D 底面定位和多视角融合。
-- `survey/manifest.py`：实机 RGB-D manifest 输入。
-- `survey/yolo_evaluation.py`：仿真评估旁路，不参与候选生成。
-- `simulation/mujoco.py`：1080p RGB-D 拍摄和仿真真值生成。
-- `robot_arm_pipeline.planning`：共享 cuRobo camera-route planning；Task1 不依赖其内部参数。
+- `pipeline.py` 只编排 `layout -> survey -> final` 和正式 artifact 交接。
+- `scene.py`、`detection.py`、`vision.py` 提供共享的坐标变换、YOLO 适配和 RGB-D 定位/融合接口。
+- `survey/` 负责固定路线、Survey 配置、采集和评估。
+- `final/processing.py`、`simulation.py`、`evaluation.py` 分别负责生产处理、MuJoCo 采集和评估。
+- cuRobo camera-route planning 保持在 `robot_arm_pipeline.planning`。
 
-生产模块只消费正式输入。seed、layout 真值、segmentation 和 benchmark 归属不得进入检测、
-定位或融合决策。
+生产模块只消费正式输入。Final 只解析候选的 `candidate_id`、`bottom_position_world` 和
+`footprint_polygon_xy`；编排层另读取正式的 `planner_artifact` 作为起始关节状态。seed、layout
+真值、segmentation、benchmark split 和 Survey 内部诊断字段不得进入生产决策。参数按阶段集中在
+`configs/task1/survey/` 和 `configs/task1/final/`，不散落在业务源码中。
 
-## Survey 实现
+## Survey
 
-日常运行校验并加载 `configs/task1/survey_route_plan.json`，不在线调用 cuRobo。scene、机器人
-配置、URDF、碰撞网格、固定起点或相机位变化后，必须显式重新生成路线。
+Survey 固定使用 16 个相机位，日常运行只校验并加载带输入指纹的离线路线，不在线调用 cuRobo。
+scene、基座位姿、机器人配置、URDF、碰撞网格、固定起点或相机位变化后，必须显式重新生成路线。
 
-MuJoCo 在 16 个路线终点拍摄 1920x1080 RGB-D。RGB 和中文框图落盘；depth 默认只在内存
-使用，`--retain-survey-depth` 显式开启后才保存。
+MuJoCo 在各路线终点采集 1920x1080 RGB-D。RGB 和中文框图落盘；深度默认仅在内存使用，显式开启
+诊断时才保存。
 
-定位从检测框、同帧深度、相机内参和 `T_world_camera_optical` 生成底面位置、footprint、
-表面协方差和软类别证据。融合在不同 view 对之间做一对一匹配，再构建全局观测图：
+正式链路为 `YOLO -> 同帧深度定位 -> 多视角融合`。定位使用检测框、深度、相机内参和
+`T_world_camera_optical`，生成底面位置、footprint、表面协方差和软类别证据。融合先在不同 view
+之间做一对一匹配，再构建全局观测图：
 
 - 边代价由 footprint 重叠、Mahalanobis 距离和软类别证据组成。
-- 同一轨迹禁止包含两个相同 view 的观测。
+- 同一 track 禁止包含两个相同 view 的观测。
 - 至少两个不同 view 支持才输出候选。
-- 不按物体数量补齐、裁剪或重排，不使用类别或 seed 特判。
+- 不按目标数量补齐、裁剪或重排，不使用类别、seed 或样例特征做特判。
 
-关联边、gate 统计、互斥拒绝和 tentative track 写入 `fusion_diagnostics`。
+关联边、gate 统计、互斥拒绝和 tentative track 写入 `fusion_diagnostics`。定位失败显式写入报告；
+layout 位置验收不改变生产 `status`。
 
-## 评估
+## Final
 
-`configs/task1/survey_benchmark.json` 固定互不重叠的 development、regression 和 acceptance
-seed。它只记录评估集合，不作为生产 CLI。候选真值验收结果：
+Final 处理 Survey 的全部候选，不要求输入数量恰好为 5。首个目标从 Survey 路线末端状态开始；
+后续目标串接最近一次可执行轨迹终态，并依据当前关节状态和可行 IK 选择处理顺序。单个候选失败不
+阻止其余候选，报告仍按输入顺序输出，实际顺序另行记录。
 
-- development：22/22 通过。
-- regression：两个融合回归通过；两个 YOLO 单视角支持样本明确失败。
-- acceptance：23/25 通过；两个失败均为 YOLO 单视角支持不足。
+相机位于候选瞄准点与油箱开口的连线上。各 optical roll 根据 footprint、FOV 和 coverage margin
+计算完整入框距离，并搜索多个 standoff。所有姿态先批量执行碰撞感知 IK；可行解按预计画面占比、
+关节距离和拍摄距离排序，仅必要姿态进入完整运动规划。
 
-重构后 51 个 seed 回测结果与冻结基线一致，无 cuRobo 或融合失败。
+到位后重新执行 YOLO 和同帧深度定位，按候选 XY 距离关联检测；`bbox_area_fraction` 只作诊断。
+顶层 `status` 由各候选处理结果决定，物体数量由 `candidate_count_evaluation` 独立表达。框图属于展示
+artifact，生成失败不丢弃正式检测和位姿结果。Final 在 spawn 子进程中运行，隔离 MuJoCo/OpenGL、
+YOLO CUDA 和 cuRobo native runtime。
 
-MuJoCo 顶层 `status` 只表示路线执行、拍照、感知流程和报告生成正常完成；单个检测的定位
-失败继续显式写入 `localization_failures`。layout 真值验收仅写入
-`candidate_position_evaluation.success`；benchmark 据此统计质量，后续生产阶段不得读取该
-评估字段决定控制流。
+## 评估边界
 
-## 风险与非主路径
+Final 生产拍照只生成 RGB-D 和正式相机变换，并先原子落盘生产报告；仿真随后回放已拍摄关节状态，
+采集 segmentation 和实际相机位姿。layout、segmentation、真值 bbox 和 benchmark 聚合只用于评估，
+不参与生产控制。评估异常只写评估错误，不覆盖生产 `status`。
 
-- 更换 YOLO 模型、相机或场景分布后必须重新评估检测与融合参数。
-- 同视角重复框缺少跨视角证据时保持不确定，不猜测合并。
-- MuJoCo 与实机存在 domain gap；实机还依赖双目相机标定和手眼标定质量。
-- 工程防御仅包含 schema、路线指纹、视角完整性、深度和矩阵校验；触发结果显式写入报告。
-- segmentation、理想物体中心和 benchmark 统计仅用于 debug/评估。
+## 逻辑分类
+
+- 正式设计：多视角 Survey 融合、开口连线斜拍、roll-aware 投影定距、批量碰撞 IK、多 standoff、
+  逐候选重检测和定位。
+- 工程防御：schema/指纹校验、逐阶段失败、生产报告原子落盘、native runtime 与评估故障隔离。
+- Debug/评估：layout 真值、segmentation、真值 bbox、诊断深度和 benchmark 聚合。
+- 临时 workaround：无；当前没有仅为样例通过而引入或计划删除的生产逻辑。
+
+## 未解决风险
+
+- Survey 仍依赖 YOLO 提供足够的跨视角观测；单视角支持会明确漏掉候选。
+- Final footprint 不表达物体高度、遮挡和油箱口可见性，完整入框距离仍是平面近似。
+- coverage margin 尚未覆盖实机内参、手眼标定和机械臂执行误差，MuJoCo 与实机存在 domain gap。
+- 当前 YOLO 对小物体、旋转和斜视角敏感；模型、相机或场景分布变化后必须重新评估正式参数。

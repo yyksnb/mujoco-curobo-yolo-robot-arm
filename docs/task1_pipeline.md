@@ -10,7 +10,7 @@
 python scripts/run_task1_recognition.py --seed 21 --output-dir outputs/task1
 ```
 
-不传 `--step` 时会依次运行：layout -> survey -> rough -> final -> zoom。
+不传 `--step` 时会依次运行：layout -> survey -> final -> zoom。
 
 输出目录：
 
@@ -18,7 +18,6 @@ python scripts/run_task1_recognition.py --seed 21 --output-dir outputs/task1
 outputs/task1/<timestamp>_seed<seed>/
   layout/
   survey/
-  rough/
   final/
   zoom/
 ```
@@ -54,28 +53,16 @@ python scripts/run_task1_recognition.py \
   --output-dir outputs/task1
 ```
 
-## Rough
-
-作用：消费 survey candidates，进行近距离粗拍和初步对象分层。
-
-最小命令：
-
-```bash
-python scripts/run_task1_recognition.py \
-  --step rough \
-  --survey-report outputs/task1/<run>/survey/survey_report.json
-```
-
 ## Final
 
-作用：对 rough 输出的对象逐个进行单物体精拍摄，并产出稳定对象列表。
+作用：对 survey 输出的候选物体逐个进行单物体精拍摄，并产出稳定对象列表。
 
 最小命令：
 
 ```bash
 python scripts/run_task1_recognition.py \
   --step final \
-  --rough-report outputs/task1/<run>/rough/rough_report.json
+  --survey-report outputs/task1/<run>/survey/survey_report.json
 ```
 
 ## Zoom
@@ -89,3 +76,5 @@ python scripts/run_task1_recognition.py \
   --step zoom \
   --final-report outputs/task1/<run>/final/final_report.json
 ```
+
+注：zoom 不参与 pipeline 的失败判断。

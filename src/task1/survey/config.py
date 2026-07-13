@@ -5,21 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from task1.survey.localization import CandidateLocalizationPolicy
+from task1.detection import YoloInferenceConfig
+from task1.vision import CandidateLocalizationPolicy
 
 
 CONFIG_SCHEMA = "task1_survey_detection_config"
-DEFAULT_CONFIG_PATH = Path("configs/task1/survey_detection.yaml")
-
-
-@dataclass(frozen=True)
-class YoloInferenceConfig:
-    image_size: int
-    confidence_threshold: float
-    iou_threshold: float
-    class_agnostic_nms: bool
-    device: str | None
-    max_detections: int | None
+DEFAULT_CONFIG_PATH = Path("configs/task1/survey/detection.yaml")
 
 
 @dataclass(frozen=True)

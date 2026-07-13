@@ -14,11 +14,10 @@ from robot_arm_pipeline.planning.curobo_camera_route import (  # noqa: E402
     DEFAULT_ROBOT_CONFIG,
     DEFAULT_WORLD_CONFIG,
 )
+from task1.scene import RigidPose, load_tank_pose_in_base  # noqa: E402
 from task1.survey.route import (  # noqa: E402
     DEFAULT_MUJOCO_SCENE_PATH,
     DEFAULT_SURVEY_ROUTE_PLAN_PATH,
-    RigidPose,
-    load_tank_pose_in_base,
     make_survey_route_targets,
     write_survey_route_plan,
 )

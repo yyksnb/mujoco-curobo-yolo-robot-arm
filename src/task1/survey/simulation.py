@@ -9,8 +9,8 @@ from typing import Any
 import numpy as np
 
 from robot_arm_pipeline.planning import CameraRoutePlan
-from task1.survey.detection import SurveyDetector, render_detection_overlay
-from task1.survey.localization import (
+from task1.detection import Detector, render_detection_overlay
+from task1.vision import (
     CameraIntrinsics,
     CandidateLocalizationPolicy,
     Detection2D,
@@ -21,8 +21,8 @@ from task1.survey.localization import (
     observation_surface_geometry,
 )
 from task1.survey.route import SURVEY_VIEWS, SurveyView
-from task1.survey.detection_config import YoloEvaluationPolicy
-from task1.survey.yolo_evaluation import (
+from task1.survey.config import YoloEvaluationPolicy
+from task1.survey.evaluation import (
     GroundTruthBox,
     YoloEvaluationFrame,
     diagnose_survey_detection_pipeline,
@@ -59,7 +59,7 @@ class MujocoSurveySimulation:
         config: SimulationConfig,
         layout_path: Path,
         output_dir: Path,
-        detector: SurveyDetector,
+        detector: Detector,
         yolo_evaluation_policy: YoloEvaluationPolicy | None = None,
     ) -> None:
         self.config = config

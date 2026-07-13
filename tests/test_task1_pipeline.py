@@ -3,23 +3,50 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
-from robot_arm_pipeline.planning import CameraRoutePlan, CameraRouteSegment
+from robot_arm_pipeline.planning import (
+    CameraRoutePlan,
+    CameraRouteSegment,
+    CameraTargetIKSolution,
+)
 from robot_arm_pipeline.planning.curobo_camera_route import DEFAULT_START_JOINT_POSITIONS
-from task1.layout import (
+from task1.final.processing import (
+    FinalAssociationPolicy,
+    FinalCameraPolicy,
+    FinalCandidate,
+    FinalCaptureResult,
+    FinalProcessor,
+    load_final_config,
+    load_survey_candidates,
+    make_final_failure_report,
+    make_final_camera_targets,
+)
+from task1.final.evaluation import evaluate_final_simulation
+from task1.scene import (
     PlacementBounds,
     TargetObjectSpec,
+    RigidPose,
     convex_polygons_intersect,
     generate_random_target_object_poses,
+    load_tank_pose_in_base,
     load_target_object_specs,
+    load_world_pose_in_base,
     polygon_within_bounds,
 )
-from task1.simulation.mujoco import MujocoSurveySimulation, SimulationConfig
-from task1.survey.localization import (
+from task1.pipeline import PipelineOptions, PipelineStageEvent, Task1Pipeline
+from task1.final.simulation import (
+    FinalSimulationGroundTruth,
+    FinalSimulationTrace,
+    MujocoFinalCapture,
+)
+from task1.survey.simulation import MujocoSurveySimulation, SimulationConfig
+from task1.vision import (
     CameraIntrinsics,
     CandidateLocalizationPolicy,
     Detection2D,
@@ -29,12 +56,12 @@ from task1.survey.localization import (
     localize_detection,
 )
 from task1.survey.manifest import load_capture_manifest
-from task1.survey.detection import YoloSurveyDetector, render_detection_overlay
-from task1.survey.detection_config import (
+from task1.detection import DetectionBatch, YoloDetector, render_detection_overlay
+from task1.survey.config import (
     YoloEvaluationPolicy,
     load_survey_detection_config,
 )
-from task1.survey.yolo_evaluation import (
+from task1.survey.evaluation import (
     GroundTruthBox,
     YoloEvaluationFrame,
     diagnose_survey_detection_pipeline,
@@ -45,14 +72,36 @@ from task1.survey.route import (
     ROUTE_SCHEMA,
     SURVEY_VIEWS,
     load_survey_route_plan,
-    load_tank_pose_in_base,
     make_survey_route_targets,
     write_survey_route_plan,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SURVEY_CONFIG = REPO_ROOT / "configs/task1/survey_detection.yaml"
+SURVEY_CONFIG = REPO_ROOT / "configs/task1/survey/detection.yaml"
+FINAL_CONFIG = REPO_ROOT / "configs/task1/final/config.yaml"
+
+
+def test_pipeline_reports_stage_status_and_elapsed_time(tmp_path: Path) -> None:
+    events: list[PipelineStageEvent] = []
+    result = Task1Pipeline(
+        PipelineOptions(
+            repo_root=REPO_ROOT,
+            output_dir=tmp_path,
+            seed=26,
+            step="layout",
+        ),
+        stage_observer=events.append,
+    ).run()
+
+    assert result.status == "success"
+    assert [(event.stage, event.status) for event in events] == [
+        ("layout", "started"),
+        ("layout", "success"),
+    ]
+    assert events[0].elapsed_s is None
+    assert events[1].elapsed_s is not None
+    assert events[1].elapsed_s >= 0.0
 
 
 def test_survey_contract_is_16_fixed_views_and_1080p() -> None:
@@ -60,6 +109,520 @@ def test_survey_contract_is_16_fixed_views_and_1080p() -> None:
     config = SimulationConfig(repo_root=REPO_ROOT)
     assert (config.image_width, config.image_height) == (1920, 1080)
     assert config.retain_depth_artifacts is False
+
+
+def test_final_camera_uses_nearest_roll_aware_opening_line_pose() -> None:
+    config = load_final_config(FINAL_CONFIG, repo_root=REPO_ROOT)
+    candidate = _final_candidate(0)
+
+    assert (config.camera.image_width, config.camera.image_height) == (1920, 1080)
+    assert config.planning.ik_batch_size == 8
+    assert config.detection.inference.image_size == 1280
+
+    attempts = make_final_camera_targets(
+        candidate,
+        world_pose_base=RigidPose((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)),
+        policy=config.camera,
+    )
+
+    assert len(attempts) == (
+        len(config.camera.optical_roll_degrees)
+        * len(config.camera.standoff_distance_scales)
+    )
+    candidate_position = np.asarray(candidate.bottom_position_world)
+    aim_position = candidate_position + np.asarray(
+        (0.0, 0.0, config.camera.aim_height_above_bottom_m)
+    )
+    opening_position = np.asarray(config.camera.opening_position_world)
+    opening_direction = opening_position - aim_position
+    opening_direction /= np.linalg.norm(opening_direction)
+    tan_vertical = math.tan(math.radians(config.camera.vertical_fov_deg) / 2.0)
+    tan_horizontal = tan_vertical * config.camera.image_width / config.camera.image_height
+    for target, geometry in attempts:
+        target_position = np.asarray(target.target_position)
+        target_distance = np.linalg.norm(target_position - aim_position)
+        if geometry["standoff_distance_scale"] > 1.0:
+            assert target_distance >= (
+                config.camera.secondary_standoff_minimum_distance_m - 1e-7
+            )
+        assert target_position == pytest.approx(
+            aim_position + opening_direction * target_distance, abs=1e-7
+        )
+        actual_view = _quaternion_rotate(target.target_quaternion_wxyz, (0.0, 0.0, -1.0))
+        assert actual_view == pytest.approx(-opening_direction, abs=1e-7)
+        w, x, y, z = target.target_quaternion_wxyz
+        rotation = Rotation.from_quat((x, y, z, w))
+        constraints = []
+        for point in candidate.footprint_polygon_xy:
+            camera_point = rotation.inv().apply(
+                np.asarray((point[0], point[1], candidate_position[2])) - target_position
+            )
+            depth = -camera_point[2]
+            horizontal_slack = depth * tan_horizontal - (
+                abs(camera_point[0]) + config.camera.coverage_margin_m
+            )
+            vertical_slack = depth * tan_vertical - (
+                abs(camera_point[1]) + config.camera.coverage_margin_m
+            )
+            assert horizontal_slack >= -1e-7
+            assert vertical_slack >= -1e-7
+            constraints.extend((horizontal_slack, vertical_slack))
+        if geometry["standoff_distance_scale"] == 1.0:
+            assert min(constraints) == pytest.approx(0.0, abs=1e-7)
+        assert geometry["actual_viewing_distance_m"] == pytest.approx(target_distance)
+
+
+def test_final_production_capture_does_not_render_evaluation_segmentation(
+    tmp_path: Path,
+) -> None:
+    class FakeMujoco:
+        class mjtObj:
+            mjOBJ_CAMERA = 1
+
+        @staticmethod
+        def mj_forward(_model: object, _data: object) -> None:
+            return None
+
+        @staticmethod
+        def mj_name2id(
+            _model: object,
+            _object_type: object,
+            _name: str,
+        ) -> int:
+            return 0
+
+    class FakeModel:
+        cam_fovy = np.asarray([45.0])
+
+    class FakeData:
+        qpos = np.zeros(7, dtype=float)
+        cam_xmat = np.asarray([np.eye(3, dtype=float)])
+        cam_xpos = np.asarray([[0.0, 0.0, 1.0]])
+
+    class FakeRenderer:
+        def __init__(self) -> None:
+            self.mode = "rgb"
+            self.enabled_segmentation = False
+
+        def disable_depth_rendering(self) -> None:
+            self.mode = "rgb"
+
+        def enable_depth_rendering(self) -> None:
+            self.mode = "depth"
+
+        def disable_segmentation_rendering(self) -> None:
+            self.mode = "rgb"
+
+        def enable_segmentation_rendering(self) -> None:
+            self.enabled_segmentation = True
+            self.mode = "segmentation"
+
+        def update_scene(self, _data: object, *, camera: str) -> None:
+            assert camera == "wrist"
+
+        def render(self) -> np.ndarray:
+            if self.mode == "depth":
+                return np.ones((8, 8), dtype=np.float32)
+            if self.mode == "segmentation":
+                raise AssertionError("production capture requested segmentation")
+            return np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    capture = MujocoFinalCapture(
+        repo_root=REPO_ROOT,
+        layout_path=tmp_path / "unused_layout.json",
+        output_dir=tmp_path / "final",
+        image_width=8,
+        image_height=8,
+        camera_name="wrist",
+        model_path=tmp_path / "unused_model.xml",
+        ground_z_m=0.0,
+    )
+    renderer = FakeRenderer()
+    capture._mujoco = FakeMujoco()
+    capture._model = FakeModel()
+    capture._data = FakeData()
+    capture._renderer = renderer
+
+    result = capture.capture("candidate_001", tuple(float(index) for index in range(7)))
+
+    assert result.frame.depth_m.shape == (8, 8)
+    assert renderer.enabled_segmentation is False
+    capture.close()
+
+
+def test_final_simulation_evaluation_distinguishes_parameters_and_internal_issues(
+    tmp_path: Path,
+) -> None:
+    config = load_final_config(FINAL_CONFIG, repo_root=REPO_ROOT)
+    candidate = _final_candidate(0)
+    layout_path = tmp_path / "layout.json"
+    layout_path.write_text(
+        json.dumps(
+            {
+                "schema": "target_object_pose_layout",
+                "objects": [
+                    {
+                        "object_id": "target_marker",
+                        "class_name": "marker",
+                        "footprint_polygon_xy": [
+                            [0.28, 0.38],
+                            [0.32, 0.38],
+                            [0.32, 0.42],
+                            [0.28, 0.42],
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = {
+        "status": "success",
+        "results": [
+            {
+                "candidate_id": candidate.candidate_id,
+                "status": "success",
+                "failure_stage": None,
+                "detection_report": {
+                    "detections": [
+                        {"detection_id": "det_marker", "class_name": "marker"}
+                    ],
+                },
+                "selected_detection": {
+                    "class_name": "marker",
+                    "bbox_area_fraction": 0.81,
+                    "bottom_position_world": [0.30, 0.40, 0.0],
+                },
+                "camera_target": {
+                    "camera_pose_world": {
+                        "position": [0.0, 0.0, 0.0],
+                        "quaternion_wxyz": [0.0, 1.0, 0.0, 0.0],
+                    }
+                },
+            }
+        ],
+    }
+    trace = FinalSimulationTrace(
+        candidate_id=candidate.candidate_id,
+        T_world_camera_optical=(
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+        ground_truth=(
+            FinalSimulationGroundTruth(
+                "target_marker", "marker", (5.0, 5.0, 95.0, 95.0), 8100, False
+            ),
+        ),
+    )
+
+    healthy = evaluate_final_simulation(
+        final_report=report,
+        candidates=(candidate,),
+        layout_path=layout_path,
+        traces=(trace,),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert healthy["success"] is True
+    assert healthy["diagnosis"]["issue_kind"] == "none"
+    assert report["status"] == "success"
+    assert all(
+        counts["passed"] <= counts["eligible"]
+        for counts in healthy["metrics"]["stage_counts"].values()
+    )
+
+    missing_target_report = json.loads(json.dumps(report))
+    missing_target_report["results"][0].pop("camera_target")
+    missing_target = evaluate_final_simulation(
+        final_report=missing_target_report,
+        candidates=(candidate,),
+        layout_path=layout_path,
+        traces=(trace,),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert missing_target["success"] is False
+    assert missing_target["diagnosis"]["issue_kind"] == "internal_likely"
+    assert missing_target["diagnosis"]["primary_stage"] == "report_contract"
+
+    cropped_trace = replace(
+        trace,
+        ground_truth=(
+            FinalSimulationGroundTruth(
+                "target_marker", "marker", (0.0, 25.0, 75.0, 75.0), 3750, True
+            ),
+        ),
+    )
+    camera_issue = evaluate_final_simulation(
+        final_report=report,
+        candidates=(candidate,),
+        layout_path=layout_path,
+        traces=(cropped_trace,),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert camera_issue["diagnosis"]["issue_kind"] == "parameter_likely"
+    assert camera_issue["diagnosis"]["primary_stage"] == "camera_parameters"
+
+    wrong_class_report = json.loads(json.dumps(report))
+    wrong_class_report["results"][0]["selected_detection"]["class_name"] = "tape"
+    internal_issue = evaluate_final_simulation(
+        final_report=wrong_class_report,
+        candidates=(candidate,),
+        layout_path=layout_path,
+        traces=(trace,),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert internal_issue["diagnosis"]["issue_kind"] == "internal_likely"
+    assert internal_issue["diagnosis"]["primary_stage"] == "candidate_association"
+
+    localization_report = {
+        "status": "failed",
+        "results": [
+            {
+                "candidate_id": candidate.candidate_id,
+                "status": "failed",
+                "failure_stage": "depth_localization",
+                "detection_report": {
+                    "detections": [
+                        {"detection_id": "det_1", "class_name": "marker"}
+                    ]
+                },
+                "localization_failures": [{"detection_id": "det_1", "message": "depth"}],
+                "camera_target": report["results"][0]["camera_target"],
+            }
+        ],
+    }
+    localization_issue = evaluate_final_simulation(
+        final_report=localization_report,
+        candidates=(candidate,),
+        layout_path=layout_path,
+        traces=(trace,),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert localization_issue["diagnosis"]["issue_kind"] == "parameter_likely"
+    assert localization_issue["diagnosis"]["primary_stage"] == "depth_localization"
+
+    shifted_candidate = replace(candidate, bottom_position_world=(0.38, 0.40, 0.0))
+    upstream_issue = evaluate_final_simulation(
+        final_report=report,
+        candidates=(shifted_candidate,),
+        layout_path=layout_path,
+        traces=(trace,),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert upstream_issue["diagnosis"]["issue_kind"] == "upstream"
+    assert upstream_issue["diagnosis"]["primary_stage"] == "survey_input"
+    assert upstream_issue["metrics"]["stage_counts"]["planning"] == {
+        "eligible": 0,
+        "passed": 0,
+        "observed_passed": 1,
+    }
+
+    runtime_issue = evaluate_final_simulation(
+        final_report={
+            "status": "failed",
+            "failure_stage": "final_worker",
+            "message": "CUDA unavailable",
+            "results": [],
+        },
+        candidates=(candidate,),
+        layout_path=layout_path,
+        traces=(),
+        policy=config.evaluation,
+        image_width=100,
+        image_height=100,
+    )
+    assert runtime_issue["diagnosis"]["issue_kind"] == "indeterminate"
+    assert runtime_issue["diagnosis"]["primary_stage"] == "runtime_environment"
+
+
+def test_final_processes_non_five_candidates_in_nearest_ik_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner = _FinalPlannerStub(
+        ik_offsets={
+            "candidate_001": 0.30,
+            "candidate_002": 0.10,
+            "candidate_003": 0.20,
+        }
+    )
+    capture = _FinalCaptureStub(tmp_path)
+    processor = _final_processor(tmp_path, planner, capture, monkeypatch)
+    survey_report_path = tmp_path / "survey_report.json"
+    survey_report_path.write_text(
+        json.dumps(
+            {
+                "schema": "task1_survey_report",
+                "stage": "survey",
+                "status": "success",
+                "candidates": [
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "bottom_position_world": list(candidate.bottom_position_world),
+                        "footprint_polygon_xy": [
+                            list(point) for point in candidate.footprint_polygon_xy
+                        ],
+                    }
+                    for candidate in (_final_candidate(index) for index in range(3))
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _survey_report, candidates = load_survey_candidates(survey_report_path)
+
+    report = processor.run(
+        candidates,
+        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        source_survey_report=survey_report_path,
+    )
+
+    assert report["status"] == "success"
+    assert report["candidate_count"] == 3
+    assert report["processed_candidate_count"] == 3
+    assert report["successful_candidate_count"] == 3
+    assert report["candidate_count_evaluation"] == {
+        "success": False,
+        "completed": True,
+        "expected_count": 5,
+        "survey_candidate_count": 3,
+        "recognized_candidate_count": 3,
+        "missing_count": 2,
+        "extra_count": 0,
+        "message": "Final completed, but the recognized object count differs from the expected count.",
+    }
+    assert report["candidate_processing_order"] == [
+        "candidate_002",
+        "candidate_003",
+        "candidate_001",
+    ]
+    assert capture.captured == ["candidate_002", "candidate_003", "candidate_001"]
+    assert [result["candidate_id"] for result in report["results"]] == [
+        "candidate_001",
+        "candidate_002",
+        "candidate_003",
+    ]
+    assert [result["processing_index"] for result in report["results"]] == [2, 0, 1]
+
+
+def test_final_reports_partial_and_empty_without_fabricating_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner = _FinalPlannerStub(fail_candidates={"candidate_002"})
+    capture = _FinalCaptureStub(tmp_path)
+    processor = _final_processor(tmp_path, planner, capture, monkeypatch)
+
+    report = processor.run(
+        tuple(_final_candidate(index) for index in range(3)),
+        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        source_survey_report=tmp_path / "survey_report.json",
+    )
+
+    assert report["status"] == "partial"
+    assert [item["status"] for item in report["results"]] == ["success", "failed", "success"]
+    assert report["results"][1]["failure_stage"] == "curobo_planning"
+    assert capture.captured == ["candidate_001", "candidate_003"]
+
+    empty_planner = _FinalPlannerStub()
+    empty_capture = _FinalCaptureStub(tmp_path)
+    empty_processor = _final_processor(tmp_path, empty_planner, empty_capture, monkeypatch)
+
+    empty_report = empty_processor.run(
+        (),
+        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        source_survey_report=tmp_path / "survey_report.json",
+    )
+
+    assert empty_report["status"] == "success"
+    assert empty_report["candidate_count"] == 0
+    assert empty_report["stable_objects"] == []
+    assert empty_report["candidate_count_evaluation"]["success"] is False
+    assert empty_report["candidate_count_evaluation"]["missing_count"] == 5
+    assert empty_planner.calls == []
+    assert empty_capture.closed is True
+
+    worker_failure = make_final_failure_report(
+        failure_stage="final_worker_process",
+        message="worker failed",
+        source_survey_report=tmp_path / "survey_report.json",
+        final_config_path=FINAL_CONFIG,
+        expected_object_count=5,
+        candidate_count=3,
+    )
+    assert set(worker_failure) == set(empty_report)
+    assert worker_failure["processed_candidate_count"] == 0
+    assert worker_failure["unprocessed_candidate_count"] == 3
+    assert worker_failure["candidate_count_evaluation"]["success"] is False
+    assert worker_failure["candidate_count_evaluation"]["completed"] is False
+
+    no_detection_capture = _FinalCaptureStub(tmp_path)
+    no_detection = _final_processor(
+        tmp_path,
+        _FinalPlannerStub(),
+        no_detection_capture,
+        monkeypatch,
+        detector=_FinalDetectorStub(detections=()),
+    ).run(
+        (_final_candidate(0),),
+        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        source_survey_report=tmp_path / "survey_report.json",
+    )
+    assert no_detection["results"][0]["failure_stage"] == "yolo_no_detection"
+
+    no_depth_capture = _FinalCaptureStub(tmp_path, depth_m=float("nan"))
+    no_depth = _final_processor(
+        tmp_path,
+        _FinalPlannerStub(),
+        no_depth_capture,
+        monkeypatch,
+    ).run(
+        (_final_candidate(0),),
+        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        source_survey_report=tmp_path / "survey_report.json",
+    )
+    assert no_depth["results"][0]["failure_stage"] == "depth_localization"
+
+    def fail_annotation(*_args: object, **_kwargs: object) -> Path:
+        raise RuntimeError("annotation unavailable")
+
+    artifact_processor = _final_processor(
+        tmp_path,
+        _FinalPlannerStub(),
+        _FinalCaptureStub(tmp_path),
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        "task1.final.processing.render_detection_overlay",
+        fail_annotation,
+    )
+    artifact_report = artifact_processor.run(
+        (_final_candidate(0),),
+        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        source_survey_report=tmp_path / "survey_report.json",
+    )
+    artifact_result = artifact_report["results"][0]
+    assert artifact_report["status"] == "success"
+    assert artifact_report["successful_candidate_count"] == 1
+    assert artifact_report["artifact_generation_failure_count"] == 1
+    assert artifact_result["status"] == "success"
+    assert artifact_result["artifact_status"] == "failed"
+    assert artifact_result["artifact_failures"][0]["failure_stage"] == "detection_annotation"
+    assert artifact_report["stable_objects"][0]["annotated_rgb_path"] is None
 
 
 def test_rgbd_localization_estimates_bottom_position() -> None:
@@ -192,10 +755,10 @@ def test_yolo_adapter_and_overlay_preserve_detection_output(tmp_path: Path) -> N
     }
     calls = []
     config = load_survey_detection_config(SURVEY_CONFIG, repo_root=REPO_ROOT)
-    detector = YoloSurveyDetector(config, inference=lambda **kwargs: calls.append(kwargs) or payload)
+    detector = YoloDetector(config, inference=lambda **kwargs: calls.append(kwargs) or payload)
 
     detections = detector.detect(_rgbd_frame()).detections
-    empty = YoloSurveyDetector(config, inference=lambda **_: {"detections": []})
+    empty = YoloDetector(config, inference=lambda **_: {"detections": []})
 
     assert [(item.class_name, item.confidence) for item in detections] == [
         ("marker", 0.8),
@@ -578,6 +1141,218 @@ def _rgbd_frame(*, view_id: str = "survey_0000") -> RgbdFrame:
 class _DetectorStub:
     def source_metadata(self) -> dict[str, object]:
         return {"name": "stub", "production": False}
+
+
+class _FinalPlannerStub:
+    planner_name = "final_planner_stub"
+
+    def __init__(
+        self,
+        *,
+        fail_candidates: set[str] | None = None,
+        ik_offsets: dict[str, float] | None = None,
+    ) -> None:
+        self.fail_candidates = fail_candidates or set()
+        self.ik_offsets = ik_offsets or {}
+        self.calls: list[tuple[tuple[object, ...], tuple[float, ...]]] = []
+        self.ik_calls: list[tuple[tuple[object, ...], tuple[float, ...]]] = []
+
+    def find_collision_free_ik(self, targets, start_joint_positions):
+        self.ik_calls.append((targets, start_joint_positions))
+        solutions = []
+        for target in targets:
+            if not target.target_id.endswith("roll00_distance00"):
+                continue
+            candidate_id = target.target_id.removeprefix("final_").removesuffix(
+                "_roll00_distance00"
+            )
+            index = int(candidate_id.rsplit("_", 1)[1])
+            offset = self.ik_offsets.get(candidate_id, index * 0.01)
+            solutions.append(
+                CameraTargetIKSolution(
+                    target.target_id,
+                    tuple(value + offset for value in start_joint_positions),
+                )
+            )
+        return tuple(solutions)
+
+    def plan_camera_pose_route(self, targets, start_joint_positions):
+        self.calls.append((targets, start_joint_positions))
+        target_id = targets[0].target_id
+        if any(candidate_id in target_id for candidate_id in self.fail_candidates):
+            segment = CameraRouteSegment(
+                target_id=target_id,
+                success=False,
+                message="planned failure",
+                planning_time_s=0.01,
+                waypoint_count=0,
+            )
+            return CameraRoutePlan(
+                success=False,
+                planner_name=self.planner_name,
+                joint_names=JOINT_NAMES,
+                segments=(segment,),
+                failed_target_id=target_id,
+                message="planned failure",
+            )
+        terminal = tuple(value + 0.01 for value in start_joint_positions)
+        segment = CameraRouteSegment(
+            target_id=target_id,
+            success=True,
+            message="planned",
+            planning_time_s=0.01,
+            waypoint_count=2,
+            trajectory=(start_joint_positions, terminal),
+            target_position_error_m=0.0,
+            target_orientation_error_rad=0.0,
+        )
+        return CameraRoutePlan(
+            success=True,
+            planner_name=self.planner_name,
+            joint_names=JOINT_NAMES,
+            segments=(segment,),
+            failed_target_id=None,
+            message="planned",
+            reached_target_ids=(target_id,),
+        )
+
+
+class _FinalCaptureStub:
+    def __init__(self, root: Path, *, depth_m: float = 0.8) -> None:
+        self.root = root
+        self.depth_m = depth_m
+        self.captured: list[str] = []
+        self.closed = False
+
+    def capture(self, candidate_id: str, joint_positions: tuple[float, ...]) -> FinalCaptureResult:
+        del joint_positions
+        self.captured.append(candidate_id)
+        index = int(candidate_id.rsplit("_", 1)[1]) - 1
+        center_x = 0.30 + index * 0.10
+        center_y = 0.40
+        path = self.root / "final" / "images" / f"{candidate_id}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"test image placeholder")
+        frame = RgbdFrame(
+            view_id=f"final_{candidate_id}",
+            depth_m=np.full((100, 100), self.depth_m, dtype=float),
+            intrinsics=CameraIntrinsics(
+                width=100,
+                height=100,
+                fx=100.0,
+                fy=100.0,
+                cx=50.0,
+                cy=50.0,
+            ),
+            T_world_camera_optical=(
+                (1.0, 0.0, 0.0, center_x),
+                (0.0, 1.0, 0.0, center_y),
+                (0.0, 0.0, -1.0, 1.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+            ground_z_m=0.0,
+            rgb_path=str(path),
+        )
+        return FinalCaptureResult(frame=frame, rgb_path=path)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FinalDetectorStub:
+    def __init__(self, *, detections: tuple[Detection2D, ...] | None = None) -> None:
+        self.detections = detections
+
+    def detect(self, frame: RgbdFrame) -> DetectionBatch:
+        detections = self.detections
+        if detections is None:
+            detections = (
+                Detection2D(
+                    detection_id=f"{frame.view_id}:det_0000",
+                    bbox_xyxy=(40.0, 40.0, 60.0, 60.0),
+                    confidence=0.9,
+                    class_name="marker",
+                    display_name="marker",
+                ),
+            )
+        return DetectionBatch(
+            detections=detections,
+            source_report={"view_id": frame.view_id, "detection_count": len(detections)},
+        )
+
+    def source_metadata(self) -> dict[str, object]:
+        return {"name": "final_detector_stub", "production": False}
+
+
+def _final_candidate(index: int) -> FinalCandidate:
+    x = 0.30 + index * 0.10
+    y = 0.40
+    return FinalCandidate(
+        candidate_id=f"candidate_{index + 1:03d}",
+        bottom_position_world=(x, y, 0.0),
+        footprint_polygon_xy=(
+            (x - 0.02, y - 0.02),
+            (x + 0.02, y - 0.02),
+            (x + 0.02, y + 0.02),
+            (x - 0.02, y + 0.02),
+        ),
+    )
+
+
+def _final_processor(
+    tmp_path: Path,
+    planner: _FinalPlannerStub,
+    capture: _FinalCaptureStub,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    detector: _FinalDetectorStub | None = None,
+) -> FinalProcessor:
+    monkeypatch.setattr(
+        "task1.final.processing.render_detection_overlay",
+        lambda _source, _detections, output: output,
+    )
+    base_config = load_final_config(FINAL_CONFIG, repo_root=REPO_ROOT)
+    config = replace(
+        base_config,
+        camera=FinalCameraPolicy(
+            image_width=100,
+            image_height=100,
+            vertical_fov_deg=45.0,
+            coverage_margin_m=0.04,
+            aim_height_above_bottom_m=0.03,
+            secondary_standoff_minimum_distance_m=0.0,
+            standoff_distance_scales=(1.0,),
+            opening_position_world=(0.40, 0.63, 0.52),
+            optical_roll_degrees=(0.0, 45.0),
+        ),
+        localization=CandidateLocalizationPolicy(sample_stride_px=1),
+        association=FinalAssociationPolicy(maximum_xy_distance_m=0.10),
+        evaluation=replace(base_config.evaluation, expected_object_count=5),
+    )
+    return FinalProcessor(
+        planner=planner,
+        capture=capture,
+        detector=detector or _FinalDetectorStub(),
+        config=config,
+        world_pose_base=load_world_pose_in_base(REPO_ROOT / "examples/mujoco/gen3_with_tank.xml"),
+        output_dir=tmp_path / "final",
+    )
+
+
+def _quaternion_rotate(
+    quaternion: tuple[float, float, float, float],
+    vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    w, x, y, z = quaternion
+    rotation = np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ]
+    )
+    result = rotation @ np.asarray(vector)
+    return tuple(float(item) for item in result)
 
 
 def _support_evaluation(*, sufficient: bool) -> dict[str, object]:

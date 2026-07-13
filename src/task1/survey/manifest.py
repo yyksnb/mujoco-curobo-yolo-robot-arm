@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from task1.survey.localization import (
+from task1.vision import (
     CameraIntrinsics,
     CandidateLocalizationPolicy,
     RgbdFrame,
@@ -15,7 +15,7 @@ from task1.survey.localization import (
     localize_detection,
 )
 from task1.survey.route import SURVEY_VIEWS
-from task1.survey.detection import SurveyDetector, render_detection_overlay
+from task1.detection import Detector, render_detection_overlay
 
 
 CAPTURE_SCHEMA = "task1_rgbd_survey_capture"
@@ -23,7 +23,7 @@ CAPTURE_SCHEMA = "task1_rgbd_survey_capture"
 
 def localize_capture_manifest(
     manifest_path: Path,
-    detector: SurveyDetector,
+    detector: Detector,
     annotated_image_dir: Path,
     policy: CandidateLocalizationPolicy = CandidateLocalizationPolicy(),
 ) -> dict[str, Any]:

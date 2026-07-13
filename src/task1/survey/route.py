@@ -16,8 +16,11 @@ from robot_arm_pipeline.planning.curobo_camera_route import (
     CameraRoutePlan,
     CameraRouteTarget,
 )
+from task1.scene import RigidPose, compose
+
+
 ROUTE_SCHEMA = "task1_survey_route_plan"
-DEFAULT_SURVEY_ROUTE_PLAN_PATH = Path("configs/task1/survey_route_plan.json")
+DEFAULT_SURVEY_ROUTE_PLAN_PATH = Path("configs/task1/survey/route_plan.json")
 DEFAULT_MUJOCO_SCENE_PATH = Path("examples/mujoco/gen3_with_tank.xml")
 _CONTINUITY_TOLERANCE = 1e-5
 JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7")
@@ -294,37 +297,6 @@ def _positions_close(left: tuple[float, ...], right: tuple[float, ...]) -> bool:
     )
 
 
-@dataclass(frozen=True)
-class RigidPose:
-    position: tuple[float, float, float]
-    quaternion_wxyz: tuple[float, float, float, float]
-
-    def __post_init__(self) -> None:
-        if not all(math.isfinite(value) for value in self.position):
-            raise ValueError("pose position must be finite")
-        norm = math.sqrt(sum(value * value for value in self.quaternion_wxyz))
-        if not math.isclose(norm, 1.0, abs_tol=1e-6):
-            raise ValueError("pose quaternion must be normalized")
-
-
-def load_tank_pose_in_base(scene_path: Path) -> RigidPose:
-    root = ElementTree.parse(scene_path).getroot()
-    worldbody = root.find("worldbody")
-    if worldbody is None:
-        raise ValueError(f"MuJoCo scene has no worldbody: {scene_path}")
-    compiler = root.find("compiler")
-    angle_unit = compiler.get("angle", "degree") if compiler is not None else "degree"
-    euler_sequence = compiler.get("eulerseq", "xyz") if compiler is not None else "xyz"
-    if angle_unit not in {"degree", "radian"} or euler_sequence != "xyz":
-        raise ValueError("survey scene transform parser requires xyz Euler angles in degrees or radians")
-    base = _named_direct_body(worldbody, "gen3_mount")
-    tank = _named_direct_body(worldbody, "tank")
-    return compose(
-        inverse(_body_pose(base, angle_unit=angle_unit)),
-        _body_pose(tank, angle_unit=angle_unit),
-    )
-
-
 def make_survey_route_targets(tank_pose_base: RigidPose) -> tuple[CameraRouteTarget, ...]:
     targets = []
     for view in SURVEY_VIEWS:
@@ -340,99 +312,3 @@ def make_survey_route_targets(tank_pose_base: RigidPose) -> tuple[CameraRouteTar
             )
         )
     return tuple(targets)
-
-
-def compose(parent_from_middle: RigidPose, middle_from_child: RigidPose) -> RigidPose:
-    rotated = _rotate(parent_from_middle.quaternion_wxyz, middle_from_child.position)
-    position = tuple(
-        parent_from_middle.position[index] + rotated[index] for index in range(3)
-    )
-    quaternion = _quaternion_multiply(
-        parent_from_middle.quaternion_wxyz,
-        middle_from_child.quaternion_wxyz,
-    )
-    return RigidPose(position, _normalized_quaternion(quaternion))
-
-
-def inverse(pose: RigidPose) -> RigidPose:
-    w, x, y, z = pose.quaternion_wxyz
-    quaternion = (w, -x, -y, -z)
-    negative_position = tuple(-value for value in pose.position)
-    return RigidPose(_rotate(quaternion, negative_position), quaternion)
-
-
-def _named_direct_body(worldbody: ElementTree.Element, name: str) -> ElementTree.Element:
-    matches = [body for body in worldbody.findall("body") if body.get("name") == name]
-    if len(matches) != 1:
-        raise ValueError(f"MuJoCo scene must contain one direct world body named {name!r}")
-    return matches[0]
-
-
-def _body_pose(body: ElementTree.Element, *, angle_unit: str) -> RigidPose:
-    position = _float_tuple(body.get("pos", "0 0 0"), 3, f"{body.get('name')}.pos")
-    unsupported = {name for name in ("axisangle", "xyaxes", "zaxis") if body.get(name) is not None}
-    if unsupported:
-        raise ValueError(
-            f"survey scene body {body.get('name')!r} uses unsupported orientation {sorted(unsupported)}"
-        )
-    if body.get("quat") is not None:
-        quaternion = _float_tuple(body.get("quat", ""), 4, f"{body.get('name')}.quat")
-    else:
-        euler = _float_tuple(body.get("euler", "0 0 0"), 3, f"{body.get('name')}.euler")
-        quaternion = _euler_xyz_to_quaternion(euler, degrees=angle_unit == "degree")
-    return RigidPose(position, _normalized_quaternion(quaternion))
-
-
-def _float_tuple(value: str, length: int, field: str) -> tuple[float, ...]:
-    try:
-        parsed = tuple(float(item) for item in value.split())
-    except ValueError as exc:
-        raise ValueError(f"MuJoCo {field} must contain numbers") from exc
-    if len(parsed) != length or not all(math.isfinite(item) for item in parsed):
-        raise ValueError(f"MuJoCo {field} must contain {length} finite numbers")
-    return parsed
-
-
-def _euler_xyz_to_quaternion(
-    euler: tuple[float, float, float], *, degrees: bool
-) -> tuple[float, float, float, float]:
-    angles = tuple((math.radians(value) if degrees else value) / 2.0 for value in euler)
-    qx = (math.cos(angles[0]), math.sin(angles[0]), 0.0, 0.0)
-    qy = (math.cos(angles[1]), 0.0, math.sin(angles[1]), 0.0)
-    qz = (math.cos(angles[2]), 0.0, 0.0, math.sin(angles[2]))
-    return _normalized_quaternion(_quaternion_multiply(_quaternion_multiply(qx, qy), qz))
-
-
-def _quaternion_multiply(
-    left: tuple[float, float, float, float],
-    right: tuple[float, float, float, float],
-) -> tuple[float, float, float, float]:
-    w1, x1, y1, z1 = left
-    w2, x2, y2, z2 = right
-    return (
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-    )
-
-
-def _rotate(
-    quaternion: tuple[float, float, float, float],
-    vector: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    rotated = _quaternion_multiply(
-        _quaternion_multiply(quaternion, (0.0, *vector)),
-        (quaternion[0], -quaternion[1], -quaternion[2], -quaternion[3]),
-    )
-    return rotated[1], rotated[2], rotated[3]
-
-
-def _normalized_quaternion(
-    quaternion: tuple[float, float, float, float],
-) -> tuple[float, float, float, float]:
-    norm = math.sqrt(sum(value * value for value in quaternion))
-    if norm <= 0.0 or not math.isfinite(norm):
-        raise ValueError("pose quaternion must be finite and non-zero")
-    normalized = tuple(value / norm for value in quaternion)
-    return normalized if normalized[0] >= 0.0 else tuple(-value for value in normalized)

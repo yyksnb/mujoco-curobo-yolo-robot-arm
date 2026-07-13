@@ -165,6 +165,70 @@ class CameraRouteTarget:
 
 
 @dataclass(frozen=True)
+class CameraRoutePlanningPolicy:
+    max_attempts: int
+    enable_graph_attempt: int
+    num_ik_seeds: int
+    num_trajopt_seeds: int
+    random_seed: int
+    position_tolerance: float
+    orientation_tolerance: float
+
+    def __post_init__(self) -> None:
+        _require_int(self.max_attempts, "camera route max_attempts", minimum=1)
+        _require_int(
+            self.enable_graph_attempt,
+            "camera route enable_graph_attempt",
+        )
+        _require_int(self.num_ik_seeds, "camera route num_ik_seeds", minimum=1)
+        _require_int(
+            self.num_trajopt_seeds,
+            "camera route num_trajopt_seeds",
+            minimum=1,
+        )
+        _require_int(self.random_seed, "camera route random_seed")
+        object.__setattr__(
+            self,
+            "position_tolerance",
+            _require_float(
+                self.position_tolerance,
+                "camera route position_tolerance",
+                minimum=0.0,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "orientation_tolerance",
+            _require_float(
+                self.orientation_tolerance,
+                "camera route orientation_tolerance",
+                minimum=0.0,
+            ),
+        )
+        if self.position_tolerance == 0.0 or self.orientation_tolerance == 0.0:
+            raise ValueError("camera route planning tolerances must be positive")
+
+
+@dataclass(frozen=True)
+class CameraTargetIKSolution:
+    target_id: str
+    joint_positions: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        _require_string(self.target_id, "camera target IK target_id")
+        if not self.joint_positions:
+            raise ValueError("camera target IK joint_positions must not be empty")
+        object.__setattr__(
+            self,
+            "joint_positions",
+            tuple(
+                _require_float(value, f"camera target IK joint_positions[{index}]")
+                for index, value in enumerate(self.joint_positions)
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class CameraRouteSegment:
     target_id: str
     success: bool
@@ -353,6 +417,12 @@ class CameraRoutePlanner(Protocol):
         start_joint_positions: tuple[float, ...],
     ) -> CameraRoutePlan: ...
 
+    def find_collision_free_ik(
+        self,
+        targets: tuple[CameraRouteTarget, ...],
+        start_joint_positions: tuple[float, ...],
+    ) -> tuple[CameraTargetIKSolution, ...]: ...
+
 
 def plan_camera_route(
     planner: CameraRoutePlanner,
@@ -387,12 +457,27 @@ class CuroboCameraRoutePlanner:
         robot_config_path: Path = DEFAULT_ROBOT_CONFIG,
         world_config_path: Path = DEFAULT_WORLD_CONFIG,
         graph_config_path: Path = DEFAULT_GRAPH_CONFIG,
+        ik_batch_size: int | None = None,
+        ik_solutions_per_target: int | None = None,
+        planning_policy: CameraRoutePlanningPolicy | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.robot_config_path = self._resolve(robot_config_path)
         self.world_config_path = self._resolve(world_config_path)
         self.graph_config_path = self._resolve(graph_config_path)
         self._planner: Any | None = None
+        self._ik_solver: Any | None = None
+        if (ik_batch_size is None) != (ik_solutions_per_target is None):
+            raise ValueError(
+                "camera route batch IK size and solution count must be configured together"
+            )
+        if ik_batch_size is not None and ik_batch_size <= 0:
+            raise ValueError("camera route batch IK size must be positive")
+        if ik_solutions_per_target is not None and ik_solutions_per_target <= 0:
+            raise ValueError("camera route IK solutions per target must be positive")
+        self._ik_batch_size = ik_batch_size
+        self._ik_solutions_per_target = ik_solutions_per_target
+        self._planning_policy = planning_policy
 
     def plan_camera_pose_route(
         self,
@@ -508,6 +593,73 @@ class CuroboCameraRoutePlanner:
             message=f"cuRobo planned and validated all {len(targets)} camera targets.",
             reached_target_ids=tuple(target.target_id for target in targets),
         )
+
+    def find_collision_free_ik(
+        self,
+        targets: tuple[CameraRouteTarget, ...],
+        start_joint_positions: tuple[float, ...],
+    ) -> tuple[CameraTargetIKSolution, ...]:
+        """Solve camera orientations in collision-aware batches without trajectory optimization."""
+        if not targets:
+            return ()
+        if self._ik_batch_size is None or self._ik_solutions_per_target is None:
+            raise RuntimeError("camera route batch IK was not configured for this planner")
+        if len(start_joint_positions) != len(GEN3_JOINT_NAMES):
+            raise ValueError("camera IK start state must contain all seven Gen3 joints")
+
+        planner = self._get_planner()
+        import torch
+        from curobo.types import GoalToolPose, JointState, Pose
+
+        solutions: list[CameraTargetIKSolution] = []
+        for offset in range(0, len(targets), self._ik_batch_size):
+            chunk = targets[offset : offset + self._ik_batch_size]
+            batch_size = len(chunk)
+            current = JointState.from_position(
+                torch.tensor(
+                    [start_joint_positions] * batch_size,
+                    device="cuda",
+                    dtype=torch.float32,
+                ),
+                joint_names=list(GEN3_JOINT_NAMES),
+            )
+            target_pose = Pose(
+                position=torch.tensor(
+                    [target.target_position for target in chunk],
+                    device="cuda",
+                    dtype=torch.float32,
+                ),
+                quaternion=torch.tensor(
+                    [target.target_quaternion_wxyz for target in chunk],
+                    device="cuda",
+                    dtype=torch.float32,
+                ),
+            )
+            goal = GoalToolPose.from_poses(
+                {planner.tool_frames[0]: target_pose},
+                ordered_tool_frames=planner.tool_frames,
+                num_goalset=1,
+            )
+            result = self._ik_solver.solve_pose(
+                goal,
+                current_state=current,
+                return_seeds=self._ik_solutions_per_target,
+            )
+            if result is None or result.success is None or result.solution is None:
+                continue
+            for target_index, target in enumerate(chunk):
+                for solution_index in range(self._ik_solutions_per_target):
+                    if not bool(result.success[target_index, solution_index].item()):
+                        continue
+                    position = result.solution[target_index, solution_index]
+                    solutions.append(
+                        CameraTargetIKSolution(
+                            target.target_id,
+                            tuple(float(value) for value in position.detach().cpu().tolist()),
+                        )
+                    )
+        return tuple(solutions)
+
     def _get_planner(self) -> Any:
         if self._planner is not None:
             return self._planner
@@ -533,14 +685,27 @@ class CuroboCameraRoutePlanner:
                 mesh_path if mesh_path.is_absolute() else self.repo_root / mesh_path
             )
         graph = yaml.safe_load(self.graph_config_path.read_text(encoding="utf-8"))
-        route_policy = graph.get("camera_route_policy", {})
-        self._max_attempts = int(route_policy.get("max_attempts", 0))
-        self._graph_attempt = int(route_policy.get("enable_graph_attempt", -1))
-        num_ik_seeds = int(route_policy.get("num_ik_seeds", 0))
-        num_trajopt_seeds = int(route_policy.get("num_trajopt_seeds", 0))
-        random_seed = int(route_policy.get("random_seed", -1))
-        self._position_tolerance_m = float(route_policy.get("position_tolerance_m", 0.0))
-        self._orientation_tolerance_rad = float(route_policy.get("orientation_tolerance_rad", 0.0))
+        if self._planning_policy is None:
+            route_policy = graph.get("camera_route_policy", {})
+            self._max_attempts = int(route_policy.get("max_attempts", 0))
+            self._graph_attempt = int(route_policy.get("enable_graph_attempt", -1))
+            num_ik_seeds = int(route_policy.get("num_ik_seeds", 0))
+            num_trajopt_seeds = int(route_policy.get("num_trajopt_seeds", 0))
+            random_seed = int(route_policy.get("random_seed", -1))
+            self._position_tolerance_m = float(
+                route_policy.get("position_tolerance_m", 0.0)
+            )
+            self._orientation_tolerance_rad = float(
+                route_policy.get("orientation_tolerance_rad", 0.0)
+            )
+        else:
+            self._max_attempts = self._planning_policy.max_attempts
+            self._graph_attempt = self._planning_policy.enable_graph_attempt
+            num_ik_seeds = self._planning_policy.num_ik_seeds
+            num_trajopt_seeds = self._planning_policy.num_trajopt_seeds
+            random_seed = self._planning_policy.random_seed
+            self._position_tolerance_m = self._planning_policy.position_tolerance
+            self._orientation_tolerance_rad = self._planning_policy.orientation_tolerance
         if (
             self._max_attempts <= 0
             or self._graph_attempt < 0
@@ -564,6 +729,28 @@ class CuroboCameraRoutePlanner:
             random_seed=random_seed,
         )
         self._planner = create_collision_filtered_motion_planner(config)
+        if self._ik_batch_size is not None and self._ik_solutions_per_target is not None:
+            if self._ik_solutions_per_target > num_ik_seeds:
+                raise ValueError(
+                    "camera route IK solutions per target cannot exceed num_ik_seeds"
+                )
+            from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+
+            ik_config = InverseKinematicsCfg.create(
+                robot=robot,
+                scene_model=world,
+                num_seeds=num_ik_seeds,
+                position_tolerance=self._position_tolerance_m,
+                orientation_tolerance=self._orientation_tolerance_rad,
+                use_cuda_graph=True,
+                random_seed=random_seed,
+                max_batch_size=self._ik_batch_size,
+                multi_env=False,
+                max_goalset=1,
+            )
+            self._ik_solver = InverseKinematics(
+                ik_config, self._planner.scene_collision_checker
+            )
         return self._planner
 
     def _resolve(self, path: Path) -> Path:

@@ -1,0 +1,37 @@
+{
+  "schema": "task1_final_benchmark",
+  "development": [
+    43680, 90577, 89370, 92744, 67367, 18767, 62165, 26888, 24007, 64944,
+    92201, 82302, 41597, 79156, 90472, 70320, 21789, 84432, 90696, 63875,
+    28309, 13950
+  ],
+  "regression": [
+    {
+      "seed": 15716,
+      "failure_type": "near_neighbor_cross_object_association"
+    },
+    {
+      "seed": 93881,
+      "failure_type": "same_object_observation_split"
+    },
+    {
+      "seed": 27149,
+      "failure_type": "drill_bit_single_view_support"
+    },
+    {
+      "seed": 7095,
+      "failure_type": "drill_bit_single_view_support"
+    }
+  ],
+  "acceptance": [
+    19848, 39615, 20482, 17226, 31384, 41096, 36821, 76688, 27574, 49105,
+    38211, 74276, 94057, 16371, 22149, 60847, 7516, 16803, 94971, 67654,
+    27501, 74335, 97519, 38070, 64651
+  ],
+  "acceptance_policy": {
+    "isolated_from_survey_benchmark": true,
+    "run_once_after_freeze": true,
+    "generator": "python random.Random('task1-final-isolated-acceptance-v1').randrange(1, 100000)",
+    "forbid_post_acceptance_tuning": true
+  }
+}

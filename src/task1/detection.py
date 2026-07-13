@@ -10,18 +10,33 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
 from robot_arm_pipeline.perception import load_stage3_yolo_profile, run_ultralytics_yolo_inference
-from task1.survey.detection_config import SurveyDetectionConfig
-from task1.survey.localization import Detection2D, RgbdFrame
+from task1.vision import Detection2D, RgbdFrame
 
 
 @dataclass(frozen=True)
-class SurveyDetectionBatch:
+class DetectionBatch:
     detections: tuple[Detection2D, ...]
     source_report: dict[str, Any]
 
 
-class SurveyDetector(Protocol):
-    def detect(self, frame: RgbdFrame) -> SurveyDetectionBatch: ...
+@dataclass(frozen=True)
+class YoloInferenceConfig:
+    image_size: int
+    confidence_threshold: float
+    iou_threshold: float
+    class_agnostic_nms: bool
+    device: str | None
+    max_detections: int | None
+
+
+class DetectionConfig(Protocol):
+    config_path: Path
+    profile_path: Path
+    inference: YoloInferenceConfig
+
+
+class Detector(Protocol):
+    def detect(self, frame: RgbdFrame) -> DetectionBatch: ...
 
     def source_metadata(self) -> dict[str, Any]: ...
 
@@ -29,17 +44,17 @@ class SurveyDetector(Protocol):
 YoloInference = Callable[..., dict[str, Any]]
 
 
-class YoloSurveyDetector:
+class YoloDetector:
     def __init__(
         self,
-        config: SurveyDetectionConfig,
+        config: DetectionConfig,
         inference: YoloInference = run_ultralytics_yolo_inference,
     ) -> None:
         self.config = config
         self.profile = load_stage3_yolo_profile(config.profile_path)
         self.inference = inference
 
-    def detect(self, frame: RgbdFrame) -> SurveyDetectionBatch:
+    def detect(self, frame: RgbdFrame) -> DetectionBatch:
         if frame.rgb_path is None:
             raise ValueError(f"{frame.view_id}: RGB image is required for YOLO inference")
         payload = self.inference(
@@ -88,7 +103,7 @@ class YoloSurveyDetector:
                 }
             )
 
-        return SurveyDetectionBatch(
+        return DetectionBatch(
             detections=tuple(detections),
             source_report={
                 "view_id": frame.view_id,
@@ -103,7 +118,7 @@ class YoloSurveyDetector:
             "name": "repository_ultralytics_yolo",
             "production": True,
             "profile": self.profile.profile_name,
-            "survey_config_path": str(self.config.config_path),
+            "detection_config_path": str(self.config.config_path),
             "profile_path": str(self.config.profile_path),
             "model_path": str(self.profile.model_path),
             "inference": {

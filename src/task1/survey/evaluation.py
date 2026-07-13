@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from task1.survey.localization import Detection2D, SurveyObservation
-from task1.survey.detection_config import YoloEvaluationPolicy
+from task1.survey.config import YoloEvaluationPolicy
+from task1.vision import Detection2D, SurveyObservation
 
 
 @dataclass(frozen=True)
