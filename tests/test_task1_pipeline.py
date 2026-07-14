@@ -307,6 +307,94 @@ def test_final_production_capture_does_not_render_evaluation_segmentation(
     capture.close()
 
 
+def test_final_segmentation_disables_multisampling_and_interprets_geom_ids(
+    tmp_path: Path,
+) -> None:
+    created_renderers: list[object] = []
+
+    class FakeRenderer:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeMujoco:
+        class mjtObj:
+            mjOBJ_BODY = 1
+            mjOBJ_GEOM = 5
+
+        @staticmethod
+        def Renderer(model: object, height: int, width: int) -> object:
+            assert model.vis.quality.offsamples == 0
+            assert (height, width) == (5, 6)
+            renderer = FakeRenderer()
+            created_renderers.append(renderer)
+            return renderer
+
+        @staticmethod
+        def mj_id2name(
+            _model: object,
+            _object_type: object,
+            object_id: int,
+        ) -> str | None:
+            return {1: "target_marker", 2: "tank"}.get(object_id)
+
+    class FakeModel:
+        class vis:
+            class quality:
+                offsamples = 4
+
+        ngeom = 3
+        geom_bodyid = np.asarray([1, 2, 1], dtype=int)
+        body_parentid = np.asarray([0, 0, 0], dtype=int)
+
+    capture = MujocoFinalCapture(
+        repo_root=REPO_ROOT,
+        layout_path=tmp_path / "unused_layout.json",
+        output_dir=tmp_path / "final",
+        image_width=6,
+        image_height=5,
+        camera_name="wrist",
+        model_path=tmp_path / "unused_model.xml",
+        ground_z_m=0.0,
+    )
+    capture._mujoco = FakeMujoco()
+    capture._model = FakeModel()
+    capture._data = object()
+    production_renderer = FakeRenderer()
+    capture._renderer = production_renderer
+    capture._selected_objects = {
+        "target_marker": {"class_name": "marker"},
+    }
+
+    capture._prepare_evaluation_renderer()
+
+    assert production_renderer.closed is True
+    assert capture._model.vis.quality.offsamples == 0
+    assert capture._renderer is created_renderers[0]
+
+    segmentation = np.full((5, 6, 2), -1, dtype=int)
+    segmentation[1, 1] = (0, FakeMujoco.mjtObj.mjOBJ_GEOM)
+    segmentation[1, 2] = (0, FakeMujoco.mjtObj.mjOBJ_GEOM)
+    segmentation[3, 3] = (2, FakeMujoco.mjtObj.mjOBJ_GEOM)
+    segmentation[3, 4] = (2, FakeMujoco.mjtObj.mjOBJ_GEOM)
+    segmentation[0, 0] = (0, FakeMujoco.mjtObj.mjOBJ_BODY)
+    segmentation[4, 5] = (1, FakeMujoco.mjtObj.mjOBJ_GEOM)
+
+    boxes = capture._ground_truth_boxes(segmentation)
+
+    assert boxes == (
+        FinalSimulationGroundTruth(
+            object_id="target_marker",
+            class_name="marker",
+            bbox_xyxy=(1.0, 1.0, 5.0, 4.0),
+            visible_pixel_count=4,
+            touches_image_border=False,
+        ),
+    )
+
+
 def test_final_simulation_evaluation_distinguishes_parameters_and_internal_issues(
     tmp_path: Path,
 ) -> None:

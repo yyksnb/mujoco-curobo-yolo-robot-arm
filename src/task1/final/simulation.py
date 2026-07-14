@@ -116,6 +116,7 @@ class MujocoFinalCapture:
         traces = []
         try:
             self._load()
+            self._prepare_evaluation_renderer()
             mujoco, model, data, renderer = self._runtime()
             for candidate_id, joint_positions in self._captured_joint_positions:
                 data.qpos[: len(joint_positions)] = joint_positions
@@ -149,6 +150,20 @@ class MujocoFinalCapture:
         finally:
             self.close()
         return tuple(traces)
+
+    def _prepare_evaluation_renderer(self) -> None:
+        mujoco, model, _data, renderer = self._runtime()
+        renderer.close()
+        self._renderer = None
+
+        # MuJoCo encodes segmentation IDs as colors. Offscreen multisampling
+        # blends those colors at edges and can decode them as unrelated geom IDs.
+        model.vis.quality.offsamples = 0
+        self._renderer = mujoco.Renderer(
+            model,
+            self.image_height,
+            self.image_width,
+        )
 
     def close(self) -> None:
         if self._renderer is not None:
@@ -198,13 +213,26 @@ class MujocoFinalCapture:
         mujoco, model, _data, _renderer = self._runtime()
         if segmentation.shape != (self.image_height, self.image_width, 2):
             raise ValueError("MuJoCo Final segmentation has an unexpected shape")
-        geom_ids = segmentation[:, :, 0]
-        boxes = []
-        for geom_id in sorted(int(value) for value in np.unique(geom_ids) if int(value) >= 0):
+        object_ids = segmentation[:, :, 0]
+        object_types = segmentation[:, :, 1]
+        geom_type = int(mujoco.mjtObj.mjOBJ_GEOM)
+        masks: dict[str, np.ndarray] = {}
+        for value in np.unique(object_ids[object_types == geom_type]):
+            geom_id = int(value)
+            if geom_id < 0 or geom_id >= model.ngeom:
+                raise ValueError(
+                    f"MuJoCo Final segmentation returned invalid geom id: {geom_id}"
+                )
             object_id = self._target_body_for_geom(geom_id)
-            if object_id is None:
+            if object_id is None or object_id not in self._selected_objects:
                 continue
-            mask = geom_ids == geom_id
+            geom_mask = (object_types == geom_type) & (object_ids == geom_id)
+            masks[object_id] = (
+                geom_mask if object_id not in masks else masks[object_id] | geom_mask
+            )
+
+        boxes: list[FinalSimulationGroundTruth] = []
+        for object_id, mask in sorted(masks.items()):
             ys, xs = np.nonzero(mask)
             if len(xs) == 0:
                 continue
