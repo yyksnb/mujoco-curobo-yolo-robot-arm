@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
-from dataclasses import replace
+from dataclasses import astuple, replace
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +40,12 @@ from task1.scene import (
     polygon_within_bounds,
 )
 from task1.pipeline import PipelineOptions, PipelineStageEvent, Task1Pipeline
+from task1.replay import (
+    FINAL_GLOBAL_VIEW,
+    SURVEY_GLOBAL_VIEW,
+    find_latest_task1_run,
+    load_task1_replay_plan,
+)
 from task1.final.simulation import (
     FinalSimulationGroundTruth,
     FinalSimulationTrace,
@@ -102,6 +108,54 @@ def test_pipeline_reports_stage_status_and_elapsed_time(tmp_path: Path) -> None:
     assert events[0].elapsed_s is None
     assert events[1].elapsed_s is not None
     assert events[1].elapsed_s >= 0.0
+
+
+def test_replay_uses_recorded_routes_and_final_processing_order(tmp_path: Path) -> None:
+    older = tmp_path / "20260714T000000Z_seed1"
+    for relative in (
+        "layout/target_object_poses.json",
+        "survey/survey_report.json",
+        "final/final_report.json",
+    ):
+        path = older / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    run_dir = _write_replay_run(tmp_path, "20260714T000001Z_seed2")
+
+    assert find_latest_task1_run(tmp_path) == run_dir
+    plan = load_task1_replay_plan(run_dir, repo_root=REPO_ROOT)
+
+    assert [segment.phase for segment in plan.segments] == [
+        "survey",
+        "survey",
+        "final",
+        "final",
+    ]
+    assert [
+        segment.capture_id
+        for segment in plan.segments
+        if segment.phase == "final"
+    ] == ["candidate_002", "candidate_001"]
+    assert plan.segments[-1].status == "failed"
+    assert plan.segments[-1].failure_stage == "candidate_association"
+    assert astuple(SURVEY_GLOBAL_VIEW) == ((0.5, 0.5, 0.4), 1.0, 135.0, -30.0, 80.0)
+    assert astuple(FINAL_GLOBAL_VIEW) == ((0.5, 0.5, 0.15), 0.75, 135.0, -20.0, 75.0)
+
+    final_report_path = run_dir / "final" / "final_report.json"
+    final_report = json.loads(final_report_path.read_text(encoding="utf-8"))
+    final_report["results"].append({"candidate_id": "candidate_extra"})
+    final_report_path.write_text(json.dumps(final_report), encoding="utf-8")
+    with pytest.raises(ValueError, match="must match candidate_processing_order"):
+        load_task1_replay_plan(run_dir, repo_root=REPO_ROOT)
+    final_report["results"].pop()
+    final_report_path.write_text(json.dumps(final_report), encoding="utf-8")
+
+    first_final_path = run_dir / "final" / "route" / "candidate_002.json"
+    payload = json.loads(first_final_path.read_text(encoding="utf-8"))
+    payload["segments"][0]["trajectory"][0][0] += 0.2
+    first_final_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="discontinuous before final_candidate_002"):
+        load_task1_replay_plan(run_dir, repo_root=REPO_ROOT)
 
 
 def test_survey_contract_is_16_fixed_views_and_1080p() -> None:
@@ -1039,6 +1093,124 @@ def test_target_layout_uses_model_footprints_without_overlap() -> None:
         assert len(model_specs) >= 5
         assert all(spec.object_id.startswith("target_") for spec in model_specs)
         assert all(spec.footprint_area_m2 > 0.0 for spec in model_specs)
+
+
+def _write_replay_run(root: Path, name: str) -> Path:
+    run_dir = root / name
+    joint_names = ("joint_1", "joint_2")
+
+    def write(relative: str, payload: dict[str, object]) -> Path:
+        path = run_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def route_plan(
+        target_ids: tuple[str, ...], start: tuple[float, ...]
+    ) -> tuple[CameraRoutePlan, tuple[float, ...]]:
+        current = start
+        segments = []
+        for target_id in target_ids:
+            terminal = tuple(value + 0.01 for value in current)
+            segments.append(
+                CameraRouteSegment(
+                    target_id=target_id,
+                    success=True,
+                    message="planned",
+                    planning_time_s=0.01,
+                    waypoint_count=2,
+                    trajectory=(current, terminal),
+                    trajectory_time_s=(0.0, 0.1),
+                    target_position_error_m=0.0,
+                    target_orientation_error_rad=0.0,
+                )
+            )
+            current = terminal
+        return CameraRoutePlan(
+            success=True,
+            planner_name="test",
+            joint_names=joint_names,
+            segments=tuple(segments),
+            failed_target_id=None,
+            message="planned",
+            reached_target_ids=target_ids,
+        ), current
+
+    write(
+        "layout/target_object_poses.json",
+        {
+            "schema": "target_object_pose_layout",
+            "objects": [
+                {
+                    "object_id": "target_marker",
+                    "position": [0.4, 0.5, 0.0],
+                    "yaw_rad": 0.0,
+                }
+            ],
+        },
+    )
+    survey_ids = ("survey_0000", "survey_0001")
+    survey_plan, current = route_plan(survey_ids, (0.0, 0.0))
+    write(
+        "survey/curobo_route_plan.json",
+        {
+            "schema": "task1_survey_route_plan",
+            "input_fingerprint": {},
+            "route_plan": survey_plan.to_dict(),
+        },
+    )
+    write(
+        "survey/survey_report.json",
+        {
+            "schema": "task1_survey_report",
+            "stage": "survey",
+            "planner_artifact": "curobo_route_plan.json",
+            "views": [
+                {"view_id": view_id, "status": "success"}
+                for view_id in survey_ids
+            ],
+        },
+    )
+
+    results_by_id: dict[str, dict[str, object]] = {}
+    for candidate_id in ("candidate_002", "candidate_001"):
+        target_id = f"final_{candidate_id}"
+        plan, current = route_plan((target_id,), current)
+        write(f"final/route/{candidate_id}.json", plan.to_dict())
+        failed = candidate_id == "candidate_001"
+        results_by_id[candidate_id] = {
+            "candidate_id": candidate_id,
+            "status": "failed" if failed else "success",
+            "failure_stage": "candidate_association" if failed else None,
+            "planner_artifact": f"route/{candidate_id}.json",
+        }
+    results_by_id["candidate_003"] = {
+        "candidate_id": "candidate_003",
+        "status": "failed",
+        "failure_stage": "collision_free_ik",
+    }
+    write(
+        "final/final_report.json",
+        {
+            "schema": "task1_final_report",
+            "stage": "final",
+            "candidate_processing_order": [
+                "candidate_002",
+                "candidate_003",
+                "candidate_001",
+            ],
+            "results": [
+                results_by_id["candidate_001"],
+                results_by_id["candidate_002"],
+                results_by_id["candidate_003"],
+            ],
+            "simulation": {
+                "model_path": "examples/mujoco/gen3_with_tank.xml",
+                "camera_name": "gen3_wrist",
+            },
+        },
+    )
+    return run_dir.resolve()
 
 
 def _observation(

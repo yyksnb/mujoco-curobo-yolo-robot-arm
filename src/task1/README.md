@@ -6,6 +6,7 @@
 - `scene.py`、`detection.py`、`vision.py` 提供共享的坐标变换、YOLO 适配和 RGB-D 定位/融合接口。
 - `survey/` 负责固定路线、Survey 配置、采集和评估。
 - `final/processing.py`、`simulation.py`、`evaluation.py` 分别负责生产处理、MuJoCo 采集和评估。
+- `replay.py` 只读消费一次运行的 layout、报告和已执行 cuRobo 轨迹，在 MuJoCo GUI 中回放。
 - cuRobo camera-route planning 保持在 `robot_arm_pipeline.planning`。
 
 生产模块只消费正式输入。Final 只解析候选的 `candidate_id`、`bottom_position_world` 和
@@ -48,6 +49,23 @@ Final 处理 Survey 的全部候选，不要求输入数量恰好为 5。首个�
 artifact，生成失败不丢弃正式检测和位姿结果。Final 在 spawn 子进程中运行，隔离 MuJoCo/OpenGL、
 YOLO CUDA 和 cuRobo native runtime。
 
+## Replay
+
+Replay 不属于生产识别阶段，不重新运行 YOLO、深度定位或 cuRobo。它只读取 layout、Survey/Final
+报告和 `CameraRoutePlan` 正式字段，不依赖两个阶段的内部配置。Survey 完整轨迹按报告顺序回放；Final
+再按 `candidate_processing_order` 读取各结果顶层 `planner_artifact`，失败规划尝试和没有可执行轨迹的
+候选不会被补路。
+
+用户 CLI 只保留 `--run-dir` 和 `--continuous`。运行
+`python scripts/replay_task1_pipeline.py --run-dir <run_dir>`，单个 2:1 GUI 窗口并排显示两个 1:1 视角；
+右侧将初始 MuJoCo 相机画面和 16:9 框图按中心裁剪为 1:1，不叠加文字，原始图片 artifact 不变。
+框图缺失时只在左侧状态栏明确报告，不回退到未标注 RGB。
+
+Space 暂停或继续；F9 按记录轨迹播放到下一次拍照并停下，不跳过中间运动；F12 从头重置。默认逐拍
+暂停，传入 `--continuous` 后固定以 2 倍记录速度连续播放。运动画面按 `trajectory_time_s` 插值采样；
+渲染赶不上时跳过过期的显示采样，而不是延长轨迹或直接跳到终点。Replay 只读现有 artifact，不向运行
+目录写入 manifest 或新的业务报告。
+
 ## 评估边界
 
 Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并先原子落盘生产报告；仿真随后回放
@@ -59,8 +77,9 @@ Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并�
 
 - 正式设计：多视角 Survey 融合、开口连线斜拍、roll-aware 投影定距、批量碰撞 IK、多 standoff、
   逐候选重检测和定位。
-- 工程防御：schema/指纹校验、逐阶段失败、生产报告原子落盘、native runtime 与评估故障隔离。
-- Debug/评估：layout 真值、segmentation、真值 bbox、诊断深度和 benchmark 聚合。
+- 工程防御：schema/指纹校验、逐阶段失败、生产报告原子落盘、native runtime 与评估故障隔离；
+  Replay 框图缺失时显式显示不可用，不回退到未标注 RGB。
+- Debug/评估：layout 真值、segmentation、真值 bbox、诊断深度、benchmark 聚合和 artifact Replay。
 - 临时 workaround：无；当前没有仅为样例通过而引入或计划删除的生产逻辑。
 
 ## 未解决风险
