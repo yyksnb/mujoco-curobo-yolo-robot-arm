@@ -3,10 +3,11 @@ from __future__ import annotations
 import importlib.util
 import math
 import time
+from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 DEFAULT_ROBOT_CONFIG = Path("configs/curobo/gen3/robot.yml")
 DEFAULT_WORLD_CONFIG = Path("configs/curobo/gen3/world.yml")
@@ -14,6 +15,7 @@ DEFAULT_GRAPH_CONFIG = Path("configs/curobo/gen3/graph.yml")
 GEN3_JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7")
 DEFAULT_START_JOINT_POSITIONS = (0.0, 0.26179939, 3.14159265, -2.26892803, 0.0, 0.95993109, 1.57079633)
 CAMERA_ROUTE_PLAN_SCHEMA = "camera_route_plan"
+CameraRoutePlanningStrategy = Literal["direct_pose", "portal_continuation"]
 
 
 def filter_feasible_graph_goals(
@@ -173,6 +175,14 @@ class CameraRoutePlanningPolicy:
     random_seed: int
     position_tolerance: float
     orientation_tolerance: float
+    enable_portal_continuation: bool = False
+    portal_offset_m: float = 0.10
+    continuation_step_m: float = 0.005
+    continuation_edge_sample_count: int = 11
+    continuation_ik_solution_count: int = 8
+    continuation_finetune_attempts: int = 3
+    continuation_joint_tolerance_rad: float = 0.001
+    continuation_stop_velocity_tolerance_rad_s: float = 0.01
 
     def __post_init__(self) -> None:
         _require_int(self.max_attempts, "camera route max_attempts", minimum=1)
@@ -207,6 +217,65 @@ class CameraRoutePlanningPolicy:
         )
         if self.position_tolerance == 0.0 or self.orientation_tolerance == 0.0:
             raise ValueError("camera route planning tolerances must be positive")
+        if not isinstance(self.enable_portal_continuation, bool):
+            raise ValueError("camera route enable_portal_continuation must be a boolean")
+        object.__setattr__(
+            self,
+            "portal_offset_m",
+            _require_float(
+                self.portal_offset_m,
+                "camera route portal_offset_m",
+                minimum=0.0,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "continuation_step_m",
+            _require_float(
+                self.continuation_step_m,
+                "camera route continuation_step_m",
+                minimum=0.0,
+            ),
+        )
+        _require_int(
+            self.continuation_edge_sample_count,
+            "camera route continuation_edge_sample_count",
+            minimum=2,
+        )
+        _require_int(
+            self.continuation_ik_solution_count,
+            "camera route continuation_ik_solution_count",
+            minimum=1,
+        )
+        _require_int(
+            self.continuation_finetune_attempts,
+            "camera route continuation_finetune_attempts",
+            minimum=1,
+        )
+        object.__setattr__(
+            self,
+            "continuation_joint_tolerance_rad",
+            _require_float(
+                self.continuation_joint_tolerance_rad,
+                "camera route continuation_joint_tolerance_rad",
+                minimum=0.0,
+            ),
+        )
+        if self.portal_offset_m == 0.0 or self.continuation_step_m == 0.0:
+            raise ValueError("camera route portal continuation distances must be positive")
+        if self.continuation_joint_tolerance_rad == 0.0:
+            raise ValueError("camera route continuation joint tolerance must be positive")
+        object.__setattr__(
+            self,
+            "continuation_stop_velocity_tolerance_rad_s",
+            _require_float(
+                self.continuation_stop_velocity_tolerance_rad_s,
+                "camera route continuation_stop_velocity_tolerance_rad_s",
+                minimum=0.0,
+            ),
+        )
+        if self.continuation_stop_velocity_tolerance_rad_s == 0.0:
+            raise ValueError("camera route continuation stop velocity tolerance must be positive")
 
 
 @dataclass(frozen=True)
@@ -240,6 +309,8 @@ class CameraRouteSegment:
     trajectory_velocity: tuple[tuple[float, ...], ...] | None = None
     target_position_error_m: float | None = None
     target_orientation_error_rad: float | None = None
+    planning_strategy: str = "direct_pose"
+    portal_offset_m: float | None = None
 
     def __post_init__(self) -> None:
         _require_string(self.target_id, "camera route segment target_id")
@@ -280,6 +351,14 @@ class CameraRouteSegment:
         _require_optional_float(
             self.target_orientation_error_rad, "target_orientation_error_rad", minimum=0.0
         )
+        _require_string(self.planning_strategy, "camera route segment planning_strategy")
+        if self.planning_strategy not in {"direct_pose", "portal_continuation"}:
+            raise ValueError("camera route segment planning_strategy is unsupported")
+        _require_optional_float(self.portal_offset_m, "portal_offset_m", minimum=0.0)
+        if self.planning_strategy == "direct_pose" and self.portal_offset_m is not None:
+            raise ValueError("direct camera route segment must not contain portal_offset_m")
+        if self.planning_strategy == "portal_continuation" and self.portal_offset_m is None:
+            raise ValueError("portal camera route segment must contain portal_offset_m")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -299,20 +378,30 @@ class CameraRouteSegment:
             ),
             "target_position_error_m": self.target_position_error_m,
             "target_orientation_error_rad": self.target_orientation_error_rad,
+            "planning_strategy": self.planning_strategy,
+            "portal_offset_m": self.portal_offset_m,
         }
 
     @classmethod
     def from_dict(cls, payload: object) -> CameraRouteSegment:
         value = _require_mapping(payload, "camera route segment")
-        _require_keys(
-            value,
-            {
-                "target_id", "success", "message", "planning_time_s", "waypoint_count",
-                "trajectory", "trajectory_time_s", "trajectory_velocity",
-                "target_position_error_m", "target_orientation_error_rad",
-            },
-            "camera route segment",
-        )
+        required_fields = {
+            "target_id", "success", "message", "planning_time_s", "waypoint_count",
+            "trajectory", "trajectory_time_s", "trajectory_velocity",
+            "target_position_error_m", "target_orientation_error_rad",
+        }
+        optional_fields = {"planning_strategy", "portal_offset_m"}
+        missing = required_fields - value.keys()
+        unknown = value.keys() - required_fields - optional_fields
+        if missing or unknown:
+            details = []
+            if missing:
+                details.append(f"missing={sorted(missing)}")
+            if unknown:
+                details.append(f"unknown={sorted(unknown)}")
+            raise ValueError(
+                f"camera route segment has invalid fields: {', '.join(details)}"
+            )
         trajectory = _float_matrix(value["trajectory"], "trajectory")
         raw_time = value["trajectory_time_s"]
         raw_velocity = value["trajectory_velocity"]
@@ -327,6 +416,13 @@ class CameraRouteSegment:
             trajectory_velocity=None if raw_velocity is None else _float_matrix(raw_velocity, "trajectory_velocity"),
             target_position_error_m=_require_optional_float(value["target_position_error_m"], "target_position_error_m", minimum=0.0),
             target_orientation_error_rad=_require_optional_float(value["target_orientation_error_rad"], "target_orientation_error_rad", minimum=0.0),
+            planning_strategy=_require_string(
+                value.get("planning_strategy", "direct_pose"),
+                "planning_strategy",
+            ),
+            portal_offset_m=_require_optional_float(
+                value.get("portal_offset_m"), "portal_offset_m", minimum=0.0
+            ),
         )
 
 
@@ -415,6 +511,7 @@ class CameraRoutePlanner(Protocol):
         self,
         targets: tuple[CameraRouteTarget, ...],
         start_joint_positions: tuple[float, ...],
+        strategy: CameraRoutePlanningStrategy = "direct_pose",
     ) -> CameraRoutePlan: ...
 
     def find_collision_free_ik(
@@ -428,10 +525,29 @@ def plan_camera_route(
     planner: CameraRoutePlanner,
     targets: tuple[CameraRouteTarget, ...],
     start_joint_positions: tuple[float, ...] = DEFAULT_START_JOINT_POSITIONS,
+    *,
+    strategy: CameraRoutePlanningStrategy = "direct_pose",
 ) -> CameraRoutePlan:
     if not targets:
         raise ValueError("camera route requires at least one target")
-    return planner.plan_camera_pose_route(targets, start_joint_positions)
+    return planner.plan_camera_pose_route(
+        targets, start_joint_positions, strategy=strategy
+    )
+
+
+def offset_camera_target_along_local_z(
+    target: CameraRouteTarget, distance_m: float
+) -> CameraRouteTarget:
+    distance = _require_float(distance_m, "camera target offset distance", minimum=0.0)
+    local_z = _quaternion_local_z_axis(target.target_quaternion_wxyz)
+    return CameraRouteTarget(
+        target_id=target.target_id,
+        target_position=tuple(
+            position + distance * axis
+            for position, axis in zip(target.target_position, local_z)
+        ),
+        target_quaternion_wxyz=target.target_quaternion_wxyz,
+    )
 
 
 def _pose_errors(actual_pose: Any, target_pose: Any) -> tuple[float, float]:
@@ -445,6 +561,99 @@ def _pose_errors(actual_pose: Any, target_pose: Any) -> tuple[float, float]:
     quaternion_dot = torch.abs(torch.sum(actual_quaternion * target_quaternion)).clamp(0.0, 1.0)
     orientation_error = float((2.0 * torch.acos(quaternion_dot)).item())
     return position_error, orientation_error
+
+
+def _planning_result_succeeded(result: Any) -> bool:
+    return bool(
+        result is not None
+        and result.success is not None
+        and bool(result.success.any().item())
+    )
+
+
+def _validated_interpolated_data(
+    result: Any,
+    *,
+    graph_planner: Any,
+    expected_start: Any,
+    expected_end: Any | None,
+    joint_tolerance: float,
+) -> tuple[Any, tuple[float, ...], tuple[tuple[float, ...], ...]] | None:
+    import torch
+
+    if not _planning_result_succeeded(result):
+        return None
+    interpolated = result.get_interpolated_plan()
+    if interpolated is None:
+        return None
+    positions = interpolated.position.reshape(-1, len(GEN3_JOINT_NAMES)).clone()
+    if len(positions) < 2 or not bool(torch.isfinite(positions).all().item()):
+        return None
+    trajectory_time = _optional_interpolated_time(interpolated, len(positions))
+    trajectory_velocity = _optional_interpolated_matrix(
+        interpolated, "velocity", len(positions), len(GEN3_JOINT_NAMES)
+    )
+    if trajectory_time is None or trajectory_velocity is None:
+        return None
+    if not _joint_positions_match(
+        positions[0], expected_start, joint_tolerance
+    ) or (
+        expected_end is not None
+        and not _joint_positions_match(positions[-1], expected_end, joint_tolerance)
+    ):
+        return None
+    if not _all_true(graph_planner.check_samples_feasibility(positions)):
+        return None
+    return positions, trajectory_time, trajectory_velocity
+
+
+def _quaternion_local_z_axis(
+    quaternion_wxyz: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    w, x, y, z = quaternion_wxyz
+    return (
+        2.0 * (x * z + w * y),
+        2.0 * (y * z - w * x),
+        1.0 - 2.0 * (x * x + y * y),
+    )
+
+
+def _joint_edge_is_feasible(
+    graph_planner: Any,
+    start: Any,
+    goal: Any,
+    sample_count: int,
+) -> bool:
+    samples = _joint_edge_samples(start, goal, sample_count)
+    return _all_true(graph_planner.check_samples_feasibility(samples))
+
+
+def _joint_edge_samples(start: Any, goal: Any, sample_count: int) -> Any:
+    import torch
+
+    interpolation = torch.linspace(
+        0.0,
+        1.0,
+        sample_count,
+        device=start.device,
+        dtype=start.dtype,
+    ).reshape(-1, 1)
+    samples = start.reshape(1, -1) + interpolation * (
+        goal.reshape(1, -1) - start.reshape(1, -1)
+    )
+    return samples
+
+
+def _joint_positions_match(actual: Any, expected: Any, tolerance: float) -> bool:
+    import torch
+
+    return bool(torch.max(torch.abs(actual - expected)).item() <= tolerance)
+
+
+def _trajectory_endpoint_is_stopped(
+    velocity: tuple[float, ...], tolerance: float
+) -> bool:
+    return max((abs(value) for value in velocity), default=math.inf) <= tolerance
 
 
 class CuroboCameraRoutePlanner:
@@ -483,10 +692,15 @@ class CuroboCameraRoutePlanner:
         self,
         targets: tuple[CameraRouteTarget, ...],
         start_joint_positions: tuple[float, ...] = DEFAULT_START_JOINT_POSITIONS,
+        strategy: CameraRoutePlanningStrategy = "direct_pose",
     ) -> CameraRoutePlan:
         if len(start_joint_positions) != len(GEN3_JOINT_NAMES):
             raise ValueError("camera route start state must contain all seven Gen3 joints")
         planner = self._get_planner()
+        if strategy not in {"direct_pose", "portal_continuation"}:
+            raise ValueError(f"unsupported camera route planning strategy: {strategy}")
+        if strategy == "portal_continuation" and not self._enable_portal_continuation:
+            raise ValueError("camera route portal continuation is disabled by policy")
         import torch
         from curobo.types import GoalToolPose, JointState, Pose
 
@@ -510,6 +724,35 @@ class CuroboCameraRoutePlanner:
                 ordered_tool_frames=planner.tool_frames,
             )
             started = time.perf_counter()
+            if strategy == "portal_continuation":
+                portal_segment = self._plan_via_portal_continuation(
+                    planner=planner,
+                    target=target,
+                    target_pose=target_pose,
+                    current=current,
+                    planning_started=started,
+                )
+                segments.append(portal_segment)
+                if portal_segment.success and portal_segment.trajectory:
+                    current = JointState.from_position(
+                        torch.tensor(
+                            [portal_segment.trajectory[-1]],
+                            device="cuda",
+                            dtype=torch.float32,
+                        ),
+                        joint_names=list(GEN3_JOINT_NAMES),
+                    )
+                    continue
+                return CameraRoutePlan(
+                    success=False,
+                    planner_name=self.planner_name,
+                    joint_names=GEN3_JOINT_NAMES,
+                    segments=tuple(segments),
+                    failed_target_id=target.target_id,
+                    message=f"cuRobo failed at required camera target {target.target_id}.",
+                    reached_target_ids=tuple(item.target_id for item in targets[:index]),
+                )
+
             result = planner.plan_pose(
                 goal_tool_poses=goal,
                 current_state=current,
@@ -522,7 +765,10 @@ class CuroboCameraRoutePlanner:
                     CameraRouteSegment(
                         target_id=target.target_id,
                         success=False,
-                        message="cuRobo plan_pose did not find a collision-free camera-pose trajectory.",
+                        message=(
+                            "cuRobo plan_pose did not find a collision-free "
+                            "camera-pose trajectory."
+                        ),
                         planning_time_s=planning_time,
                         waypoint_count=0,
                     )
@@ -592,6 +838,305 @@ class CuroboCameraRoutePlanner:
             failed_target_id=None,
             message=f"cuRobo planned and validated all {len(targets)} camera targets.",
             reached_target_ids=tuple(target.target_id for target in targets),
+        )
+
+    def _plan_via_portal_continuation(
+        self,
+        *,
+        planner: Any,
+        target: CameraRouteTarget,
+        target_pose: Any,
+        current: Any,
+        planning_started: float,
+    ) -> CameraRouteSegment:
+        import torch
+        import torch.nn.functional as torch_functional
+        from curobo.types import GoalToolPose, JointState, Pose
+
+        if self._ik_solver is None or planner.graph_planner is None:
+            return self._portal_failure_segment(
+                target,
+                "Portal continuation requires collision-aware IK and graph planning.",
+                planning_started,
+            )
+        portal_target = offset_camera_target_along_local_z(
+            target, self._portal_offset_m
+        )
+        portal_pose = Pose(
+            position=torch.tensor(
+                [portal_target.target_position], device="cuda", dtype=torch.float32
+            ),
+            quaternion=torch.tensor(
+                [portal_target.target_quaternion_wxyz],
+                device="cuda",
+                dtype=torch.float32,
+            ),
+        )
+        portal_goal = GoalToolPose.from_poses(
+            {planner.tool_frames[0]: portal_pose},
+            ordered_tool_frames=planner.tool_frames,
+        )
+        approach = planner.plan_pose(
+            goal_tool_poses=portal_goal,
+            current_state=current,
+            max_attempts=self._max_attempts,
+            enable_graph_attempt=self._graph_attempt,
+        )
+        approach_data = _validated_interpolated_data(
+            approach,
+            graph_planner=planner.graph_planner,
+            expected_start=current.position.reshape(-1),
+            expected_end=None,
+            joint_tolerance=self._continuation_joint_tolerance_rad,
+        )
+        if approach_data is None:
+            return self._portal_failure_segment(
+                target,
+                "cuRobo could not reach the configured opening-side portal pose.",
+                planning_started,
+            )
+        approach_positions, approach_time, approach_velocity = approach_data
+        if not _trajectory_endpoint_is_stopped(
+            approach_velocity[-1],
+            self._continuation_stop_velocity_tolerance_rad_s,
+        ):
+            return self._portal_failure_segment(
+                target,
+                "The portal approach did not terminate at rest.",
+                planning_started,
+            )
+        portal_terminal = JointState.from_position(
+            approach_positions[-1].reshape(1, len(GEN3_JOINT_NAMES)),
+            joint_names=list(GEN3_JOINT_NAMES),
+        )
+        portal_actual = planner.kinematics.compute_kinematics(
+            portal_terminal
+        ).tool_poses
+        portal_position_error, portal_orientation_error = _pose_errors(
+            portal_actual, portal_pose
+        )
+        if (
+            portal_position_error > self._position_tolerance_m
+            or portal_orientation_error > self._orientation_tolerance_rad
+        ):
+            return self._portal_failure_segment(
+                target,
+                "The portal approach exceeded the configured terminal pose tolerance.",
+                planning_started,
+            )
+
+        corridor = self._trace_ik_corridor_from_portal(
+            planner=planner,
+            target=target,
+            portal_joint_position=approach_positions[-1],
+        )
+        if corridor is None:
+            return self._portal_failure_segment(
+                target,
+                "The reachable portal IK branch was not collision-continuous to the target.",
+                planning_started,
+            )
+
+        with self._create_independent_motion_planner() as corridor_planner:
+            if corridor_planner.graph_planner is None:
+                return self._portal_failure_segment(
+                    target,
+                    "Portal continuation requires a configured collision graph planner.",
+                    planning_started,
+                )
+            portal_position = corridor[0]
+            final_position = corridor[-1]
+            portal_state = JointState.from_position(
+                portal_position.reshape(1, len(GEN3_JOINT_NAMES)),
+                joint_names=list(GEN3_JOINT_NAMES),
+            )
+            final_state = JointState.from_position(
+                final_position.reshape(1, len(GEN3_JOINT_NAMES)),
+                joint_names=list(GEN3_JOINT_NAMES),
+            )
+            corridor_path = torch.stack(corridor)
+            resampled = torch_functional.interpolate(
+                corridor_path.transpose(0, 1).unsqueeze(0),
+                size=corridor_planner.trajopt_solver.action_horizon,
+                mode="linear",
+                align_corners=True,
+            ).transpose(1, 2)
+            seed_trajectory = resampled.unsqueeze(1).repeat(
+                1, self._num_trajopt_seeds, 1, 1
+            )
+            continuation = corridor_planner.trajopt_solver.solve_cspace(
+                final_state,
+                portal_state,
+                seed_traj=seed_trajectory,
+                return_seeds=1,
+                num_seeds=self._num_trajopt_seeds,
+                finetune_attempts=self._continuation_finetune_attempts,
+            )
+            continuation_data = _validated_interpolated_data(
+                continuation,
+                graph_planner=corridor_planner.graph_planner,
+                expected_start=portal_position,
+                expected_end=final_position,
+                joint_tolerance=self._continuation_joint_tolerance_rad,
+            )
+            if continuation_data is None:
+                return self._portal_failure_segment(
+                    target,
+                    "The portal IK corridor did not produce a validated cuRobo trajectory.",
+                    planning_started,
+                )
+            continuation_positions, continuation_time, continuation_velocity = (
+                continuation_data
+            )
+            if not _trajectory_endpoint_is_stopped(
+                continuation_velocity[0],
+                self._continuation_stop_velocity_tolerance_rad_s,
+            ) or not _joint_edge_is_feasible(
+                corridor_planner.graph_planner,
+                approach_positions[-1],
+                continuation_positions[0],
+                self._continuation_edge_sample_count,
+            ):
+                return self._portal_failure_segment(
+                    target,
+                    "The portal approach and local continuation were not safely continuous.",
+                    planning_started,
+                )
+
+            terminal = JointState.from_position(
+                continuation_positions[-1].reshape(1, len(GEN3_JOINT_NAMES)),
+                joint_names=list(GEN3_JOINT_NAMES),
+            )
+            actual_pose = corridor_planner.kinematics.compute_kinematics(
+                terminal
+            ).tool_poses
+            position_error, orientation_error = _pose_errors(actual_pose, target_pose)
+            if (
+                position_error > self._position_tolerance_m
+                or orientation_error > self._orientation_tolerance_rad
+            ):
+                return self._portal_failure_segment(
+                    target,
+                    "The portal continuation exceeded the terminal camera-pose tolerance.",
+                    planning_started,
+                )
+
+            combined_positions = torch.cat(
+                (approach_positions, continuation_positions[1:]), dim=0
+            )
+            trajectory = _tensor_matrix_to_tuple(combined_positions)
+            return CameraRouteSegment(
+                target_id=target.target_id,
+                success=True,
+                message=(
+                    f"cuRobo reached an opening-side portal {self._portal_offset_m:.3f} m "
+                    "from the target and preserved its reachable IK branch through the "
+                    "collision-checked local continuation."
+                ),
+                planning_time_s=round(time.perf_counter() - planning_started, 6),
+                waypoint_count=len(trajectory),
+                trajectory=trajectory,
+                trajectory_time_s=_join_trajectory_times(
+                    approach_time, continuation_time
+                ),
+                trajectory_velocity=approach_velocity + continuation_velocity[1:],
+                target_position_error_m=position_error,
+                target_orientation_error_rad=orientation_error,
+                planning_strategy="portal_continuation",
+                portal_offset_m=self._portal_offset_m,
+            )
+
+    def _trace_ik_corridor_from_portal(
+        self,
+        *,
+        planner: Any,
+        target: CameraRouteTarget,
+        portal_joint_position: Any,
+    ) -> tuple[Any, ...] | None:
+        import torch
+        from curobo.types import GoalToolPose, JointState, Pose
+
+        if self._ik_solver is None or planner.graph_planner is None:
+            return None
+        local_z = torch.tensor(
+            _quaternion_local_z_axis(target.target_quaternion_wxyz),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        target_position = torch.tensor(
+            target.target_position, device="cuda", dtype=torch.float32
+        )
+        target_quaternion = torch.tensor(
+            [target.target_quaternion_wxyz], device="cuda", dtype=torch.float32
+        )
+        step_count = max(1, math.ceil(self._portal_offset_m / self._continuation_step_m))
+        actual_step = self._portal_offset_m / step_count
+        previous = portal_joint_position.detach().clone()
+        states = [previous]
+        for step_index in range(1, step_count + 1):
+            remaining_offset = max(0.0, self._portal_offset_m - actual_step * step_index)
+            step_pose = Pose(
+                position=(target_position + local_z * remaining_offset).reshape(1, 3),
+                quaternion=target_quaternion,
+            )
+            step_goal = GoalToolPose.from_poses(
+                {planner.tool_frames[0]: step_pose},
+                ordered_tool_frames=planner.tool_frames,
+            )
+            step_current = JointState.from_position(
+                previous.reshape(1, len(GEN3_JOINT_NAMES)),
+                joint_names=list(GEN3_JOINT_NAMES),
+            )
+            step_ik = self._ik_solver.solve_pose(
+                step_goal,
+                current_state=step_current,
+                return_seeds=self._continuation_ik_solution_count,
+            )
+            if step_ik is None or step_ik.success is None or step_ik.solution is None:
+                return None
+            valid_positions = sorted(
+                (
+                    step_ik.solution[0, solution_index]
+                    for solution_index in range(self._continuation_ik_solution_count)
+                    if bool(step_ik.success[0, solution_index].item())
+                ),
+                key=lambda position: float(
+                    torch.linalg.vector_norm(position - previous).item()
+                ),
+            )
+            next_position = next(
+                (
+                    position.detach().clone()
+                    for position in valid_positions
+                    if _joint_edge_is_feasible(
+                        planner.graph_planner,
+                        previous,
+                        position,
+                        self._continuation_edge_sample_count,
+                    )
+                ),
+                None,
+            )
+            if next_position is None:
+                return None
+            states.append(next_position)
+            previous = next_position
+        return tuple(states)
+
+    def _portal_failure_segment(
+        self,
+        target: CameraRouteTarget,
+        message: str,
+        planning_started: float,
+    ) -> CameraRouteSegment:
+        return CameraRouteSegment(
+            target_id=target.target_id,
+            success=False,
+            message=message,
+            planning_time_s=round(time.perf_counter() - planning_started, 6),
+            waypoint_count=0,
+            planning_strategy="portal_continuation",
+            portal_offset_m=self._portal_offset_m,
         )
 
     def find_collision_free_ik(
@@ -665,8 +1210,6 @@ class CuroboCameraRoutePlanner:
             return self._planner
         self._validate_environment()
         import yaml
-        from curobo.motion_planner import MotionPlannerCfg
-
         robot = yaml.safe_load(self.robot_config_path.read_text(encoding="utf-8"))
         robot_payload = robot.get("robot_cfg", robot)
         robot_kinematics = robot_payload["kinematics"]
@@ -698,6 +1241,14 @@ class CuroboCameraRoutePlanner:
             self._orientation_tolerance_rad = float(
                 route_policy.get("orientation_tolerance_rad", 0.0)
             )
+            self._enable_portal_continuation = False
+            self._portal_offset_m = 0.10
+            self._continuation_step_m = 0.005
+            self._continuation_edge_sample_count = 11
+            self._continuation_ik_solution_count = 8
+            self._continuation_finetune_attempts = 3
+            self._continuation_joint_tolerance_rad = 0.001
+            self._continuation_stop_velocity_tolerance_rad_s = 0.01
         else:
             self._max_attempts = self._planning_policy.max_attempts
             self._graph_attempt = self._planning_policy.enable_graph_attempt
@@ -706,6 +1257,26 @@ class CuroboCameraRoutePlanner:
             random_seed = self._planning_policy.random_seed
             self._position_tolerance_m = self._planning_policy.position_tolerance
             self._orientation_tolerance_rad = self._planning_policy.orientation_tolerance
+            self._enable_portal_continuation = (
+                self._planning_policy.enable_portal_continuation
+            )
+            self._portal_offset_m = self._planning_policy.portal_offset_m
+            self._continuation_step_m = self._planning_policy.continuation_step_m
+            self._continuation_edge_sample_count = (
+                self._planning_policy.continuation_edge_sample_count
+            )
+            self._continuation_ik_solution_count = (
+                self._planning_policy.continuation_ik_solution_count
+            )
+            self._continuation_finetune_attempts = (
+                self._planning_policy.continuation_finetune_attempts
+            )
+            self._continuation_joint_tolerance_rad = (
+                self._planning_policy.continuation_joint_tolerance_rad
+            )
+            self._continuation_stop_velocity_tolerance_rad_s = (
+                self._planning_policy.continuation_stop_velocity_tolerance_rad_s
+            )
         if (
             self._max_attempts <= 0
             or self._graph_attempt < 0
@@ -716,35 +1287,42 @@ class CuroboCameraRoutePlanner:
             or self._orientation_tolerance_rad <= 0.0
         ):
             raise ValueError("cuRobo camera route planning policy is invalid")
+        if self._continuation_ik_solution_count > num_ik_seeds:
+            raise ValueError(
+                "camera route portal IK solution count cannot exceed num_ik_seeds"
+            )
 
-        config = MotionPlannerCfg.create(
-            robot=robot,
-            scene_model=world,
-            graph_planner_config=graph,
-            num_ik_seeds=num_ik_seeds,
-            num_trajopt_seeds=num_trajopt_seeds,
-            position_tolerance=self._position_tolerance_m,
-            orientation_tolerance=self._orientation_tolerance_rad,
-            use_cuda_graph=True,
-            random_seed=random_seed,
-        )
+        self._num_ik_seeds = num_ik_seeds
+        self._num_trajopt_seeds = num_trajopt_seeds
+        self._random_seed = random_seed
+        self._robot_payload = robot
+        self._world_payload = world
+        self._graph_payload = graph
+        config = self._create_motion_planner_config()
         self._planner = create_collision_filtered_motion_planner(config)
-        if self._ik_batch_size is not None and self._ik_solutions_per_target is not None:
-            if self._ik_solutions_per_target > num_ik_seeds:
+        needs_standalone_ik = (
+            self._ik_batch_size is not None
+            or self._enable_portal_continuation
+        )
+        if needs_standalone_ik:
+            if (
+                self._ik_solutions_per_target is not None
+                and self._ik_solutions_per_target > num_ik_seeds
+            ):
                 raise ValueError(
                     "camera route IK solutions per target cannot exceed num_ik_seeds"
                 )
             from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
 
             ik_config = InverseKinematicsCfg.create(
-                robot=robot,
-                scene_model=world,
+                robot=deepcopy(robot),
+                scene_model=deepcopy(world),
                 num_seeds=num_ik_seeds,
                 position_tolerance=self._position_tolerance_m,
                 orientation_tolerance=self._orientation_tolerance_rad,
                 use_cuda_graph=True,
                 random_seed=random_seed,
-                max_batch_size=self._ik_batch_size,
+                max_batch_size=self._ik_batch_size or 1,
                 multi_env=False,
                 max_goalset=1,
             )
@@ -752,6 +1330,27 @@ class CuroboCameraRoutePlanner:
                 ik_config, self._planner.scene_collision_checker
             )
         return self._planner
+
+    def _create_motion_planner_config(self) -> Any:
+        from curobo.motion_planner import MotionPlannerCfg
+
+        return MotionPlannerCfg.create(
+            robot=deepcopy(self._robot_payload),
+            scene_model=deepcopy(self._world_payload),
+            graph_planner_config=deepcopy(self._graph_payload),
+            num_ik_seeds=self._num_ik_seeds,
+            num_trajopt_seeds=self._num_trajopt_seeds,
+            position_tolerance=self._position_tolerance_m,
+            orientation_tolerance=self._orientation_tolerance_rad,
+            use_cuda_graph=True,
+            random_seed=self._random_seed,
+        )
+
+    def _create_independent_motion_planner(self) -> Any:
+        self._get_planner()
+        return create_collision_filtered_motion_planner(
+            self._create_motion_planner_config()
+        )
 
     def _resolve(self, path: Path) -> Path:
         resolved = path if path.is_absolute() else self.repo_root / path
@@ -784,6 +1383,11 @@ def _optional_interpolated_matrix(
     return tuple(tuple(float(value) for value in row.tolist()) for row in values)
 
 
+def _tensor_matrix_to_tuple(values: Any) -> tuple[tuple[float, ...], ...]:
+    matrix = values.detach().cpu()
+    return tuple(tuple(float(value) for value in row.tolist()) for row in matrix)
+
+
 def _optional_interpolated_time(
     interpolated: Any, waypoint_count: int
 ) -> tuple[float, ...] | None:
@@ -797,3 +1401,10 @@ def _optional_interpolated_time(
     if not math.isfinite(dt) or dt <= 0.0:
         return None
     return tuple(round(index * dt, 9) for index in range(waypoint_count))
+
+
+def _join_trajectory_times(
+    first: tuple[float, ...], second: tuple[float, ...]
+) -> tuple[float, ...]:
+    offset = first[-1]
+    return first + tuple(round(offset + value, 9) for value in second[1:])

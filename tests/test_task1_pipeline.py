@@ -171,6 +171,8 @@ def test_final_camera_uses_nearest_roll_aware_opening_line_pose() -> None:
 
     assert (config.camera.image_width, config.camera.image_height) == (1920, 1080)
     assert config.planning.ik_batch_size == 8
+    assert config.planning.enable_portal_continuation is True
+    assert config.planning.portal_offset_m == pytest.approx(0.10)
     assert config.detection.inference.image_size == 1280
 
     attempts = make_final_camera_targets(
@@ -601,7 +603,8 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
             "candidate_001": 0.30,
             "candidate_002": 0.10,
             "candidate_003": 0.20,
-        }
+        },
+        portal_candidates={"candidate_001"},
     )
     capture = _FinalCaptureStub(tmp_path)
     processor = _final_processor(tmp_path, planner, capture, monkeypatch)
@@ -660,6 +663,13 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
         "candidate_003",
     ]
     assert [result["processing_index"] for result in report["results"]] == [2, 0, 1]
+    planned_attempt = next(
+        attempt
+        for attempt in report["results"][0]["camera_target_attempts"]
+        if attempt["status"] == "success"
+    )
+    assert planned_attempt["planning_strategy"] == "portal_continuation"
+    assert planned_attempt["portal_ik_joint_distance"] is not None
 
 
 def test_final_reports_partial_and_empty_without_fabricating_results(
@@ -1411,9 +1421,11 @@ class _FinalPlannerStub:
         *,
         fail_candidates: set[str] | None = None,
         ik_offsets: dict[str, float] | None = None,
+        portal_candidates: set[str] | None = None,
     ) -> None:
         self.fail_candidates = fail_candidates or set()
         self.ik_offsets = ik_offsets or {}
+        self.portal_candidates = portal_candidates or set()
         self.calls: list[tuple[tuple[object, ...], tuple[float, ...]]] = []
         self.ik_calls: list[tuple[tuple[object, ...], tuple[float, ...]]] = []
 
@@ -1436,16 +1448,28 @@ class _FinalPlannerStub:
             )
         return tuple(solutions)
 
-    def plan_camera_pose_route(self, targets, start_joint_positions):
+    def plan_camera_pose_route(
+        self, targets, start_joint_positions, strategy="direct_pose"
+    ):
         self.calls.append((targets, start_joint_positions))
         target_id = targets[0].target_id
-        if any(candidate_id in target_id for candidate_id in self.fail_candidates):
+        force_failure = any(
+            candidate_id in target_id for candidate_id in self.fail_candidates
+        )
+        direct_failure = strategy == "direct_pose" and any(
+            candidate_id in target_id for candidate_id in self.portal_candidates
+        )
+        if force_failure or direct_failure:
             segment = CameraRouteSegment(
                 target_id=target_id,
                 success=False,
                 message="planned failure",
                 planning_time_s=0.01,
                 waypoint_count=0,
+                planning_strategy=strategy,
+                portal_offset_m=(
+                    0.1 if strategy == "portal_continuation" else None
+                ),
             )
             return CameraRoutePlan(
                 success=False,
@@ -1465,6 +1489,8 @@ class _FinalPlannerStub:
             trajectory=(start_joint_positions, terminal),
             target_position_error_m=0.0,
             target_orientation_error_rad=0.0,
+            planning_strategy=strategy,
+            portal_offset_m=0.1 if strategy == "portal_continuation" else None,
         )
         return CameraRoutePlan(
             success=True,

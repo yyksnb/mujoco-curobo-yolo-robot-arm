@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from robot_arm_pipeline.planning import CameraRoutePlan, CameraRouteSegment, CameraRouteTarget
+from robot_arm_pipeline.planning import (
+    CameraRoutePlan,
+    CameraRouteSegment,
+    CameraRouteTarget,
+    offset_camera_target_along_local_z,
+)
 from robot_arm_pipeline.planning.curobo_camera_route import (
     CAMERA_ROUTE_PLAN_SCHEMA,
     filter_feasible_graph_goals,
@@ -25,6 +30,8 @@ def _plan() -> CameraRoutePlan:
         trajectory_velocity=((0.0, 0.0), (2.0, 2.0)),
         target_position_error_m=0.001,
         target_orientation_error_rad=0.002,
+        planning_strategy="portal_continuation",
+        portal_offset_m=0.1,
     )
     return CameraRoutePlan(
         success=True,
@@ -42,6 +49,11 @@ def test_camera_route_target_uses_explicit_normalized_pose() -> None:
 
     assert target.target_position == (0.1, 0.2, 0.3)
     assert target.target_quaternion_wxyz == (1.0, 0.0, 0.0, 0.0)
+    assert offset_camera_target_along_local_z(target, 0.1).target_position == (
+        0.1,
+        0.2,
+        0.4,
+    )
 
     with pytest.raises(ValueError, match="normalized"):
         CameraRouteTarget("survey_0000", (0.1, 0.2, 0.3), (2.0, 0.0, 0.0, 0.0))
@@ -55,7 +67,18 @@ def test_camera_route_plan_round_trip_and_rejects_malformed_artifacts() -> None:
     assert payload["schema"] == CAMERA_ROUTE_PLAN_SCHEMA
     assert payload["segments"][0]["trajectory_time_s"] == [0.0, 0.1]
     assert payload["segments"][0]["trajectory_velocity"] == [[0.0, 0.0], [2.0, 2.0]]
+    assert payload["segments"][0]["planning_strategy"] == "portal_continuation"
     assert CameraRoutePlan.from_dict(payload) == plan
+
+    legacy_payload = _plan().to_dict()
+    for field in (
+        "planning_strategy",
+        "portal_offset_m",
+    ):
+        legacy_payload["segments"][0].pop(field)
+    legacy_segment = CameraRoutePlan.from_dict(legacy_payload).segments[0]
+    assert legacy_segment.planning_strategy == "direct_pose"
+    assert legacy_segment.portal_offset_m is None
 
     invalid_schema = _plan().to_dict()
     invalid_schema["schema"] = "unsupported"

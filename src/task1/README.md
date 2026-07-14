@@ -44,6 +44,12 @@ Final 处理 Survey 的全部候选，不要求输入数量恰好为 5。首个�
 计算完整入框距离，并搜索多个 standoff。所有姿态先批量执行碰撞感知 IK；可行解按预计画面占比、
 关节距离和拍摄距离排序，仅必要姿态进入完整运动规划。
 
+同一候选的直接 pose 规划全部失败后，Final 才进入可配置的 portal continuation：先沿相机局部
+`+Z`（即开口方向）退到 portal pose；各 portal 先批量 IK，并按当前关节距离排序但不裁剪。cuRobo
+到达 portal 后选择全局可达 IK 分支，再以固定空间步长沿同一分支向目标做碰撞连续 IK，并由独立
+的 cspace trajopt 对局部段做时间参数化。两段必须满足关节端点连续、拼接处停止、逐点/边碰撞
+检查和最终相机位姿容差，否则保持规划失败。
+
 到位后重新执行 YOLO 和同帧深度定位，按候选 XY 距离关联检测；`bbox_area_fraction` 只作诊断。
 顶层 `status` 由各候选处理结果决定，物体数量由 `candidate_count_evaluation` 独立表达。框图属于展示
 artifact，生成失败不丢弃正式检测和位姿结果。Final 在 spawn 子进程中运行，隔离 MuJoCo/OpenGL、
@@ -76,9 +82,10 @@ Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并�
 ## 逻辑分类
 
 - 正式设计：多视角 Survey 融合、开口连线斜拍、roll-aware 投影定距、批量碰撞 IK、多 standoff、
-  逐候选重检测和定位。
+  portal continuation、逐候选重检测和定位。
 - 工程防御：schema/指纹校验、逐阶段失败、生产报告原子落盘、native runtime 与评估故障隔离；
-  Replay 框图缺失时显式显示不可用，不回退到未标注 RGB。
+  portal 路线额外校验关节端点、停止速度和碰撞；Replay 框图缺失时显式显示不可用，不回退到
+  未标注 RGB。
 - Debug/评估：layout 真值、segmentation、真值 bbox、诊断深度、benchmark 聚合和 artifact Replay。
 - 临时 workaround：无；当前没有仅为样例通过而引入或计划删除的生产逻辑。
 
@@ -88,3 +95,5 @@ Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并�
 - Final footprint 不表达物体高度、遮挡和油箱口可见性，完整入框距离仍是平面近似。
 - coverage margin 尚未覆盖实机内参、手眼标定和机械臂执行误差，MuJoCo 与实机存在 domain gap。
 - 当前 YOLO 对小物体、旋转和斜视角敏感；模型、相机或场景分布变化后必须重新评估正式参数。
+- portal continuation 只在全部直接姿态失败后运行；极端深腔下可能额外尝试多个 roll，规划时间会
+  明显增加，且 portal 可达分支仍可能无法连续进入目标。该路径不放宽碰撞或伪造轨迹，失败会保留。

@@ -12,7 +12,17 @@
     "position_tolerance_m": 0.005,
     "orientation_tolerance_rad": 0.05,
     "ik_batch_size": 8,
-    "ik_solutions_per_target": 2
+    "ik_solutions_per_target": 2,
+    "portal_continuation": {
+      "enabled": true,
+      "offset_m": 0.10,
+      "step_m": 0.005,
+      "edge_sample_count": 11,
+      "ik_solution_count": 8,
+      "finetune_attempts": 3,
+      "joint_tolerance_rad": 0.001,
+      "stop_velocity_tolerance_rad_s": 0.01
+    }
   },
   "camera": {
     "image_width": 1920,

@@ -165,6 +165,26 @@ def _run_final_worker(
                     random_seed=final_config.planning.random_seed,
                     position_tolerance=final_config.planning.position_tolerance_m,
                     orientation_tolerance=final_config.planning.orientation_tolerance_rad,
+                    enable_portal_continuation=(
+                        final_config.planning.enable_portal_continuation
+                    ),
+                    portal_offset_m=final_config.planning.portal_offset_m,
+                    continuation_step_m=final_config.planning.continuation_step_m,
+                    continuation_edge_sample_count=(
+                        final_config.planning.continuation_edge_sample_count
+                    ),
+                    continuation_ik_solution_count=(
+                        final_config.planning.continuation_ik_solution_count
+                    ),
+                    continuation_finetune_attempts=(
+                        final_config.planning.continuation_finetune_attempts
+                    ),
+                    continuation_joint_tolerance_rad=(
+                        final_config.planning.continuation_joint_tolerance_rad
+                    ),
+                    continuation_stop_velocity_tolerance_rad_s=(
+                        final_config.planning.continuation_stop_velocity_tolerance_rad_s
+                    ),
                 ),
                 ik_batch_size=final_config.planning.ik_batch_size,
                 ik_solutions_per_target=final_config.planning.ik_solutions_per_target,

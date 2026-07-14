@@ -14,6 +14,7 @@ from robot_arm_pipeline.planning import (
     CameraRoutePlanner,
     CameraRouteTarget,
     CameraTargetIKSolution,
+    offset_camera_target_along_local_z,
     plan_camera_route,
 )
 from task1.detection import Detector, YoloInferenceConfig, render_detection_overlay
@@ -76,6 +77,14 @@ class FinalPlanningPolicy:
     orientation_tolerance_rad: float
     ik_batch_size: int
     ik_solutions_per_target: int
+    enable_portal_continuation: bool
+    portal_offset_m: float
+    continuation_step_m: float
+    continuation_edge_sample_count: int
+    continuation_ik_solution_count: int
+    continuation_finetune_attempts: int
+    continuation_joint_tolerance_rad: float
+    continuation_stop_velocity_tolerance_rad_s: float
 
 
 @dataclass(frozen=True)
@@ -140,6 +149,7 @@ def load_final_config(path: Path, *, repo_root: Path) -> FinalConfig:
         raise ValueError(f"unsupported Task1 Final config schema: {payload.get('schema')}")
     camera = _mapping(payload, "camera")
     planning = _mapping(payload, "planning")
+    portal_continuation = _mapping(planning, "portal_continuation")
     simulation = _mapping(payload, "simulation")
     detection = _mapping(payload, "detection")
     localization = _mapping(payload, "localization")
@@ -173,6 +183,32 @@ def load_final_config(path: Path, *, repo_root: Path) -> FinalConfig:
             ik_batch_size=_integer(planning, "ik_batch_size", minimum=1),
             ik_solutions_per_target=_integer(
                 planning, "ik_solutions_per_target", minimum=1
+            ),
+            enable_portal_continuation=_boolean(
+                portal_continuation, "enabled"
+            ),
+            portal_offset_m=_number(
+                portal_continuation, "offset_m", minimum=0.0
+            ),
+            continuation_step_m=_number(
+                portal_continuation, "step_m", minimum=0.0
+            ),
+            continuation_edge_sample_count=_integer(
+                portal_continuation, "edge_sample_count", minimum=2
+            ),
+            continuation_ik_solution_count=_integer(
+                portal_continuation, "ik_solution_count", minimum=1
+            ),
+            continuation_finetune_attempts=_integer(
+                portal_continuation, "finetune_attempts", minimum=1
+            ),
+            continuation_joint_tolerance_rad=_number(
+                portal_continuation, "joint_tolerance_rad", minimum=0.0
+            ),
+            continuation_stop_velocity_tolerance_rad_s=_number(
+                portal_continuation,
+                "stop_velocity_tolerance_rad_s",
+                minimum=0.0,
             ),
         ),
         camera=FinalCameraPolicy(
@@ -496,11 +532,19 @@ class FinalProcessor:
             "failed_candidate_count": failed_count,
             "unprocessed_candidate_count": 0,
             "candidate_processing_order": processing_order,
-            "ik_feasible_camera_target_count": sum(
-                attempt["ik_status"] == "success" for attempt in camera_attempts
+            "ik_feasible_camera_target_count": len(
+                {
+                    attempt["target_id"]
+                    for attempt in camera_attempts
+                    if attempt["ik_status"] == "success"
+                }
             ),
-            "ik_rejected_camera_target_count": sum(
-                attempt["ik_status"] == "failed" for attempt in camera_attempts
+            "ik_rejected_camera_target_count": len(
+                {
+                    attempt["target_id"]
+                    for attempt in camera_attempts
+                    if attempt["ik_status"] == "failed"
+                }
             ),
             "motion_planning_attempt_count": sum(
                 attempt["status"] in {"success", "failed"}
@@ -644,11 +688,61 @@ class FinalProcessor:
             )
         segment = None
         attempted_target_ids: set[str] = set()
-        for attempt_index, (target, geometry, ik_solution) in enumerate(feasible_attempts):
+
+        def planning_requests():
+            for target, geometry, ik_solution in feasible_attempts:
+                yield target, geometry, ik_solution, "direct_pose", None
+            if not self.config.planning.enable_portal_continuation:
+                return
+            portal_targets = tuple(
+                offset_camera_target_along_local_z(
+                    target, self.config.planning.portal_offset_m
+                )
+                for target, _, _ in feasible_attempts
+            )
+            portal_solutions = self.planner.find_collision_free_ik(
+                portal_targets, current
+            )
+            portal_distances: dict[str, float] = {}
+            for solution in portal_solutions:
+                distance = math.dist(current, solution.joint_positions)
+                portal_distances[solution.target_id] = min(
+                    distance,
+                    portal_distances.get(solution.target_id, math.inf),
+                )
+            ordered = sorted(
+                enumerate(feasible_attempts),
+                key=lambda item: (
+                    portal_distances.get(item[1][0].target_id, math.inf),
+                    item[0],
+                ),
+            )
+            for _, (target, geometry, ik_solution) in ordered:
+                portal_distance = portal_distances.get(target.target_id)
+                yield (
+                    target,
+                    geometry,
+                    ik_solution,
+                    "portal_continuation",
+                    portal_distance,
+                )
+
+        for attempt_index, (
+            target,
+            geometry,
+            ik_solution,
+            requested_strategy,
+            portal_ik_distance,
+        ) in enumerate(planning_requests()):
             attempted_target_ids.add(target.target_id)
             ik_distance = math.dist(current, ik_solution.joint_positions)
             try:
-                attempted_plan = plan_camera_route(self.planner, (target,), current)
+                attempted_plan = plan_camera_route(
+                    self.planner,
+                    (target,),
+                    current,
+                    strategy=requested_strategy,
+                )
             except Exception as exc:
                 base_result["camera_target_attempts"].append(
                     {
@@ -656,6 +750,8 @@ class FinalProcessor:
                         "target_id": target.target_id,
                         "ik_status": "success",
                         "ik_joint_distance": ik_distance,
+                        "portal_ik_joint_distance": portal_ik_distance,
+                        "requested_planning_strategy": requested_strategy,
                         "status": "failed",
                         "message": _error_message(exc),
                     }
@@ -680,15 +776,37 @@ class FinalProcessor:
                     "target_id": target.target_id,
                     "ik_status": "success",
                     "ik_joint_distance": ik_distance,
+                    "portal_ik_joint_distance": portal_ik_distance,
+                    "requested_planning_strategy": requested_strategy,
                     "status": "success" if executable else "failed",
-                    "message": attempted_plan.message,
+                    "message": (
+                        attempted_segment.message
+                        if attempted_segment is not None
+                        else attempted_plan.message
+                    ),
                     "planner_artifact": str(attempt_path),
+                    "planning_strategy": (
+                        attempted_segment.planning_strategy
+                        if attempted_segment is not None
+                        else None
+                    ),
+                    "planning_time_s": (
+                        attempted_segment.planning_time_s
+                        if attempted_segment is not None
+                        else None
+                    ),
+                    "portal_offset_m": (
+                        attempted_segment.portal_offset_m
+                        if attempted_segment is not None
+                        else None
+                    ),
                 }
             )
             if executable:
                 segment = attempted_segment
                 base_result["planner_artifact"] = str(attempt_path)
                 base_result["camera_target"] = geometry
+                base_result["planning_strategy"] = attempted_segment.planning_strategy
                 break
         for target, geometry, ik_solution in feasible_attempts:
             if target.target_id in attempted_target_ids:
@@ -991,6 +1109,15 @@ def _validate_final_config(config: FinalConfig) -> None:
         raise ValueError("Final planning pose tolerances must be positive")
     if planning.ik_solutions_per_target > planning.num_ik_seeds:
         raise ValueError("Final IK solutions per target cannot exceed num_ik_seeds")
+    if planning.continuation_ik_solution_count > planning.num_ik_seeds:
+        raise ValueError("Final portal IK solution count cannot exceed num_ik_seeds")
+    if min(
+        planning.portal_offset_m,
+        planning.continuation_step_m,
+        planning.continuation_joint_tolerance_rad,
+        planning.continuation_stop_velocity_tolerance_rad_s,
+    ) <= 0.0:
+        raise ValueError("Final portal continuation distances and tolerances must be positive")
     inference = config.detection.inference
     if not 0.0 <= inference.confidence_threshold <= 1.0:
         raise ValueError("Final detection confidence threshold must be between 0 and 1")
