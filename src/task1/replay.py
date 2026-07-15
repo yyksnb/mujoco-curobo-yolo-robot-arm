@@ -1554,57 +1554,23 @@ class _MujocoReplaySession:
 
     def _draw_presentation(
         self,
-        left: Any,
+        _left: Any,
         right: Any,
         *,
         presentation: _ReplayPresentation,
         segment: _ReplaySegment | None,
     ) -> None:
-        if self._context is None or presentation == "neutral":
+        if (
+            self._context is None
+            or self._video_recorder is None
+            or presentation == "neutral"
+        ):
             return
-        font = int(self.mujoco.mjtFont.mjFONT_BIG)
-        bottom_left = int(self.mujoco.mjtGridPos.mjGRID_BOTTOMLEFT)
         if presentation == "capture":
             if segment is None:
                 raise RuntimeError("Task1 replay capture presentation has no segment")
-            if self._video_recorder is not None:
-                return
-            label = f"{segment.phase} {segment.phase_index}/{segment.phase_count}"
-            self.mujoco.mjr_overlay(
-                font,
-                bottom_left,
-                left,
-                label,
-                "",
-                self._context,
-            )
             return
-
-        label = "moving..."
-        if self._video_recorder is not None:
-            self.mujoco.mjr_rectangle(right, 0.42, 0.43, 0.44, 0.68)
-            return
-        self.mujoco.mjr_label(
-            right,
-            font,
-            label,
-            0.42,
-            0.43,
-            0.44,
-            0.68,
-            0.82,
-            0.9,
-            1.0,
-            self._context,
-        )
-        self.mujoco.mjr_overlay(
-            font,
-            bottom_left,
-            left,
-            label,
-            "",
-            self._context,
-        )
+        self.mujoco.mjr_rectangle(right, 0.42, 0.43, 0.44, 0.68)
 
     def _render_camera_panel(self, viewport: Any) -> None:
         if self._context is None:
