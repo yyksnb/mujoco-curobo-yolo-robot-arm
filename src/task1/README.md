@@ -15,6 +15,14 @@
 真值、segmentation、benchmark split 和 Survey 内部诊断字段不得进入生产决策。参数按阶段集中在
 `configs/task1/survey/`、`configs/task1/final/` 和 `configs/task1/zoom/`，不散落在业务源码中。
 
+Survey 和 Final 报告使用相同的前部层次：`schema/stage/status/failure_stage/message`、数量摘要、
+主结果集合、逐项结果，再放来源、策略、artifact、诊断和评估。Survey 的主结果是 `candidates`，
+Final 的主结果是 `stable_objects`；保留各自单一正式字段，不增加指向同一数据的别名。
+
+两个阶段都将 artifact 分成三层：`*_report.json` 只保存生产状态、正式结果、简要逐项状态和引用；
+`*_diagnostics.json` 保存逐帧检测、定位、融合、IK 和规划尝试；`*_evaluation.json` 保存仿真真值评估。
+主报告只记录 `diagnostics_path`、`evaluation_status` 和 `evaluation_path`，诊断或评估内容不重复内嵌。
+
 ## Survey
 
 Survey 固定使用 16 个相机位，日常运行只校验并加载带输入指纹的离线路线，不在线调用 cuRobo。
@@ -32,8 +40,9 @@ MuJoCo 在各路线终点采集 1920x1080 RGB-D。RGB 原图用于正式检测�
 - 至少两个不同 view 支持才输出候选。
 - 不按目标数量补齐、裁剪或重排，不使用类别、seed 或样例特征做特判。
 
-关联边、gate 统计、互斥拒绝和 tentative track 写入 `fusion_diagnostics`。定位失败显式写入报告；
-layout 位置验收不改变生产 `status`。
+关联边、gate 统计、互斥拒绝和 tentative track 写入 `survey_diagnostics.json` 的
+`fusion_diagnostics`。定位失败也在该诊断 artifact 中显式记录；layout 位置验收不改变生产
+`status`。
 
 ## Final
 
@@ -58,9 +67,9 @@ YOLO CUDA 和 cuRobo native runtime。
 
 ## Zoom
 
-Zoom 只读取 `task1_final_report` 中各成功结果的顶层 `rgb_path` 和
-`selected_detection.bbox_xyxy`；不读取 Final 的规划尝试、深度、layout、segmentation 或评估真值，
-也不重新运行 YOLO。Final 失败候选在 Zoom 报告中显式标记为 `skipped`，不会补图或改写上游结果。
+Zoom 只读取 `task1_final_report` 的正式 `stable_objects`，并用简要 `results` 判断候选是否成功；
+不读取 Final 的规划尝试、检测诊断、深度、layout、segmentation 或评估真值，也不重新运行 YOLO。
+Final 失败候选在 Zoom 报告中显式标记为 `skipped`，不会补图或改写上游结果。
 
 对每个 bbox，Zoom 分别计算横屏和竖屏的固定比例裁剪框。裁剪必须完整包含可见 bbox，并优先满足
 配置的最小留白；在所有可行方向中选择输出 bbox 面积占比最接近 60% 的方案。原始 RGB 裁剪后以
@@ -91,10 +100,10 @@ Space 暂停或继续；F9 按记录轨迹播放到下一次拍照并停下，�
 
 ## 评估边界
 
-Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并先原子落盘生产报告；仿真随后回放
-已拍摄关节状态，采集 segmentation 和评估所需真值。layout、segmentation、真值 bbox 和 benchmark
-聚合只用于评估，不参与生产控制。两个阶段都在独立 spawn 子进程中运行；评估异常或 native 进程
-崩溃只写评估错误，不覆盖已经持久化的生产 `status`。
+Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并先原子落盘生产报告及独立诊断；仿真
+随后回放已拍摄关节状态，采集 segmentation 和评估所需真值。layout、segmentation、真值 bbox 和
+benchmark 聚合只用于独立 `*_evaluation.json`，不参与生产控制。两个阶段都在 spawn 子进程中运行；
+评估异常或 native 进程崩溃只更新主报告的评估状态并写评估错误，不覆盖已经持久化的生产 `status`。
 
 ## 逻辑分类
 

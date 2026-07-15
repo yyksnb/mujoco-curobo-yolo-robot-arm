@@ -39,7 +39,15 @@ from task1.scene import (
     load_world_pose_in_base,
     polygon_within_bounds,
 )
-from task1.pipeline import PipelineOptions, PipelineStageEvent, Task1Pipeline
+from task1.pipeline import (
+    PipelineOptions,
+    PipelineStageEvent,
+    Task1Pipeline,
+    _attach_final_evaluation,
+    _attach_survey_evaluation,
+    _persist_final_production_report,
+    _persist_survey_production_report,
+)
 from task1.replay import (
     FINAL_GLOBAL_VIEW,
     SURVEY_GLOBAL_VIEW,
@@ -127,12 +135,16 @@ def test_zoom_selects_landscape_or_portrait_and_targets_bbox_area(
                 "stage": "final",
                 "status": "success",
                 "results": [
-                    _zoom_final_result(
+                    {"candidate_id": "candidate_landscape", "status": "success"},
+                    {"candidate_id": "candidate_portrait", "status": "success"},
+                ],
+                "stable_objects": [
+                    _zoom_stable_object(
                         "candidate_landscape",
                         source_path,
                         [600.0, 350.0, 1200.0, 700.0],
                     ),
-                    _zoom_final_result(
+                    _zoom_stable_object(
                         "candidate_portrait",
                         source_path,
                         [800.0, 200.0, 1100.0, 800.0],
@@ -177,6 +189,17 @@ def test_zoom_selects_landscape_or_portrait_and_targets_bbox_area(
         assert crop[0] <= bbox[0] < bbox[2] <= crop[2]
         assert crop[1] <= bbox[1] < bbox[3] <= crop[3]
 
+    invalid = json.loads(final_report_path.read_text(encoding="utf-8"))
+    invalid["stable_objects"].pop()
+    final_report_path.write_text(json.dumps(invalid), encoding="utf-8")
+    with pytest.raises(ValueError, match="correspond one-to-one"):
+        run_zoom_stage(
+            final_report_path=final_report_path,
+            output_dir=tmp_path / "invalid_zoom",
+            config=config,
+            repo_root=REPO_ROOT,
+        )
+
 
 def test_zoom_pipeline_reports_partial_artifacts_without_gating_pipeline(
     tmp_path: Path,
@@ -194,17 +217,21 @@ def test_zoom_pipeline_reports_partial_artifacts_without_gating_pipeline(
                 "stage": "final",
                 "status": "partial",
                 "results": [
-                    _zoom_final_result(
-                        "candidate_001", source_path, [50.0, 25.0, 110.0, 65.0]
-                    ),
-                    _zoom_final_result(
-                        "candidate_002", missing_path, [50.0, 25.0, 110.0, 65.0]
-                    ),
+                    {"candidate_id": "candidate_001", "status": "success"},
+                    {"candidate_id": "candidate_002", "status": "success"},
                     {
                         "candidate_id": "candidate_003",
                         "status": "failed",
                         "failure_stage": "yolo_no_detection",
                     },
+                ],
+                "stable_objects": [
+                    _zoom_stable_object(
+                        "candidate_001", source_path, [50.0, 25.0, 110.0, 65.0]
+                    ),
+                    _zoom_stable_object(
+                        "candidate_002", missing_path, [50.0, 25.0, 110.0, 65.0]
+                    ),
                 ],
             }
         ),
@@ -825,6 +852,21 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
     )
 
     assert report["status"] == "success"
+    assert list(report)[:13] == [
+        "schema",
+        "stage",
+        "status",
+        "failure_stage",
+        "message",
+        "candidate_count",
+        "processed_candidate_count",
+        "successful_candidate_count",
+        "failed_candidate_count",
+        "unprocessed_candidate_count",
+        "stable_objects",
+        "results",
+        "candidate_count_evaluation",
+    ]
     assert report["candidate_count"] == 3
     assert report["processed_candidate_count"] == 3
     assert report["successful_candidate_count"] == 3
@@ -857,6 +899,28 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
     )
     assert planned_attempt["planning_strategy"] == "portal_continuation"
     assert planned_attempt["portal_ik_joint_distance"] is not None
+
+    final_dir = tmp_path / "persisted_final"
+    persisted = _persist_final_production_report(final_dir, report)
+    assert "selected_detection" not in persisted["results"][0]
+    assert "camera_target_attempts" not in persisted["results"][0]
+    diagnostics = json.loads(
+        (final_dir / "final_diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert diagnostics["results"][0]["camera_target_attempts"]
+    _attach_final_evaluation(
+        final_dir,
+        persisted,
+        {
+            "schema": "task1_final_simulation_evaluation",
+            "status": "passed",
+            "success": True,
+            "evaluation_only": True,
+            "used_for_production_control": False,
+        },
+    )
+    assert persisted["evaluation_status"] == "passed"
+    assert Path(persisted["evaluation_path"]).name == "final_evaluation.json"
 
 
 def test_final_reports_partial_and_empty_without_fabricating_results(
@@ -904,6 +968,7 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
         candidate_count=3,
     )
     assert set(worker_failure) == set(empty_report)
+    assert list(worker_failure) == list(empty_report)
     assert worker_failure["processed_candidate_count"] == 0
     assert worker_failure["unprocessed_candidate_count"] == 3
     assert worker_failure["candidate_count_evaluation"]["success"] is False
@@ -1251,6 +1316,28 @@ def test_survey_report_separates_execution_status_from_truth_evaluation(
 
     assert report["planner_artifact"] == "curobo_route_plan.json"
     assert report["schema"] == "task1_survey_report"
+    assert list(report)[:15] == [
+        "schema",
+        "stage",
+        "status",
+        "failure_stage",
+        "message",
+        "candidate_count",
+        "candidates",
+        "view_count",
+        "processed_view_count",
+        "successful_view_count",
+        "failed_view_count",
+        "unprocessed_view_count",
+        "observation_count",
+        "localization_failure_count",
+        "artifact_generation_failure_count",
+    ]
+    assert report["failure_stage"] == "survey_route"
+    assert report["candidate_count"] == 0
+    assert report["view_count"] == 16
+    assert report["processed_view_count"] == 0
+    assert report["unprocessed_view_count"] == 16
     assert report["artifact_retention"]["survey_depth"] == {
         "enabled": False,
         "format": None,
@@ -1298,8 +1385,32 @@ def test_survey_report_separates_execution_status_from_truth_evaluation(
     completed = benchmark.run(successful_route, planner_artifact="curobo_route_plan.json")
 
     assert completed["status"] == "success"
-    assert completed["candidate_position_evaluation"] is None
-    assert completed["simulation_evaluation"] is None
+    assert "candidate_position_evaluation" not in completed
+    assert "simulation_evaluation" not in completed
+    survey_dir = tmp_path / "persisted_survey"
+    persisted = _persist_survey_production_report(survey_dir, completed)
+    assert "observations" not in persisted
+    assert "fusion_diagnostics" not in persisted
+    assert "detection_report" not in persisted["views"][0]
+    diagnostics = json.loads(
+        (survey_dir / "survey_diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert diagnostics["views"][0]["detection_report"] == {
+        "view_id": "survey_0000",
+        "detections": [],
+    }
+    _attach_survey_evaluation(
+        survey_dir,
+        persisted,
+        {
+            "schema": "task1_survey_simulation_evaluation",
+            "status": "completed",
+            "evaluation_only": True,
+            "used_for_production_control": False,
+        },
+    )
+    assert persisted["evaluation_status"] == "completed"
+    assert Path(persisted["evaluation_path"]).name == "survey_evaluation.json"
 
 
 def test_survey_route_artifact_rejects_stale_or_non_executable_data(tmp_path: Path) -> None:
@@ -1500,6 +1611,12 @@ def _write_replay_run(root: Path, name: str) -> Path:
                 results_by_id["candidate_002"],
                 results_by_id["candidate_003"],
             ],
+            "stable_objects": [
+                {
+                    "candidate_id": "candidate_002",
+                    "rgb_path": "images/candidate_002.png",
+                }
+            ],
             "simulation": {
                 "model_path": "examples/mujoco/gen3_with_tank.xml",
                 "camera_name": "gen3_wrist",
@@ -1564,23 +1681,19 @@ def _observation(
     )
 
 
-def _zoom_final_result(
+def _zoom_stable_object(
     candidate_id: str,
     rgb_path: Path,
     bbox_xyxy: list[float],
 ) -> dict[str, object]:
     return {
         "candidate_id": candidate_id,
-        "status": "success",
-        "failure_stage": None,
         "rgb_path": str(rgb_path),
-        "selected_detection": {
-            "detection_id": f"{candidate_id}:detected",
-            "class_name": "marker",
-            "display_name": "记号笔",
-            "confidence": 0.95,
-            "bbox_xyxy": bbox_xyxy,
-        },
+        "detection_id": f"{candidate_id}:detected",
+        "class_name": "marker",
+        "display_name": "记号笔",
+        "confidence": 0.95,
+        "bbox_xyxy": bbox_xyxy,
     }
 
 

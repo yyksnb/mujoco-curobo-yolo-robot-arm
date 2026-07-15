@@ -53,33 +53,58 @@ def localize_capture_manifest(
             }
             artifact_failures.append(failure)
             view_artifact_failures.append(failure)
-        detection_reports.append(
-            {
-                **batch.source_report,
-                "annotated_rgb_path": (str(annotated_rgb_path) if annotated_rgb_path is not None else None),
-                "artifact_status": ("failed" if view_artifact_failures else "success"),
-                "artifact_failures": view_artifact_failures,
-            }
-        )
+        localized_count = 0
         for detection in batch.detections:
             try:
                 observations.append(localize_detection(frame, detection, policy))
+                localized_count += 1
             except ValueError as exc:
                 failures.append(
                     {"view_id": frame.view_id, "detection_id": detection.detection_id, "message": str(exc)}
                 )
+        detection_reports.append(
+            {
+                "view_id": frame.view_id,
+                "status": "success",
+                "detection_count": len(batch.detections),
+                "localized_detection_count": localized_count,
+                "detection_report": batch.source_report,
+                "rgb_path": frame.rgb_path,
+                "annotated_rgb_path": (
+                    str(annotated_rgb_path) if annotated_rgb_path is not None else None
+                ),
+                "artifact_status": (
+                    "failed" if view_artifact_failures else "success"
+                ),
+                "artifact_failures": view_artifact_failures,
+            }
+        )
     fusion_result = fuse_observations_with_report(observations, policy)
+    candidates = [candidate.to_dict() for candidate in fusion_result.candidates]
+    status = "success" if not failures else "partial"
     return {
-        "status": "success" if not failures else "partial",
+        "status": status,
+        "failure_stage": None if status == "success" else "depth_localization",
+        "message": (
+            f"Processed all {len(frames)} manifest views; localized {len(candidates)} candidates."
+        ),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "view_count": len(frames),
+        "processed_view_count": len(detection_reports),
+        "successful_view_count": len(detection_reports),
+        "failed_view_count": 0,
+        "unprocessed_view_count": len(frames) - len(detection_reports),
+        "observation_count": len(observations),
+        "localization_failure_count": len(failures),
+        "artifact_generation_failure_count": len(artifact_failures),
         "source_manifest_path": str(manifest_path),
         "detection_source": detector.source_metadata(),
         "candidate_localization_policy": policy.to_dict(),
-        "detection_reports": detection_reports,
+        "views": detection_reports,
         "observations": [observation.to_dict() for observation in observations],
-        "candidates": [candidate.to_dict() for candidate in fusion_result.candidates],
-        "fusion_diagnostics": fusion_result.diagnostics,
         "localization_failures": failures,
-        "artifact_generation_failure_count": len(artifact_failures),
+        "fusion_diagnostics": fusion_result.diagnostics,
     }
 
 

@@ -130,10 +130,14 @@ def run_zoom_stage(
     raw_results = final_report.get("results")
     if not isinstance(raw_results, list):
         raise ValueError("Zoom input Final results must be a list")
+    raw_stable_objects = final_report.get("stable_objects")
+    if not isinstance(raw_stable_objects, list):
+        raise ValueError("Zoom input Final stable_objects must be a list")
+    stable_by_id = _stable_objects_by_candidate(raw_stable_objects)
 
     resolved_output_dir = output_dir.resolve()
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
-    results: list[dict[str, Any]] = []
+    validated_results: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for index, value in enumerate(raw_results):
         if not isinstance(value, dict):
@@ -149,6 +153,25 @@ def run_zoom_stage(
             raise ValueError(
                 f"Final result[{index}] status must be success or failed"
             )
+        validated_results.append(value)
+
+    successful_ids = {
+        str(value["candidate_id"])
+        for value in validated_results
+        if value["status"] == "success"
+    }
+    missing_stable_ids = sorted(successful_ids - set(stable_by_id))
+    extra_stable_ids = sorted(set(stable_by_id) - successful_ids)
+    if missing_stable_ids or extra_stable_ids:
+        raise ValueError(
+            "Final successful results and stable_objects must correspond one-to-one; "
+            f"missing={missing_stable_ids}, extra={extra_stable_ids}"
+        )
+
+    results: list[dict[str, Any]] = []
+    for value in validated_results:
+        candidate_id = str(value["candidate_id"])
+        result_status = value["status"]
         if result_status != "success":
             results.append(
                 {
@@ -165,7 +188,7 @@ def run_zoom_stage(
             continue
         results.append(
             _zoom_successful_result(
-                value,
+                stable_by_id[candidate_id],
                 candidate_id=candidate_id,
                 final_report_path=report_path,
                 output_dir=resolved_output_dir,
@@ -174,7 +197,7 @@ def run_zoom_stage(
             )
         )
 
-    eligible_count = sum(value.get("status") == "success" for value in raw_results)
+    eligible_count = len(successful_ids)
     successful_count = sum(result["status"] == "success" for result in results)
     failed_count = sum(result["status"] == "failed" for result in results)
     skipped_count = sum(result["status"] == "skipped" for result in results)
@@ -214,7 +237,7 @@ def run_zoom_stage(
 
 
 def _zoom_successful_result(
-    value: dict[str, Any],
+    stable_object: dict[str, Any],
     *,
     candidate_id: str,
     final_report_path: Path,
@@ -229,22 +252,15 @@ def _zoom_successful_result(
         "artifact_status": "not_attempted",
         "artifact_failures": [],
     }
-    selected = value.get("selected_detection")
-    rgb_value = value.get("rgb_path")
-    if not isinstance(selected, dict):
-        return _candidate_failure(
-            base,
-            "final_input_contract",
-            "Successful Final result is missing selected_detection.",
-        )
+    rgb_value = stable_object.get("rgb_path")
     if not isinstance(rgb_value, str) or not rgb_value:
         return _candidate_failure(
             base,
             "final_input_contract",
-            "Successful Final result is missing rgb_path.",
+            "Final stable_object is missing rgb_path.",
         )
     try:
-        bbox = _bbox(selected.get("bbox_xyxy"))
+        bbox = _bbox(stable_object.get("bbox_xyxy"))
     except ValueError as exc:
         return _candidate_failure(base, "final_input_contract", str(exc))
 
@@ -253,10 +269,10 @@ def _zoom_successful_result(
         {
             "source_rgb_path": str(source_path),
             "source_final_report": str(final_report_path),
-            "source_detection_id": selected.get("detection_id"),
-            "class_name": selected.get("class_name"),
-            "display_name": selected.get("display_name"),
-            "confidence": selected.get("confidence"),
+            "source_detection_id": stable_object.get("detection_id"),
+            "class_name": stable_object.get("class_name"),
+            "display_name": stable_object.get("display_name"),
+            "confidence": stable_object.get("confidence"),
             "input_bbox_xyxy": list(bbox),
         }
     )
@@ -301,7 +317,7 @@ def _zoom_successful_result(
             annotated_path = _render_zoom_annotation(
                 output_path,
                 output_dir / "annotated" / f"{candidate_id}.png",
-                selected,
+                stable_object,
                 plan.output_bbox_xyxy,
                 candidate_id=candidate_id,
             )
@@ -597,27 +613,27 @@ def _crop_axis_interval(
 def _render_zoom_annotation(
     rgb_path: Path,
     output_path: Path,
-    selected: dict[str, Any],
+    stable_object: dict[str, Any],
     bbox_xyxy: tuple[float, float, float, float],
     *,
     candidate_id: str,
 ) -> Path:
-    detection_id = selected.get("detection_id")
-    confidence = selected.get("confidence")
-    class_name = selected.get("class_name")
-    display_name = selected.get("display_name")
+    detection_id = stable_object.get("detection_id")
+    confidence = stable_object.get("confidence")
+    class_name = stable_object.get("class_name")
+    display_name = stable_object.get("display_name")
     if not isinstance(detection_id, str) or not detection_id:
-        raise ValueError(f"{candidate_id}: selected_detection.detection_id is invalid")
+        raise ValueError(f"{candidate_id}: stable_object.detection_id is invalid")
     if (
         isinstance(confidence, bool)
         or not isinstance(confidence, (int, float))
         or not math.isfinite(float(confidence))
     ):
-        raise ValueError(f"{candidate_id}: selected_detection.confidence is invalid")
+        raise ValueError(f"{candidate_id}: stable_object.confidence is invalid")
     if class_name is not None and not isinstance(class_name, str):
-        raise ValueError(f"{candidate_id}: selected_detection.class_name is invalid")
+        raise ValueError(f"{candidate_id}: stable_object.class_name is invalid")
     if display_name is not None and not isinstance(display_name, str):
-        raise ValueError(f"{candidate_id}: selected_detection.display_name is invalid")
+        raise ValueError(f"{candidate_id}: stable_object.display_name is invalid")
     return render_detection_overlay(
         rgb_path,
         (
@@ -671,6 +687,26 @@ def _candidate_failure(
     }
 
 
+def _stable_objects_by_candidate(
+    raw_stable_objects: list[Any],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for index, value in enumerate(raw_stable_objects):
+        if not isinstance(value, dict):
+            raise ValueError(f"Final stable_objects[{index}] must be an object")
+        candidate_id = value.get("candidate_id")
+        if not isinstance(candidate_id, str) or _CANDIDATE_ID.fullmatch(candidate_id) is None:
+            raise ValueError(
+                f"Final stable_objects[{index}] has an invalid candidate_id"
+            )
+        if candidate_id in result:
+            raise ValueError(
+                f"Final stable_object candidate_id is duplicated: {candidate_id}"
+            )
+        result[candidate_id] = value
+    return result
+
+
 def _zoom_report_message(
     *,
     eligible_count: int,
@@ -688,10 +724,10 @@ def _zoom_report_message(
 
 def _bbox(value: Any) -> tuple[float, float, float, float]:
     if not isinstance(value, (list, tuple)) or len(value) != 4:
-        raise ValueError("selected_detection.bbox_xyxy must contain four numbers")
-    result = tuple(_finite_number(item, "selected_detection.bbox_xyxy") for item in value)
+        raise ValueError("stable_object.bbox_xyxy must contain four numbers")
+    result = tuple(_finite_number(item, "stable_object.bbox_xyxy") for item in value)
     if result[2] <= result[0] or result[3] <= result[1]:
-        raise ValueError("selected_detection.bbox_xyxy must have positive area")
+        raise ValueError("stable_object.bbox_xyxy must have positive area")
     return result  # type: ignore[return-value]
 
 

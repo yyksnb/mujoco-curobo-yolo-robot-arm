@@ -45,6 +45,12 @@ from task1.zoom.processing import (
 )
 
 
+SURVEY_REPORT_SCHEMA = "task1_survey_report"
+SURVEY_DIAGNOSTICS_SCHEMA = "task1_survey_diagnostics"
+SURVEY_EVALUATION_SCHEMA = "task1_survey_simulation_evaluation"
+FINAL_DIAGNOSTICS_SCHEMA = "task1_final_diagnostics"
+
+
 @dataclass(frozen=True)
 class PipelineOptions:
     repo_root: Path
@@ -109,26 +115,27 @@ def _run_survey_worker(
         detector=YoloDetector(survey_config),
         yolo_evaluation_policy=survey_config.evaluation.yolo,
     )
-    report = simulation.run(
+    production_report = simulation.run(
         route,
         planner_artifact=planner_artifact,
         policy=survey_config.localization,
     )
-    report_path = survey_dir / "survey_report.json"
-    _write_json(report_path, report)
-    if report.get("status") != "success":
+    report = _persist_survey_production_report(survey_dir, production_report)
+    if production_report.get("status") != "success":
         return
 
     try:
-        report.update(simulation.evaluate(report, policy=survey_config.localization))
-    except Exception as exc:
-        report.update(
-            _survey_evaluation_error(
-                primary_stage="evaluation_module",
-                message=f"{type(exc).__name__}: {exc}",
-            )
+        evaluation = simulation.evaluate(
+            production_report,
+            policy=survey_config.localization,
         )
-    _write_json(report_path, report)
+    except Exception as exc:
+        evaluation = _survey_evaluation_error(
+            primary_stage="evaluation_module",
+            message=f"{type(exc).__name__}: {exc}",
+        )
+    _attach_survey_evaluation(survey_dir, report, evaluation)
+    _write_json(survey_dir / "survey_report.json", report)
 
 
 def _run_final_worker(
@@ -142,7 +149,6 @@ def _run_final_worker(
     source_survey_report: Path,
 ) -> None:
     """Keep native CUDA/OpenGL runtimes out of the orchestrator process."""
-    report_path = final_dir / "final_report.json"
     capture = None
     try:
         from robot_arm_pipeline.planning import (
@@ -222,7 +228,8 @@ def _run_final_worker(
         )
         report["simulation"] = _final_simulation_metadata(final_config)
     final_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(report_path, report)
+    production_report = report
+    report = _persist_final_production_report(final_dir, production_report)
 
     try:
         from task1.final.evaluation import evaluate_final_simulation
@@ -233,7 +240,7 @@ def _run_final_worker(
             else ()
         )
         evaluation = evaluate_final_simulation(
-            final_report=report,
+            final_report=production_report,
             candidates=candidates,
             layout_path=layout_path,
             traces=traces,
@@ -247,7 +254,7 @@ def _run_final_worker(
             message=f"{type(evaluation_exc).__name__}: {evaluation_exc}",
         )
     _attach_final_evaluation(final_dir, report, evaluation)
-    _write_json(report_path, report)
+    _write_json(final_dir / "final_report.json", report)
 
 
 def _final_simulation_metadata(config: FinalConfig) -> dict[str, Any]:
@@ -280,19 +287,173 @@ def _final_evaluation_error(*, primary_stage: str, message: str) -> dict[str, An
 
 def _survey_evaluation_error(*, primary_stage: str, message: str) -> dict[str, Any]:
     return {
+        "schema": SURVEY_EVALUATION_SCHEMA,
+        "status": "error",
+        "evaluation_only": True,
+        "used_for_production_control": False,
         "candidate_position_evaluation": None,
         "yolo_evaluation": None,
         "detection_diagnosis": None,
-        "simulation_evaluation": {
-            "status": "error",
-            "evaluation_only": True,
-            "used_for_production_control": False,
-            "diagnosis": {
-                "primary_stage": primary_stage,
-                "message": message,
-            },
+        "diagnosis": {
+            "primary_stage": primary_stage,
+            "message": message,
         },
     }
+
+
+def _persist_survey_production_report(
+    survey_dir: Path,
+    production_report: dict[str, Any],
+) -> dict[str, Any]:
+    report_path = survey_dir / "survey_report.json"
+    diagnostics_path = survey_dir / "survey_diagnostics.json"
+    raw_views = production_report.get("views", [])
+    views = raw_views if isinstance(raw_views, list) else []
+    diagnostics = {
+        "schema": SURVEY_DIAGNOSTICS_SCHEMA,
+        "stage": "survey",
+        "source_report": str(report_path),
+        "views": [
+            {
+                "view_id": view.get("view_id"),
+                "detection_report": view.get("detection_report"),
+                "artifact_failures": view.get("artifact_failures", []),
+            }
+            for view in views
+            if isinstance(view, dict)
+        ],
+        "observations": production_report.get("observations", []),
+        "localization_failures": production_report.get("localization_failures", []),
+        "fusion_diagnostics": production_report.get("fusion_diagnostics"),
+    }
+    report = dict(production_report)
+    report["views"] = [
+        _survey_view_summary(view) for view in views if isinstance(view, dict)
+    ]
+    for field in (
+        "observations",
+        "localization_failures",
+        "fusion_diagnostics",
+        "candidate_position_evaluation",
+        "yolo_evaluation",
+        "detection_diagnosis",
+        "simulation_evaluation",
+    ):
+        report.pop(field, None)
+    simulation = report.get("simulation")
+    simulation_enabled = (
+        simulation.get("enabled") if isinstance(simulation, dict) else None
+    )
+    report["diagnostics_path"] = str(diagnostics_path)
+    report["evaluation_status"] = (
+        "pending"
+        if simulation_enabled is True and report.get("status") == "success"
+        else "not_applicable"
+        if simulation_enabled is False
+        else "not_run"
+    )
+    report["evaluation_path"] = None
+    _write_json(diagnostics_path, diagnostics)
+    _write_json(report_path, report)
+    return report
+
+
+def _survey_view_summary(view: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "view_id",
+        "status",
+        "failure_stage",
+        "message",
+        "detection_count",
+        "localized_detection_count",
+        "rgb_path",
+        "annotated_rgb_path",
+        "depth_path",
+        "artifact_status",
+    )
+    result = {field: view[field] for field in fields if field in view}
+    failures = view.get("artifact_failures")
+    result["artifact_failure_count"] = len(failures) if isinstance(failures, list) else 0
+    return result
+
+
+def _persist_final_production_report(
+    final_dir: Path,
+    production_report: dict[str, Any],
+) -> dict[str, Any]:
+    report_path = final_dir / "final_report.json"
+    diagnostics_path = final_dir / "final_diagnostics.json"
+    raw_results = production_report.get("results", [])
+    results = raw_results if isinstance(raw_results, list) else []
+    diagnostics = {
+        "schema": FINAL_DIAGNOSTICS_SCHEMA,
+        "stage": "final",
+        "source_report": str(report_path),
+        "results": [
+            _final_result_diagnostics(result)
+            for result in results
+            if isinstance(result, dict)
+        ],
+    }
+    report = dict(production_report)
+    report["results"] = [
+        _final_result_summary(result) for result in results if isinstance(result, dict)
+    ]
+    report.pop("simulation_evaluation", None)
+    report.pop("simulation_evaluation_path", None)
+    report["diagnostics_path"] = str(diagnostics_path)
+    report["evaluation_status"] = (
+        "not_run"
+        if report.get("failure_stage") == "final_worker_process"
+        else "pending"
+    )
+    report["evaluation_path"] = None
+    _write_json(diagnostics_path, diagnostics)
+    _write_json(report_path, report)
+    return report
+
+
+def _final_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "candidate_id",
+        "status",
+        "failure_stage",
+        "message",
+        "processing_index",
+        "planner_artifact",
+        "planning_strategy",
+        "camera_target",
+        "rgb_path",
+        "annotated_rgb_path",
+        "localized_detection_count",
+        "artifact_status",
+    )
+    summary = {field: result[field] for field in fields if field in result}
+    failures = result.get("artifact_failures")
+    summary["artifact_failure_count"] = len(failures) if isinstance(failures, list) else 0
+    return summary
+
+
+def _final_result_diagnostics(result: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "candidate_id",
+        "camera_target_attempts",
+        "detection_report",
+        "localization_failures",
+        "artifact_failures",
+    )
+    return {field: result[field] for field in fields if field in result}
+
+
+def _attach_survey_evaluation(
+    survey_dir: Path,
+    report: dict[str, Any],
+    evaluation: dict[str, Any],
+) -> None:
+    evaluation_path = survey_dir / "survey_evaluation.json"
+    _write_json(evaluation_path, evaluation)
+    report["evaluation_status"] = evaluation.get("status")
+    report["evaluation_path"] = str(evaluation_path)
 
 
 def _attach_final_evaluation(
@@ -302,8 +463,8 @@ def _attach_final_evaluation(
 ) -> None:
     evaluation_path = final_dir / "final_evaluation.json"
     _write_json(evaluation_path, evaluation)
-    report["simulation_evaluation"] = evaluation
-    report["simulation_evaluation_path"] = str(evaluation_path)
+    report["evaluation_status"] = evaluation.get("status")
+    report["evaluation_path"] = str(evaluation_path)
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -336,8 +497,9 @@ def _load_valid_final_report(path: Path) -> dict[str, Any] | None:
         "results",
         "stable_objects",
         "simulation",
-        "simulation_evaluation",
-        "simulation_evaluation_path",
+        "diagnostics_path",
+        "evaluation_status",
+        "evaluation_path",
     }
     if (
         not isinstance(value, dict)
@@ -358,6 +520,15 @@ def _load_valid_survey_report(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     required_fields = {
+        "failure_stage",
+        "candidate_count",
+        "view_count",
+        "processed_view_count",
+        "successful_view_count",
+        "failed_view_count",
+        "unprocessed_view_count",
+        "observation_count",
+        "localization_failure_count",
         "planner_artifact",
         "detection_source",
         "candidate_localization_policy",
@@ -365,15 +536,11 @@ def _load_valid_survey_report(path: Path) -> dict[str, Any] | None:
         "artifact_retention",
         "layout_path",
         "views",
-        "observations",
         "candidates",
-        "localization_failures",
         "artifact_generation_failure_count",
-        "candidate_position_evaluation",
-        "yolo_evaluation",
-        "detection_diagnosis",
-        "fusion_diagnostics",
-        "simulation_evaluation",
+        "diagnostics_path",
+        "evaluation_status",
+        "evaluation_path",
     }
     if (
         not isinstance(value, dict)
@@ -508,18 +675,28 @@ class Task1Pipeline:
                     "--retain-survey-depth applies only to generated MuJoCo depth; "
                     "capture-manifest depth files remain owned by their source manifest"
                 )
+            production = localize_capture_manifest(
+                self.options.capture_manifest,
+                detector=YoloDetector(survey_config),
+                annotated_image_dir=survey_dir / "annotated",
+                policy=survey_config.localization,
+            )
             report = {
-                **localize_capture_manifest(
-                    self.options.capture_manifest,
-                    detector=YoloDetector(survey_config),
-                    annotated_image_dir=survey_dir / "annotated",
-                    policy=survey_config.localization,
-                ),
                 "schema": "task1_survey_report",
                 "stage": "survey",
+                **production,
                 "planner_artifact": planner_artifact,
+                "layout_path": str(self.layout_path),
+                "simulation": {"enabled": False, "renderer": None},
+                "artifact_retention": {
+                    "survey_depth": {
+                        "enabled": False,
+                        "format": None,
+                        "owned_by": "capture_manifest",
+                    }
+                },
             }
-            _write_json(report_path, report)
+            report = _persist_survey_production_report(survey_dir, report)
         else:
             worker = multiprocessing.get_context("spawn").Process(
                 target=_run_survey_worker,
@@ -548,15 +725,14 @@ class Task1Pipeline:
                         f"{worker.exitcode} before producing a valid production report."
                     )
                 if report["status"] == "success":
-                    report.update(
-                        _survey_evaluation_error(
-                            primary_stage="evaluation_worker_process",
-                            message=(
-                                "Survey production completed, but its evaluation process "
-                                f"exited abnormally with code {worker.exitcode}."
-                            ),
-                        )
+                    evaluation = _survey_evaluation_error(
+                        primary_stage="evaluation_worker_process",
+                        message=(
+                            "Survey production completed, but its evaluation process "
+                            f"exited abnormally with code {worker.exitcode}."
+                        ),
                     )
+                    _attach_survey_evaluation(survey_dir, report, evaluation)
                     _write_json(report_path, report)
             if report is None:
                 raise ValueError("Task1 Survey worker produced an invalid report contract")
@@ -635,7 +811,7 @@ class Task1Pipeline:
                 candidate_count=len(candidates),
             )
             report["simulation"] = _final_simulation_metadata(final_config)
-            _write_json(final_report_path, report)
+            _persist_final_production_report(final_dir, report)
             self.final_report_path = final_report_path
             return False
         if not final_report_path.is_file():

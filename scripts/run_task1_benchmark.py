@@ -299,8 +299,14 @@ def _collect_survey_record(
     returncode: int,
 ) -> dict[str, Any]:
     report_path = run_dir / "survey/survey_report.json" if run_dir else None
+    evaluation_path = run_dir / "survey/survey_evaluation.json" if run_dir else None
     report = _load_json(report_path) if report_path and report_path.is_file() else {}
-    evaluation = report.get("candidate_position_evaluation")
+    evaluation_report = (
+        _load_json(evaluation_path)
+        if evaluation_path and evaluation_path.is_file()
+        else {}
+    )
+    evaluation = evaluation_report.get("candidate_position_evaluation")
     candidates = report.get("candidates")
     candidate_count = len(candidates) if isinstance(candidates, list) else 0
     return {
@@ -314,7 +320,7 @@ def _collect_survey_record(
             if isinstance(evaluation, dict) and evaluation.get("success") is True
             else "failed" if isinstance(evaluation, dict) else None
         ),
-        "diagnosis": report.get("detection_diagnosis"),
+        "diagnosis": evaluation_report.get("detection_diagnosis"),
         "metrics": evaluation if isinstance(evaluation, dict) else None,
     }
 

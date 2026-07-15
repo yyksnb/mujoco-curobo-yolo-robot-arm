@@ -405,6 +405,29 @@ def _load_result_stills(
         raise ValueError("Task1 replay video requires a task1_zoom_report artifact")
 
     ordered_final = _ordered_final_results(final_report)
+    stable_objects = _mapping_list(
+        final_report.get("stable_objects"), "Final stable_objects"
+    )
+    stable_by_id: dict[str, dict[str, Any]] = {}
+    for index, stable_object in enumerate(stable_objects):
+        candidate_id = _required_string(
+            stable_object.get("candidate_id"),
+            f"Final stable_objects[{index}].candidate_id",
+        )
+        if candidate_id in stable_by_id:
+            raise ValueError(
+                f"Task1 Final report has duplicate stable_object candidate_id: {candidate_id}"
+            )
+        stable_by_id[candidate_id] = stable_object
+    successful_final_ids = {
+        candidate_id
+        for candidate_id, result in ordered_final
+        if result.get("status") == "success"
+    }
+    if set(stable_by_id) != successful_final_ids:
+        raise ValueError(
+            "Task1 Final stable_objects must match its successful results"
+        )
     zoom_results = _mapping_list(zoom_report.get("results"), "Zoom results")
     zoom_by_id: dict[str, dict[str, Any]] = {}
     for index, result in enumerate(zoom_results):
@@ -426,11 +449,11 @@ def _load_result_stills(
         if final_result.get("status") != "success" or zoom_result.get("status") != "success":
             continue
         final_rgb_path = _resolve_artifact_path(
-            final_result.get("rgb_path"),
+            stable_by_id[candidate_id].get("rgb_path"),
             report_path=final_report_path,
             run_dir=run_dir,
             repo_root=repo_root,
-            field=f"Final result {candidate_id} rgb_path",
+            field=f"Final stable_object {candidate_id} rgb_path",
         )
         zoom_rgb_path = _resolve_artifact_path(
             zoom_result.get("output_rgb_path"),

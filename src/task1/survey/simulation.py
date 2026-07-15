@@ -92,6 +92,7 @@ class MujocoSurveySimulation:
         if not route_plan.success:
             return self._report(
                 status="failed",
+                failure_stage="survey_route",
                 view_reports=[],
                 observations=[],
                 candidates=[],
@@ -145,6 +146,7 @@ class MujocoSurveySimulation:
         except Exception as exc:
             return self._report(
                 status="failed",
+                failure_stage="survey_execution",
                 view_reports=view_reports,
                 observations=observations,
                 candidates=[],
@@ -162,6 +164,7 @@ class MujocoSurveySimulation:
         self._production_observations = tuple(observations)
         return self._report(
             status="success",
+            failure_stage=None,
             view_reports=view_reports,
             observations=observations,
             candidates=candidate_payloads,
@@ -268,14 +271,13 @@ class MujocoSurveySimulation:
             else None
         )
         return {
+            "schema": "task1_survey_simulation_evaluation",
+            "status": "completed",
+            "evaluation_only": True,
+            "used_for_production_control": False,
             "candidate_position_evaluation": candidate_evaluation,
             "yolo_evaluation": yolo_evaluation,
             "detection_diagnosis": detection_diagnosis,
-            "simulation_evaluation": {
-                "status": "completed",
-                "evaluation_only": True,
-                "used_for_production_control": False,
-            },
         }
 
     def close(self) -> None:
@@ -441,6 +443,7 @@ class MujocoSurveySimulation:
         self,
         *,
         status: str,
+        failure_stage: str | None,
         view_reports: list[dict[str, Any]],
         observations: list[SurveyObservation],
         candidates: list[dict[str, Any]],
@@ -454,10 +457,28 @@ class MujocoSurveySimulation:
             "schema": "task1_survey_report",
             "stage": "survey",
             "status": status,
+            "failure_stage": failure_stage,
             "message": message,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "view_count": len(SURVEY_VIEWS),
+            "processed_view_count": len(view_reports),
+            "successful_view_count": sum(
+                view.get("status") == "success" for view in view_reports
+            ),
+            "failed_view_count": sum(
+                view.get("status") == "failed" for view in view_reports
+            ),
+            "unprocessed_view_count": len(SURVEY_VIEWS) - len(view_reports),
+            "observation_count": len(observations),
+            "localization_failure_count": len(localization_failures),
+            "artifact_generation_failure_count": sum(
+                len(view.get("artifact_failures", [])) for view in view_reports
+            ),
             "planner_artifact": planner_artifact,
             "detection_source": {**self.detector.source_metadata(), "simulation_input": True},
             "candidate_localization_policy": localization_policy.to_dict(),
+            "layout_path": str(self.layout_path),
             "simulation": {
                 "enabled": True,
                 "renderer": "mujoco",
@@ -471,17 +492,10 @@ class MujocoSurveySimulation:
                     "format": "npy_float32" if self.config.retain_depth_artifacts else None,
                 }
             },
-            "layout_path": str(self.layout_path),
             "views": view_reports,
             "observations": [observation.to_dict() for observation in observations],
-            "candidates": candidates,
             "localization_failures": localization_failures,
-            "artifact_generation_failure_count": sum(len(view.get("artifact_failures", [])) for view in view_reports),
-            "candidate_position_evaluation": None,
-            "yolo_evaluation": None,
-            "detection_diagnosis": None,
             "fusion_diagnostics": fusion_diagnostics,
-            "simulation_evaluation": None,
         }
         return report
 
