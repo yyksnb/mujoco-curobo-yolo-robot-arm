@@ -9,14 +9,22 @@ from _bootstrap import add_src_to_path
 
 add_src_to_path()
 
-from robot_arm_pipeline.perception import load_bodex_grasp_target
-from robot_arm_pipeline.pipeline import default_robot_state
-from robot_arm_pipeline.planning.curobo_planner import CuroboPlanner
-from robot_arm_pipeline.types import ObjectPose, PlanningRequest
+from robot_arm_pipeline.perception import load_bodex_grasp_target  # noqa: E402
+from robot_arm_pipeline.pipeline import default_robot_state  # noqa: E402
+from robot_arm_pipeline.planning.curobo_planner import (  # noqa: E402
+    DEFAULT_GRAPH_CONFIG,
+    DEFAULT_ROBOT_CONFIG,
+    DEFAULT_WORLD_CONFIG,
+    CuroboPlanner,
+)
+from robot_arm_pipeline.types import ObjectPose, PlanningRequest  # noqa: E402
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Stage 4.1 CuroboPlanner skeleton.")
+    parser = argparse.ArgumentParser(description="Run the shared cuRobo planner.")
     parser.add_argument("--bodex-grasp", type=Path, default=Path("examples/bodex_grasp_target.json"))
     parser.add_argument("--config", type=Path, default=Path("configs/curobo/example_planner_config.json"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
@@ -36,12 +44,10 @@ def main() -> None:
     )
 
     planner = CuroboPlanner(
-        robot_config_path=config.get("robot_config_path"),
-        world_config_path=config.get("world_config_path"),
-        ee_link=config.get("ee_link"),
-        base_link=config.get("base_link"),
-        joint_names=tuple(config.get("joint_names", ())),
-        use_cuda=bool(config.get("use_cuda", True)),
+        repo_root=REPO_ROOT,
+        robot_config_path=Path(config.get("robot_config_path", DEFAULT_ROBOT_CONFIG)),
+        world_config_path=Path(config.get("world_config_path", DEFAULT_WORLD_CONFIG)),
+        graph_config_path=Path(config.get("graph_config_path", DEFAULT_GRAPH_CONFIG)),
     )
     result = planner.plan(request)
     report_path = _save_report(args.output_dir, args.bodex_grasp, args.config, result)

@@ -8,7 +8,9 @@
 - `final/processing.py`、`simulation.py`、`evaluation.py` 分别负责生产处理、MuJoCo 采集和评估。
 - `zoom/processing.py` 只消费 Final 正式结果，负责数字裁剪、放大和独立报告。
 - `replay.py` 只读消费一次运行的 layout、报告和已执行 cuRobo 轨迹，在 MuJoCo GUI 中回放。
-- cuRobo camera-route planning 保持在 `robot_arm_pipeline.planning`。
+- Task1 只依赖 `PoseRoutePlanner` 的 pose、批量 IK 和轨迹正式接口；真实 cuRobo runtime 由共享
+  `robot_arm_pipeline.planning.CuroboPlanner` 提供。Task1 将开口方向策略映射为通用的 Cartesian
+  continuation，不向共享规划器传入候选、类别、seed 或评估真值。
 
 生产模块只消费正式输入。Final 只解析候选的 `candidate_id`、`bottom_position_world` 和
 `footprint_polygon_xy`；编排层另读取正式的 `planner_artifact` 作为起始关节状态。seed、layout
@@ -84,7 +86,7 @@ Zoom 是非门控展示阶段：Final 为 `partial/failed` 但已落盘合法报
 ## Replay
 
 Replay 不属于生产识别阶段，不重新运行 YOLO、深度定位或 cuRobo。它只读取 layout、Survey/Final
-报告和 `CameraRoutePlan` 正式字段，不依赖两个阶段的内部配置。Survey 完整轨迹按报告顺序回放；Final
+报告和 `MotionPlanResult` 正式字段，不依赖两个阶段的内部配置。Survey 完整轨迹按报告顺序回放；Final
 再按 `candidate_processing_order` 读取各结果顶层 `planner_artifact`，失败规划尝试和没有可执行轨迹的
 候选不会被补路。
 

@@ -11,11 +11,10 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from robot_arm_pipeline.planning import (
-    CameraRoutePlan,
-    CameraRouteSegment,
-    CameraTargetIKSolution,
+    MotionPlanResult,
+    MotionPlanSegment,
+    IKSolution,
 )
-from robot_arm_pipeline.planning.curobo_camera_route import DEFAULT_START_JOINT_POSITIONS
 from task1.final.processing import (
     FinalAssociationPolicy,
     FinalCameraPolicy,
@@ -85,6 +84,7 @@ from task1.zoom.processing import load_zoom_config, run_zoom_stage
 from task1.survey.route import (
     JOINT_NAMES,
     ROUTE_SCHEMA,
+    SURVEY_START_JOINT_POSITIONS,
     SURVEY_VIEWS,
     load_survey_route_plan,
     make_survey_route_targets,
@@ -847,7 +847,7 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
 
     report = processor.run(
         candidates,
-        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
         source_survey_report=survey_report_path,
     )
 
@@ -897,7 +897,7 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
         for attempt in report["results"][0]["camera_target_attempts"]
         if attempt["status"] == "success"
     )
-    assert planned_attempt["planning_strategy"] == "portal_continuation"
+    assert planned_attempt["planning_strategy"] == "cartesian_continuation"
     assert planned_attempt["portal_ik_joint_distance"] is not None
 
     final_dir = tmp_path / "persisted_final"
@@ -932,7 +932,7 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
 
     report = processor.run(
         tuple(_final_candidate(index) for index in range(3)),
-        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
         source_survey_report=tmp_path / "survey_report.json",
     )
 
@@ -947,7 +947,7 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
 
     empty_report = empty_processor.run(
         (),
-        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
         source_survey_report=tmp_path / "survey_report.json",
     )
 
@@ -983,7 +983,7 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
         detector=_FinalDetectorStub(detections=()),
     ).run(
         (_final_candidate(0),),
-        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
         source_survey_report=tmp_path / "survey_report.json",
     )
     assert no_detection["results"][0]["failure_stage"] == "yolo_no_detection"
@@ -996,7 +996,7 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
         monkeypatch,
     ).run(
         (_final_candidate(0),),
-        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
         source_survey_report=tmp_path / "survey_report.json",
     )
     assert no_depth["results"][0]["failure_stage"] == "depth_localization"
@@ -1016,7 +1016,7 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
     )
     artifact_report = artifact_processor.run(
         (_final_candidate(0),),
-        start_joint_positions=DEFAULT_START_JOINT_POSITIONS,
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
         source_survey_report=tmp_path / "survey_report.json",
     )
     artifact_result = artifact_report["results"][0]
@@ -1297,7 +1297,7 @@ def test_yolo_evaluation_and_diagnosis_preserve_failure_stage() -> None:
 def test_survey_report_separates_execution_status_from_truth_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    route = CameraRoutePlan(
+    route = MotionPlanResult(
         success=False,
         planner_name="test_planner",
         joint_names=JOINT_NAMES,
@@ -1511,13 +1511,13 @@ def _write_replay_run(root: Path, name: str) -> Path:
 
     def route_plan(
         target_ids: tuple[str, ...], start: tuple[float, ...]
-    ) -> tuple[CameraRoutePlan, tuple[float, ...]]:
+    ) -> tuple[MotionPlanResult, tuple[float, ...]]:
         current = start
         segments = []
         for target_id in target_ids:
             terminal = tuple(value + 0.01 for value in current)
             segments.append(
-                CameraRouteSegment(
+                MotionPlanSegment(
                     target_id=target_id,
                     success=True,
                     message="planned",
@@ -1530,7 +1530,7 @@ def _write_replay_run(root: Path, name: str) -> Path:
                 )
             )
             current = terminal
-        return CameraRoutePlan(
+        return MotionPlanResult(
             success=True,
             planner_name="test",
             joint_names=joint_names,
@@ -1717,13 +1717,13 @@ def _box_spec(object_id: str, width: float, depth: float) -> TargetObjectSpec:
     )
 
 
-def _route_plan() -> CameraRoutePlan:
-    current = DEFAULT_START_JOINT_POSITIONS
+def _route_plan() -> MotionPlanResult:
+    current = SURVEY_START_JOINT_POSITIONS
     segments = []
     for index, view in enumerate(SURVEY_VIEWS):
         terminal = tuple(value + 0.001 * (index + 1) for value in current)
         segments.append(
-            CameraRouteSegment(
+            MotionPlanSegment(
                 target_id=view.view_id,
                 success=True,
                 message="planned",
@@ -1736,7 +1736,7 @@ def _route_plan() -> CameraRoutePlan:
         )
         current = terminal
     target_ids = tuple(view.view_id for view in SURVEY_VIEWS)
-    return CameraRoutePlan(
+    return MotionPlanResult(
         success=True,
         planner_name="test_curobo",
         joint_names=JOINT_NAMES,
@@ -1770,6 +1770,7 @@ class _DetectorStub:
 
 class _FinalPlannerStub:
     planner_name = "final_planner_stub"
+    joint_names = JOINT_NAMES
 
     def __init__(
         self,
@@ -1784,7 +1785,9 @@ class _FinalPlannerStub:
         self.calls: list[tuple[tuple[object, ...], tuple[float, ...]]] = []
         self.ik_calls: list[tuple[tuple[object, ...], tuple[float, ...]]] = []
 
-    def find_collision_free_ik(self, targets, start_joint_positions):
+    def find_collision_free_ik(self, targets, start_state):
+        start_joint_positions = start_state.joint_positions
+        assert start_state.joint_names == self.joint_names
         self.ik_calls.append((targets, start_joint_positions))
         solutions = []
         for target in targets:
@@ -1796,16 +1799,18 @@ class _FinalPlannerStub:
             index = int(candidate_id.rsplit("_", 1)[1])
             offset = self.ik_offsets.get(candidate_id, index * 0.01)
             solutions.append(
-                CameraTargetIKSolution(
+                IKSolution(
                     target.target_id,
                     tuple(value + offset for value in start_joint_positions),
                 )
             )
         return tuple(solutions)
 
-    def plan_camera_pose_route(
-        self, targets, start_joint_positions, strategy="direct_pose"
+    def plan_pose_route(
+        self, targets, start_state, strategy="direct_pose"
     ):
+        start_joint_positions = start_state.joint_positions
+        assert start_state.joint_names == self.joint_names
         self.calls.append((targets, start_joint_positions))
         target_id = targets[0].target_id
         force_failure = any(
@@ -1815,18 +1820,18 @@ class _FinalPlannerStub:
             candidate_id in target_id for candidate_id in self.portal_candidates
         )
         if force_failure or direct_failure:
-            segment = CameraRouteSegment(
+            segment = MotionPlanSegment(
                 target_id=target_id,
                 success=False,
                 message="planned failure",
                 planning_time_s=0.01,
                 waypoint_count=0,
                 planning_strategy=strategy,
-                portal_offset_m=(
-                    0.1 if strategy == "portal_continuation" else None
+                continuation_offset_m=(
+                    0.1 if strategy == "cartesian_continuation" else None
                 ),
             )
-            return CameraRoutePlan(
+            return MotionPlanResult(
                 success=False,
                 planner_name=self.planner_name,
                 joint_names=JOINT_NAMES,
@@ -1835,7 +1840,7 @@ class _FinalPlannerStub:
                 message="planned failure",
             )
         terminal = tuple(value + 0.01 for value in start_joint_positions)
-        segment = CameraRouteSegment(
+        segment = MotionPlanSegment(
             target_id=target_id,
             success=True,
             message="planned",
@@ -1845,9 +1850,11 @@ class _FinalPlannerStub:
             target_position_error_m=0.0,
             target_orientation_error_rad=0.0,
             planning_strategy=strategy,
-            portal_offset_m=0.1 if strategy == "portal_continuation" else None,
+            continuation_offset_m=(
+                0.1 if strategy == "cartesian_continuation" else None
+            ),
         )
-        return CameraRoutePlan(
+        return MotionPlanResult(
             success=True,
             planner_name=self.planner_name,
             joint_names=JOINT_NAMES,

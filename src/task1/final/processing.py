@@ -11,12 +11,13 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from robot_arm_pipeline.planning import (
-    CameraRoutePlanner,
-    CameraRouteTarget,
-    CameraTargetIKSolution,
-    offset_camera_target_along_local_z,
-    plan_camera_route,
+    PoseRoutePlanner,
+    PoseTarget,
+    IKSolution,
+    offset_pose_target_along_local_z,
+    plan_pose_route,
 )
+from robot_arm_pipeline.types import RobotState
 from task1.detection import Detector, YoloInferenceConfig, render_detection_overlay
 from task1.vision import (
     CandidateLocalizationPolicy,
@@ -130,8 +131,8 @@ class FinalCaptureResult:
 class _PreparedFinalCandidate:
     input_index: int
     candidate: FinalCandidate
-    target_attempts: tuple[tuple[CameraRouteTarget, dict[str, Any]], ...]
-    ik_solutions: tuple[CameraTargetIKSolution, ...]
+    target_attempts: tuple[tuple[PoseTarget, dict[str, Any]], ...]
+    ik_solutions: tuple[IKSolution, ...]
 
 
 class FinalCapture(Protocol):
@@ -333,7 +334,7 @@ def make_final_camera_targets(
     *,
     world_pose_base: RigidPose,
     policy: FinalCameraPolicy,
-) -> tuple[tuple[CameraRouteTarget, dict[str, Any]], ...]:
+) -> tuple[tuple[PoseTarget, dict[str, Any]], ...]:
     tan_vertical = math.tan(math.radians(policy.vertical_fov_deg) / 2.0)
     tan_horizontal = tan_vertical * policy.image_width / policy.image_height
     candidate_position = np.asarray(candidate.bottom_position_world, dtype=float)
@@ -409,7 +410,7 @@ def make_final_camera_targets(
                 (float(qw), float(qx), float(qy), float(qz)),
             )
             base_pose_camera = compose(world_pose_base, world_pose_camera)
-            target = CameraRouteTarget(
+            target = PoseTarget(
                 target_id=(
                     f"final_{candidate.candidate_id}_roll{roll_index:02d}"
                     f"_distance{distance_index:02d}"
@@ -452,7 +453,7 @@ class FinalProcessor:
     def __init__(
         self,
         *,
-        planner: CameraRoutePlanner,
+        planner: PoseRoutePlanner,
         capture: FinalCapture,
         detector: Detector,
         config: FinalConfig,
@@ -580,9 +581,10 @@ class FinalProcessor:
             if float(geometry["standoff_distance_scale"]) == scale
         )
         solutions = self.planner.find_collision_free_ik(
-            all_targets, start_joint_positions
+            all_targets,
+            RobotState(self.planner.joint_names, start_joint_positions),
         )
-        solutions_by_target: dict[str, list[CameraTargetIKSolution]] = {}
+        solutions_by_target: dict[str, list[IKSolution]] = {}
         for solution in solutions:
             solutions_by_target.setdefault(solution.target_id, []).append(solution)
         return tuple(
@@ -646,7 +648,7 @@ class FinalProcessor:
             "artifact_status": "not_attempted",
             "artifact_failures": [],
         }
-        solutions_by_target: dict[str, list[CameraTargetIKSolution]] = {}
+        solutions_by_target: dict[str, list[IKSolution]] = {}
         for solution in prepared.ik_solutions:
             solutions_by_target.setdefault(solution.target_id, []).append(solution)
         feasible_attempts = [
@@ -695,13 +697,14 @@ class FinalProcessor:
             if not self.config.planning.enable_portal_continuation:
                 return
             portal_targets = tuple(
-                offset_camera_target_along_local_z(
+                offset_pose_target_along_local_z(
                     target, self.config.planning.portal_offset_m
                 )
                 for target, _, _ in feasible_attempts
             )
             portal_solutions = self.planner.find_collision_free_ik(
-                portal_targets, current
+                portal_targets,
+                RobotState(self.planner.joint_names, current),
             )
             portal_distances: dict[str, float] = {}
             for solution in portal_solutions:
@@ -723,7 +726,7 @@ class FinalProcessor:
                     target,
                     geometry,
                     ik_solution,
-                    "portal_continuation",
+                    "cartesian_continuation",
                     portal_distance,
                 )
 
@@ -737,10 +740,10 @@ class FinalProcessor:
             attempted_target_ids.add(target.target_id)
             ik_distance = math.dist(current, ik_solution.joint_positions)
             try:
-                attempted_plan = plan_camera_route(
+                attempted_plan = plan_pose_route(
                     self.planner,
                     (target,),
-                    current,
+                    RobotState(self.planner.joint_names, current),
                     strategy=requested_strategy,
                 )
             except Exception as exc:
@@ -796,7 +799,7 @@ class FinalProcessor:
                         else None
                     ),
                     "portal_offset_m": (
-                        attempted_segment.portal_offset_m
+                        attempted_segment.continuation_offset_m
                         if attempted_segment is not None
                         else None
                     ),

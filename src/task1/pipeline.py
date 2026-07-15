@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from robot_arm_pipeline.planning import CameraRoutePlan
+from robot_arm_pipeline.planning import MotionPlanResult
 from task1.final.processing import (
     DEFAULT_FINAL_CONFIG_PATH,
     FINAL_REPORT_SCHEMA,
@@ -104,7 +104,7 @@ def _run_survey_worker(
     survey_config: SurveyDetectionConfig,
     layout_path: Path,
     survey_dir: Path,
-    route: CameraRoutePlan,
+    route: MotionPlanResult,
     planner_artifact: str,
 ) -> None:
     """Persist Survey production output before simulation-only evaluation."""
@@ -152,8 +152,8 @@ def _run_final_worker(
     capture = None
     try:
         from robot_arm_pipeline.planning import (
-            CameraRoutePlanningPolicy,
-            CuroboCameraRoutePlanner,
+            MotionPlanningPolicy,
+            CuroboPlanner,
         )
         from task1.final.simulation import MujocoFinalCapture
 
@@ -168,12 +168,12 @@ def _run_final_worker(
             ground_z_m=final_config.simulation.ground_z_m,
         )
         processor = FinalProcessor(
-            planner=CuroboCameraRoutePlanner(
+            planner=CuroboPlanner(
                 repo_root=repo_root,
                 robot_config_path=final_config.planning.robot_config_path,
                 world_config_path=final_config.planning.world_config_path,
                 graph_config_path=final_config.planning.graph_config_path,
-                planning_policy=CameraRoutePlanningPolicy(
+                planning_policy=MotionPlanningPolicy(
                     max_attempts=final_config.planning.max_attempts,
                     enable_graph_attempt=final_config.planning.enable_graph_attempt,
                     num_ik_seeds=final_config.planning.num_ik_seeds,
@@ -181,10 +181,10 @@ def _run_final_worker(
                     random_seed=final_config.planning.random_seed,
                     position_tolerance=final_config.planning.position_tolerance_m,
                     orientation_tolerance=final_config.planning.orientation_tolerance_rad,
-                    enable_portal_continuation=(
+                    enable_cartesian_continuation=(
                         final_config.planning.enable_portal_continuation
                     ),
-                    portal_offset_m=final_config.planning.portal_offset_m,
+                    continuation_offset_m=final_config.planning.portal_offset_m,
                     continuation_step_m=final_config.planning.continuation_step_m,
                     continuation_edge_sample_count=(
                         final_config.planning.continuation_edge_sample_count

@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from robot_arm_pipeline.planning import CameraRoutePlan, CameraRouteSegment
+from robot_arm_pipeline.planning import MotionPlanResult, MotionPlanSegment
 
 
 _ReplayPhase = Literal["survey", "final"]
@@ -64,7 +64,7 @@ class _ReplaySegment:
     capture_id: str
     phase_index: int
     phase_count: int
-    route: CameraRouteSegment
+    route: MotionPlanSegment
     status: str
     failure_stage: str | None = None
     annotated_rgb_path: Path | None = None
@@ -246,18 +246,18 @@ def record_task1_video(plan: _ReplayPlan, output_path: Path) -> Path:
     return resolved
 
 
-def _load_survey_route(path: Path) -> CameraRoutePlan:
+def _load_survey_route(path: Path) -> MotionPlanResult:
     payload = _load_mapping(path, "Task1 Survey route")
     if payload.get("schema") != _SURVEY_ROUTE_SCHEMA:
         raise ValueError(f"Task1 Survey route must use schema {_SURVEY_ROUTE_SCHEMA}")
-    plan = CameraRoutePlan.from_dict(payload.get("route_plan"))
+    plan = MotionPlanResult.from_dict(payload.get("route_plan"))
     if not plan.success or plan.failed_target_id is not None:
         raise ValueError("Task1 replay requires a successful Survey route")
     return plan
 
 
 def _make_survey_segments(
-    plan: CameraRoutePlan,
+    plan: MotionPlanResult,
     *,
     survey_report: dict[str, Any],
     report_path: Path,
@@ -318,7 +318,7 @@ def _make_final_segments(
             repo_root=repo_root,
             field=f"Final result {candidate_id} planner_artifact",
         )
-        route_plan = CameraRoutePlan.from_dict(
+        route_plan = MotionPlanResult.from_dict(
             _load_mapping(route_path, f"Final route for {candidate_id}")
         )
         if route_plan.joint_names != expected_joint_names:

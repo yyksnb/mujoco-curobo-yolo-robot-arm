@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from robot_arm_pipeline.planning import CameraRoutePlan
+from robot_arm_pipeline.planning import MotionPlanResult
 from task1.detection import Detector, render_detection_overlay
 from task1.vision import (
     CameraIntrinsics,
@@ -85,7 +85,7 @@ class MujocoSurveySimulation:
 
     def run(
         self,
-        route_plan: CameraRoutePlan,
+        route_plan: MotionPlanResult,
         planner_artifact: str,
         policy: CandidateLocalizationPolicy = CandidateLocalizationPolicy(),
     ) -> dict[str, Any]:

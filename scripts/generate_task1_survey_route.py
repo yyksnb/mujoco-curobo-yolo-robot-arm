@@ -8,16 +8,17 @@ from _bootstrap import add_src_to_path
 
 add_src_to_path()
 
-from robot_arm_pipeline.planning import CuroboCameraRoutePlanner, plan_camera_route  # noqa: E402
-from robot_arm_pipeline.planning.curobo_camera_route import (  # noqa: E402
-    DEFAULT_GRAPH_CONFIG,
-    DEFAULT_ROBOT_CONFIG,
-    DEFAULT_WORLD_CONFIG,
-)
+from robot_arm_pipeline.planning import CuroboPlanner, plan_pose_route  # noqa: E402
+from robot_arm_pipeline.types import RobotState  # noqa: E402
 from task1.scene import RigidPose, load_tank_pose_in_base  # noqa: E402
 from task1.survey.route import (  # noqa: E402
     DEFAULT_MUJOCO_SCENE_PATH,
+    DEFAULT_SURVEY_GRAPH_CONFIG_PATH,
+    DEFAULT_SURVEY_ROBOT_CONFIG_PATH,
     DEFAULT_SURVEY_ROUTE_PLAN_PATH,
+    DEFAULT_SURVEY_WORLD_CONFIG_PATH,
+    JOINT_NAMES,
+    SURVEY_START_JOINT_POSITIONS,
     make_survey_route_targets,
     write_survey_route_plan,
 )
@@ -35,13 +36,17 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="task1-survey-route-") as temp_dir:
         world_path = Path(temp_dir) / "world.yml"
         _write_scene_world_config(world_path, tank_pose_base)
-        planner = CuroboCameraRoutePlanner(
+        planner = CuroboPlanner(
             repo_root=REPO_ROOT,
-            robot_config_path=DEFAULT_ROBOT_CONFIG,
+            robot_config_path=DEFAULT_SURVEY_ROBOT_CONFIG_PATH,
             world_config_path=world_path,
-            graph_config_path=DEFAULT_GRAPH_CONFIG,
+            graph_config_path=DEFAULT_SURVEY_GRAPH_CONFIG_PATH,
         )
-        plan = plan_camera_route(planner, targets)
+        plan = plan_pose_route(
+            planner,
+            targets,
+            RobotState(JOINT_NAMES, SURVEY_START_JOINT_POSITIONS),
+        )
         if not plan.success:
             raise RuntimeError(
                 f"offline survey route generation failed at {plan.failed_target_id}: {plan.message}"
@@ -75,7 +80,7 @@ def _write_scene_world_config(path: Path, tank_pose_base: RigidPose) -> None:
         import yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to generate the cuRobo survey world") from exc
-    source = _resolve(DEFAULT_WORLD_CONFIG)
+    source = _resolve(DEFAULT_SURVEY_WORLD_CONFIG_PATH)
     payload = yaml.safe_load(source.read_text(encoding="utf-8"))
     try:
         tank = payload["mesh"]["tank"]

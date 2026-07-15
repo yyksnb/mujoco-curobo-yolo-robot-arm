@@ -8,22 +8,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from robot_arm_pipeline.planning.curobo_camera_route import (
-    DEFAULT_GRAPH_CONFIG,
-    DEFAULT_ROBOT_CONFIG,
-    DEFAULT_START_JOINT_POSITIONS,
-    DEFAULT_WORLD_CONFIG,
-    CameraRoutePlan,
-    CameraRouteTarget,
-)
+from robot_arm_pipeline.planning import MotionPlanResult, PoseTarget
 from task1.scene import RigidPose, compose
 
 
 ROUTE_SCHEMA = "task1_survey_route_plan"
 DEFAULT_SURVEY_ROUTE_PLAN_PATH = Path("configs/task1/survey/route_plan.json")
 DEFAULT_MUJOCO_SCENE_PATH = Path("examples/mujoco/gen3_with_tank.xml")
+DEFAULT_SURVEY_ROBOT_CONFIG_PATH = Path("configs/curobo/gen3/robot.yml")
+DEFAULT_SURVEY_WORLD_CONFIG_PATH = Path("configs/curobo/gen3/world.yml")
+DEFAULT_SURVEY_GRAPH_CONFIG_PATH = Path("configs/curobo/gen3/graph.yml")
 _CONTINUITY_TOLERANCE = 1e-5
 JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7")
+SURVEY_START_JOINT_POSITIONS = (
+    0.0,
+    0.26179939,
+    3.14159265,
+    -2.26892803,
+    0.0,
+    0.95993109,
+    1.57079633,
+)
 
 
 @dataclass(frozen=True)
@@ -96,9 +101,9 @@ class SurveyRouteFingerprint:
 def build_survey_route_fingerprint(
     repo_root: Path,
     *,
-    robot_config_path: Path = DEFAULT_ROBOT_CONFIG,
-    world_config_path: Path = DEFAULT_WORLD_CONFIG,
-    graph_config_path: Path = DEFAULT_GRAPH_CONFIG,
+    robot_config_path: Path = DEFAULT_SURVEY_ROBOT_CONFIG_PATH,
+    world_config_path: Path = DEFAULT_SURVEY_WORLD_CONFIG_PATH,
+    graph_config_path: Path = DEFAULT_SURVEY_GRAPH_CONFIG_PATH,
     mujoco_scene_path: Path = DEFAULT_MUJOCO_SCENE_PATH,
 ) -> SurveyRouteFingerprint:
     """Fingerprint every static input that can change the fixed survey route."""
@@ -125,7 +130,7 @@ def build_survey_route_fingerprint(
         "files": [{"path": path, "sha256": digest} for path, digest in files],
         "survey_contract": {
             "joint_names": list(JOINT_NAMES),
-            "start_joint_positions": list(DEFAULT_START_JOINT_POSITIONS),
+            "start_joint_positions": list(SURVEY_START_JOINT_POSITIONS),
             "views": [
                 {
                     "view_id": view.view_id,
@@ -146,12 +151,12 @@ def build_survey_route_fingerprint(
 
 def write_survey_route_plan(
     path: Path,
-    plan: CameraRoutePlan,
+    plan: MotionPlanResult,
     *,
     repo_root: Path,
-    robot_config_path: Path = DEFAULT_ROBOT_CONFIG,
-    world_config_path: Path = DEFAULT_WORLD_CONFIG,
-    graph_config_path: Path = DEFAULT_GRAPH_CONFIG,
+    robot_config_path: Path = DEFAULT_SURVEY_ROBOT_CONFIG_PATH,
+    world_config_path: Path = DEFAULT_SURVEY_WORLD_CONFIG_PATH,
+    graph_config_path: Path = DEFAULT_SURVEY_GRAPH_CONFIG_PATH,
     mujoco_scene_path: Path = DEFAULT_MUJOCO_SCENE_PATH,
 ) -> None:
     """Validate and write a reusable route artifact as plain JSON."""
@@ -176,11 +181,11 @@ def load_survey_route_plan(
     path: Path,
     *,
     repo_root: Path,
-    robot_config_path: Path = DEFAULT_ROBOT_CONFIG,
-    world_config_path: Path = DEFAULT_WORLD_CONFIG,
-    graph_config_path: Path = DEFAULT_GRAPH_CONFIG,
+    robot_config_path: Path = DEFAULT_SURVEY_ROBOT_CONFIG_PATH,
+    world_config_path: Path = DEFAULT_SURVEY_WORLD_CONFIG_PATH,
+    graph_config_path: Path = DEFAULT_SURVEY_GRAPH_CONFIG_PATH,
     mujoco_scene_path: Path = DEFAULT_MUJOCO_SCENE_PATH,
-) -> CameraRoutePlan:
+) -> MotionPlanResult:
     """Load a route without cuRobo and reject stale or malformed artifacts."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -204,11 +209,11 @@ def load_survey_route_plan(
     return plan
 
 
-def _parse_plan(value: object) -> CameraRoutePlan:
-    return CameraRoutePlan.from_dict(value)
+def _parse_plan(value: object) -> MotionPlanResult:
+    return MotionPlanResult.from_dict(value)
 
 
-def _validate_plan(plan: CameraRoutePlan) -> None:
+def _validate_plan(plan: MotionPlanResult) -> None:
     expected_ids = tuple(view.view_id for view in SURVEY_VIEWS)
     if plan.success is not True or plan.failed_target_id is not None:
         raise ValueError("offline survey route must be a complete successful plan")
@@ -219,7 +224,7 @@ def _validate_plan(plan: CameraRoutePlan) -> None:
     if plan.reached_target_ids != expected_ids:
         raise ValueError("offline survey route reached_target_ids must contain all views in order")
 
-    previous = DEFAULT_START_JOINT_POSITIONS
+    previous = SURVEY_START_JOINT_POSITIONS
     for segment in plan.segments:
         if segment.success is not True or not segment.trajectory:
             raise ValueError(f"offline survey route segment {segment.target_id} is not executable")
@@ -297,7 +302,7 @@ def _positions_close(left: tuple[float, ...], right: tuple[float, ...]) -> bool:
     )
 
 
-def make_survey_route_targets(tank_pose_base: RigidPose) -> tuple[CameraRouteTarget, ...]:
+def make_survey_route_targets(tank_pose_base: RigidPose) -> tuple[PoseTarget, ...]:
     targets = []
     for view in SURVEY_VIEWS:
         camera_pose_base = compose(
@@ -305,7 +310,7 @@ def make_survey_route_targets(tank_pose_base: RigidPose) -> tuple[CameraRouteTar
             RigidPose(view.camera_position_tank, view.camera_quaternion_wxyz_tank),
         )
         targets.append(
-            CameraRouteTarget(
+            PoseTarget(
                 target_id=view.view_id,
                 target_position=camera_pose_base.position,
                 target_quaternion_wxyz=camera_pose_base.quaternion_wxyz,
