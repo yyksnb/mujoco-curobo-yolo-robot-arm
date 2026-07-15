@@ -19,6 +19,9 @@ mujoco = [
     "mujoco>=3.0",
     "Pillow>=10.0",
 ]
+video = [
+    "opencv-python>=4.8",
+]
 yolo = [
     "Pillow>=10.0",
     "ultralytics>=8.4,<9",

@@ -301,7 +301,13 @@ def test_replay_uses_recorded_routes_and_final_processing_order(tmp_path: Path) 
     run_dir = _write_replay_run(tmp_path, "20260714T000001Z_seed2")
 
     assert find_latest_task1_run(tmp_path) == run_dir
-    plan = load_task1_replay_plan(run_dir, repo_root=REPO_ROOT)
+    assert find_latest_task1_run(tmp_path, require_zoom=True) == run_dir
+    assert load_task1_replay_plan(run_dir, repo_root=REPO_ROOT).result_stills == ()
+    plan = load_task1_replay_plan(
+        run_dir,
+        repo_root=REPO_ROOT,
+        include_result_stills=True,
+    )
 
     assert [segment.phase for segment in plan.segments] == [
         "survey",
@@ -316,6 +322,9 @@ def test_replay_uses_recorded_routes_and_final_processing_order(tmp_path: Path) 
     ] == ["candidate_002", "candidate_001"]
     assert plan.segments[-1].status == "failed"
     assert plan.segments[-1].failure_stage == "candidate_association"
+    assert [still.candidate_id for still in plan.result_stills] == ["candidate_002"]
+    assert plan.result_stills[0].result_index == 1
+    assert plan.result_stills[0].result_count == 1
     assert astuple(SURVEY_GLOBAL_VIEW) == ((0.5, 0.5, 0.4), 1.0, 135.0, -30.0, 80.0)
     assert astuple(FINAL_GLOBAL_VIEW) == ((0.5, 0.5, 0.15), 0.75, 135.0, -20.0, 75.0)
 
@@ -1381,6 +1390,14 @@ def _write_replay_run(root: Path, name: str) -> Path:
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    def write_image(relative: str) -> Path:
+        from PIL import Image
+
+        path = run_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1920, 1080), (32, 48, 64)).save(path)
+        return path
+
     def route_plan(
         target_ids: tuple[str, ...], start: tuple[float, ...]
     ) -> tuple[CameraRoutePlan, tuple[float, ...]]:
@@ -1460,6 +1477,9 @@ def _write_replay_run(root: Path, name: str) -> Path:
             "failure_stage": "candidate_association" if failed else None,
             "planner_artifact": f"route/{candidate_id}.json",
         }
+        if not failed:
+            write_image(f"final/images/{candidate_id}.png")
+            results_by_id[candidate_id]["rgb_path"] = f"images/{candidate_id}.png"
     results_by_id["candidate_003"] = {
         "candidate_id": "candidate_003",
         "status": "failed",
@@ -1484,6 +1504,30 @@ def _write_replay_run(root: Path, name: str) -> Path:
                 "model_path": "examples/mujoco/gen3_with_tank.xml",
                 "camera_name": "gen3_wrist",
             },
+        },
+    )
+    write_image("zoom/images/candidate_002.png")
+    write(
+        "zoom/zoom_report.json",
+        {
+            "schema": "task1_zoom_report",
+            "stage": "zoom",
+            "status": "success",
+            "results": [
+                {
+                    "candidate_id": "candidate_001",
+                    "status": "skipped",
+                },
+                {
+                    "candidate_id": "candidate_002",
+                    "status": "success",
+                    "output_rgb_path": "images/candidate_002.png",
+                },
+                {
+                    "candidate_id": "candidate_003",
+                    "status": "skipped",
+                },
+            ],
         },
     )
     return run_dir.resolve()
