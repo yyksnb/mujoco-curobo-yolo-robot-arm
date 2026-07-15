@@ -2,17 +2,18 @@
 
 ## 模块边界
 
-- `pipeline.py` 只编排 `layout -> survey -> final` 和正式 artifact 交接。
+- `pipeline.py` 只编排 `layout -> survey -> final -> zoom` 和正式 artifact 交接。
 - `scene.py`、`detection.py`、`vision.py` 提供共享的坐标变换、YOLO 适配和 RGB-D 定位/融合接口。
 - `survey/` 负责固定路线、Survey 配置、采集和评估。
 - `final/processing.py`、`simulation.py`、`evaluation.py` 分别负责生产处理、MuJoCo 采集和评估。
+- `zoom/processing.py` 只消费 Final 正式结果，负责数字裁剪、放大和独立报告。
 - `replay.py` 只读消费一次运行的 layout、报告和已执行 cuRobo 轨迹，在 MuJoCo GUI 中回放。
 - cuRobo camera-route planning 保持在 `robot_arm_pipeline.planning`。
 
 生产模块只消费正式输入。Final 只解析候选的 `candidate_id`、`bottom_position_world` 和
 `footprint_polygon_xy`；编排层另读取正式的 `planner_artifact` 作为起始关节状态。seed、layout
 真值、segmentation、benchmark split 和 Survey 内部诊断字段不得进入生产决策。参数按阶段集中在
-`configs/task1/survey/` 和 `configs/task1/final/`，不散落在业务源码中。
+`configs/task1/survey/`、`configs/task1/final/` 和 `configs/task1/zoom/`，不散落在业务源码中。
 
 ## Survey
 
@@ -55,6 +56,22 @@ Final 处理 Survey 的全部候选，不要求输入数量恰好为 5。首个�
 artifact，生成失败不丢弃正式检测和位姿结果。Final 在 spawn 子进程中运行，隔离 MuJoCo/OpenGL、
 YOLO CUDA 和 cuRobo native runtime。
 
+## Zoom
+
+Zoom 只读取 `task1_final_report` 中各成功结果的顶层 `rgb_path` 和
+`selected_detection.bbox_xyxy`；不读取 Final 的规划尝试、深度、layout、segmentation 或评估真值，
+也不重新运行 YOLO。Final 失败候选在 Zoom 报告中显式标记为 `skipped`，不会补图或改写上游结果。
+
+对每个 bbox，Zoom 分别计算横屏和竖屏的固定比例裁剪框。裁剪必须完整包含可见 bbox，并优先满足
+配置的最小留白；在所有可行方向中选择输出 bbox 面积占比最接近 60% 的方案。原始 RGB 裁剪后以
+LANCZOS 放大；横屏裁剪直接输出 1920x1080，竖屏裁剪先放大为 1080x1920，再顺时针旋转 90°，因此
+最终图片统一为 1920x1080。中文框图使用旋转后的正式 bbox 重新生成。裁剪方向、旋转角度、裁剪框、
+输出 bbox、实际占比、留白和源 bbox 是否触边均写入 `zoom_report.json`。
+
+Zoom 是非门控展示阶段：Final 为 `partial/failed` 但已落盘合法报告时，完整 pipeline 仍对其中成功
+候选执行 Zoom，同时顶层继续保留 `failed_stage=final`。原图损坏、缺失或裁剪失败会使 Zoom 报告为
+`partial/failed`，但不会改写上游状态；输入报告 schema 错误仍作为调用错误抛出。
+
 ## Replay
 
 Replay 不属于生产识别阶段，不重新运行 YOLO、深度定位或 cuRobo。它只读取 layout、Survey/Final
@@ -82,10 +99,10 @@ Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并�
 ## 逻辑分类
 
 - 正式设计：多视角 Survey 融合、开口连线斜拍、roll-aware 投影定距、批量碰撞 IK、多 standoff、
-  portal continuation、逐候选重检测和定位。
+  portal continuation、逐候选重检测和定位，以及基于 Final 正式 bbox 的横/竖屏数字变焦。
 - 工程防御：schema/指纹校验、逐阶段失败、生产报告原子落盘、native runtime 与评估故障隔离；
   portal 路线额外校验关节端点、停止速度和碰撞；Replay 框图缺失时显式显示不可用，不回退到
-  未标注 RGB。
+  未标注 RGB；Zoom 保留完整可见 bbox、记录触边/留白并隔离框图生成失败。
 - Debug/评估：layout 真值、segmentation、真值 bbox、诊断深度、benchmark 聚合和 artifact Replay。
 - 临时 workaround：无；当前没有仅为样例通过而引入或计划删除的生产逻辑。
 
@@ -96,4 +113,4 @@ Survey 和 Final 的生产拍照都只生成 RGB-D 和正式相机变换，并�
 - coverage margin 尚未覆盖实机内参、手眼标定和机械臂执行误差，MuJoCo 与实机存在 domain gap。
 - 当前 YOLO 对小物体、旋转和斜视角敏感；模型、相机或场景分布变化后必须重新评估正式参数。
 - portal continuation 只在全部直接姿态失败后运行；极端深腔下可能额外尝试多个 roll，规划时间会
-  明显增加，且 portal 可达分支仍可能无法连续进入目标。该路径不放宽碰撞或伪造轨迹，失败会保留。
+  明显增加，且 portal 可达分支仍可能无法连续进入目标。

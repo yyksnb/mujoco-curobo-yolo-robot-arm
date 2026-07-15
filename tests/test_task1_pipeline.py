@@ -73,6 +73,7 @@ from task1.survey.evaluation import (
     diagnose_survey_detection_pipeline,
     evaluate_yolo_detections,
 )
+from task1.zoom.processing import load_zoom_config, run_zoom_stage
 from task1.survey.route import (
     JOINT_NAMES,
     ROUTE_SCHEMA,
@@ -86,6 +87,7 @@ from task1.survey.route import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SURVEY_CONFIG = REPO_ROOT / "configs/task1/survey/detection.yaml"
 FINAL_CONFIG = REPO_ROOT / "configs/task1/final/config.yaml"
+ZOOM_CONFIG = REPO_ROOT / "configs/task1/zoom/config.yaml"
 
 
 def test_pipeline_reports_stage_status_and_elapsed_time(tmp_path: Path) -> None:
@@ -108,6 +110,182 @@ def test_pipeline_reports_stage_status_and_elapsed_time(tmp_path: Path) -> None:
     assert events[0].elapsed_s is None
     assert events[1].elapsed_s is not None
     assert events[1].elapsed_s >= 0.0
+
+
+def test_zoom_selects_landscape_or_portrait_and_targets_bbox_area(
+    tmp_path: Path,
+) -> None:
+    from PIL import Image
+
+    source_path = tmp_path / "final.png"
+    Image.new("RGB", (1920, 1080), "white").save(source_path)
+    final_report_path = tmp_path / "final_report.json"
+    final_report_path.write_text(
+        json.dumps(
+            {
+                "schema": "task1_final_report",
+                "stage": "final",
+                "status": "success",
+                "results": [
+                    _zoom_final_result(
+                        "candidate_landscape",
+                        source_path,
+                        [600.0, 350.0, 1200.0, 700.0],
+                    ),
+                    _zoom_final_result(
+                        "candidate_portrait",
+                        source_path,
+                        [800.0, 200.0, 1100.0, 800.0],
+                    ),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_zoom_config(ZOOM_CONFIG, repo_root=REPO_ROOT)
+
+    report = run_zoom_stage(
+        final_report_path=final_report_path,
+        output_dir=tmp_path / "zoom",
+        config=config,
+        repo_root=REPO_ROOT,
+    )
+
+    assert report["status"] == "success"
+    assert report["successful_candidate_count"] == 2
+    results = {result["candidate_id"]: result for result in report["results"]}
+    assert results["candidate_landscape"]["crop_orientation"] == "landscape"
+    assert results["candidate_landscape"]["rotation_degrees_clockwise"] == 0
+    assert results["candidate_landscape"]["output_image_size"] == [1920, 1080]
+    assert results["candidate_portrait"]["crop_orientation"] == "portrait"
+    assert results["candidate_portrait"]["rotation_degrees_clockwise"] == 90
+    assert results["candidate_portrait"]["resized_image_size"] == [1080, 1920]
+    assert results["candidate_portrait"]["output_image_size"] == [1920, 1080]
+    resized_bbox = results["candidate_portrait"]["resized_bbox_xyxy"]
+    assert results["candidate_portrait"]["output_bbox_xyxy"] == pytest.approx(
+        [1920.0 - resized_bbox[3], resized_bbox[0], 1920.0 - resized_bbox[1], resized_bbox[2]]
+    )
+    for result in results.values():
+        assert result["output_bbox_area_fraction"] == pytest.approx(0.60, abs=0.005)
+        assert result["padding_satisfied"] is True
+        assert Path(result["output_rgb_path"]).is_file()
+        assert Path(result["annotated_rgb_path"]).is_file()
+        with Image.open(result["output_rgb_path"]) as output_image:
+            assert output_image.size == (1920, 1080)
+        crop = result["crop_box_xyxy"]
+        bbox = result["source_bbox_xyxy"]
+        assert crop[0] <= bbox[0] < bbox[2] <= crop[2]
+        assert crop[1] <= bbox[1] < bbox[3] <= crop[3]
+
+
+def test_zoom_pipeline_reports_partial_artifacts_without_gating_pipeline(
+    tmp_path: Path,
+) -> None:
+    from PIL import Image
+
+    source_path = tmp_path / "available.png"
+    Image.new("RGB", (160, 90), "white").save(source_path)
+    missing_path = tmp_path / "missing.png"
+    final_report_path = tmp_path / "partial_final_report.json"
+    final_report_path.write_text(
+        json.dumps(
+            {
+                "schema": "task1_final_report",
+                "stage": "final",
+                "status": "partial",
+                "results": [
+                    _zoom_final_result(
+                        "candidate_001", source_path, [50.0, 25.0, 110.0, 65.0]
+                    ),
+                    _zoom_final_result(
+                        "candidate_002", missing_path, [50.0, 25.0, 110.0, 65.0]
+                    ),
+                    {
+                        "candidate_id": "candidate_003",
+                        "status": "failed",
+                        "failure_stage": "yolo_no_detection",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    zoom_config_path = tmp_path / "zoom_config.yaml"
+    zoom_config_path.write_text(
+        json.dumps(
+            {
+                "schema": "task1_zoom_config",
+                "target_bbox_area_fraction": 0.60,
+                "bbox_padding_fraction": 0.05,
+                "resampling": "lanczos",
+                "render_annotations": False,
+                "output_orientations": [
+                    {
+                        "name": "landscape",
+                        "width": 160,
+                        "height": 90,
+                        "rotation_degrees_clockwise": 0,
+                    },
+                    {
+                        "name": "portrait",
+                        "width": 90,
+                        "height": 160,
+                        "rotation_degrees_clockwise": 90,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[PipelineStageEvent] = []
+
+    class PartialFinalPipeline(Task1Pipeline):
+        def _run_layout(self) -> bool:
+            return True
+
+        def _run_survey(self) -> bool:
+            return True
+
+        def _run_final(self) -> bool:
+            self.final_report_path = final_report_path
+            return False
+
+    result = PartialFinalPipeline(
+        PipelineOptions(
+            repo_root=REPO_ROOT,
+            output_dir=tmp_path / "outputs",
+            zoom_config=zoom_config_path,
+        ),
+        stage_observer=events.append,
+    ).run()
+
+    assert result.status == "failed"
+    assert result.failed_stage == "final"
+    assert result.completed_stages == ("layout", "survey", "zoom")
+    assert [(event.stage, event.status) for event in events] == [
+        ("layout", "started"),
+        ("layout", "success"),
+        ("survey", "started"),
+        ("survey", "success"),
+        ("final", "started"),
+        ("final", "failed"),
+        ("zoom", "started"),
+        ("zoom", "failed"),
+    ]
+    report = json.loads(
+        (result.run_dir / "zoom" / "zoom_report.json").read_text(encoding="utf-8")
+    )
+    assert report["status"] == "partial"
+    assert report["successful_candidate_count"] == 1
+    assert report["failed_candidate_count"] == 1
+    assert report["skipped_candidate_count"] == 1
+    assert [item["status"] for item in report["results"]] == [
+        "success",
+        "failed",
+        "skipped",
+    ]
+    assert report["results"][1]["failure_stage"] == "image_processing"
+    assert report["results"][2]["source_final_failure_stage"] == "yolo_no_detection"
 
 
 def test_replay_uses_recorded_routes_and_final_processing_order(tmp_path: Path) -> None:
@@ -1340,6 +1518,26 @@ def _observation(
         class_scores={class_name: 0.8} if class_name else {},
         source_detection_ids=(detection_id,),
     )
+
+
+def _zoom_final_result(
+    candidate_id: str,
+    rgb_path: Path,
+    bbox_xyxy: list[float],
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "status": "success",
+        "failure_stage": None,
+        "rgb_path": str(rgb_path),
+        "selected_detection": {
+            "detection_id": f"{candidate_id}:detected",
+            "class_name": "marker",
+            "display_name": "记号笔",
+            "confidence": 0.95,
+            "bbox_xyxy": bbox_xyxy,
+        },
+    }
 
 
 def _box_spec(object_id: str, width: float, depth: float) -> TargetObjectSpec:

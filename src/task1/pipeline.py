@@ -37,6 +37,12 @@ from task1.survey.config import (
     SurveyDetectionConfig,
     load_survey_detection_config,
 )
+from task1.zoom.processing import (
+    DEFAULT_ZOOM_CONFIG_PATH,
+    ZoomConfig,
+    load_zoom_config,
+    run_zoom_stage,
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,9 @@ class PipelineOptions:
     capture_manifest: Path | None = None
     survey_config: Path = DEFAULT_CONFIG_PATH
     final_config: Path = DEFAULT_FINAL_CONFIG_PATH
+    zoom_config: Path = DEFAULT_ZOOM_CONFIG_PATH
     survey_report_path: Path | None = None
+    final_report_path: Path | None = None
     retain_survey_depth: bool = False
 
 
@@ -80,6 +88,8 @@ class PipelineStageEvent:
 class _Stage:
     name: str
     run: Callable[[], bool]
+    gates_pipeline_status: bool = True
+    run_after_failed_stage: tuple[str, ...] = ()
 
 
 def _run_survey_worker(
@@ -391,10 +401,17 @@ class Task1Pipeline:
         self.run_dir = self._make_run_dir()
         self.layout_path: Path | None = None
         self.survey_report_path: Path | None = None
+        self.final_report_path: Path | None = None
         self._stages = (
             _Stage("layout", self._run_layout),
             _Stage("survey", self._run_survey),
             _Stage("final", self._run_final),
+            _Stage(
+                "zoom",
+                self._run_zoom,
+                gates_pipeline_status=False,
+                run_after_failed_stage=("final",),
+            ),
         )
 
     @property
@@ -404,7 +421,10 @@ class Task1Pipeline:
     def run(self) -> PipelineResult:
         selected = self._selected_stages()
         completed: list[str] = []
+        failed_stage: str | None = None
         for stage in selected:
+            if failed_stage is not None and failed_stage not in stage.run_after_failed_stage:
+                break
             self._emit_stage_event(PipelineStageEvent(stage.name, "started"))
             started = time.perf_counter()
             try:
@@ -421,9 +441,12 @@ class Task1Pipeline:
                     time.perf_counter() - started,
                 )
             )
-            if not succeeded:
-                return PipelineResult("failed", self.run_dir, tuple(completed), stage.name)
+            if not succeeded and stage.gates_pipeline_status:
+                failed_stage = stage.name
+                continue
             completed.append(stage.name)
+        if failed_stage is not None:
+            return PipelineResult("failed", self.run_dir, tuple(completed), failed_stage)
         return PipelineResult("success", self.run_dir, tuple(completed))
 
     def _emit_stage_event(self, event: PipelineStageEvent) -> None:
@@ -601,6 +624,7 @@ class Task1Pipeline:
                 )
                 _attach_final_evaluation(final_dir, persisted_report, evaluation)
                 _write_json(final_report_path, persisted_report)
+                self.final_report_path = final_report_path
                 return persisted_report["status"] == "success"
             report = make_final_failure_report(
                 failure_stage="final_worker_process",
@@ -612,12 +636,32 @@ class Task1Pipeline:
             )
             report["simulation"] = _final_simulation_metadata(final_config)
             _write_json(final_report_path, report)
+            self.final_report_path = final_report_path
             return False
         if not final_report_path.is_file():
             raise RuntimeError("Task1 Final worker did not produce final_report.json")
         report = _load_valid_final_report(final_report_path)
         if report is None:
             raise ValueError("Task1 Final worker produced an invalid report contract")
+        self.final_report_path = final_report_path
+        return report["status"] == "success"
+
+    def _run_zoom(self) -> bool:
+        report_path = self.options.final_report_path or self.final_report_path
+        if report_path is None:
+            raise ValueError(
+                "Task1 Zoom requires --final-report when Final was not run in this process"
+            )
+        config: ZoomConfig = load_zoom_config(
+            self.options.zoom_config,
+            repo_root=self.repo_root,
+        )
+        report = run_zoom_stage(
+            final_report_path=report_path,
+            output_dir=self.run_dir / "zoom",
+            config=config,
+            repo_root=self.repo_root,
+        )
         return report["status"] == "success"
 
     def _make_run_dir(self) -> Path:

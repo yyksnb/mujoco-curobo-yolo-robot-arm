@@ -37,6 +37,11 @@ def main() -> None:
         type=Path,
         help="Consume an existing task1_survey_report when running Final independently.",
     )
+    parser.add_argument(
+        "--final-report",
+        type=Path,
+        help="Consume an existing task1_final_report when running Zoom independently.",
+    )
     parser.add_argument("--capture-manifest", type=Path, help="Use recorded/real RGB-D instead of MuJoCo capture.")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/task1"))
     parser.add_argument(
@@ -44,6 +49,12 @@ def main() -> None:
         type=Path,
         default=Path("configs/task1/final/config.yaml"),
         help="Configure Task1 Final camera geometry, association, and evaluation.",
+    )
+    parser.add_argument(
+        "--zoom-config",
+        type=Path,
+        default=Path("configs/task1/zoom/config.yaml"),
+        help="Configure Task1 Zoom crop target, output orientation, and resizing.",
     )
     parser.add_argument(
         "--retain-survey-depth",
@@ -70,7 +81,9 @@ def main() -> None:
                 capture_manifest=args.capture_manifest,
                 survey_config=args.survey_config,
                 final_config=args.final_config,
+                zoom_config=args.zoom_config,
                 survey_report_path=args.survey_report,
+                final_report_path=args.final_report,
                 retain_survey_depth=args.retain_survey_depth,
             ),
             stage_observer=_log_stage_event,
