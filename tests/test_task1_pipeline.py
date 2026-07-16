@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import math
 from dataclasses import astuple, replace
@@ -15,6 +16,9 @@ from robot_arm_pipeline.planning import (
     MotionPlanSegment,
     IKSolution,
 )
+from robot_arm_pipeline.perception.object_observation import (
+    load_final_object_observations,
+)
 from task1.final.processing import (
     FinalAssociationPolicy,
     FinalCameraPolicy,
@@ -25,6 +29,9 @@ from task1.final.processing import (
     load_survey_candidates,
     make_final_failure_report,
     make_final_camera_targets,
+)
+from task1.final.observations import (
+    depth_foreground_component_mask,
 )
 from task1.final.evaluation import evaluate_final_simulation
 from task1.scene import (
@@ -388,6 +395,8 @@ def test_final_camera_uses_nearest_roll_aware_opening_line_pose() -> None:
     assert config.planning.enable_portal_continuation is True
     assert config.planning.portal_offset_m == pytest.approx(0.10)
     assert config.detection.inference.image_size == 1280
+    assert config.object_observation_interface.enabled is True
+    assert config.object_observation_interface.mask_source == "depth_foreground_component"
 
     attempts = make_final_camera_targets(
         candidate,
@@ -892,6 +901,98 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
         "candidate_003",
     ]
     assert [result["processing_index"] for result in report["results"]] == [2, 0, 1]
+    interface = report["object_observation_interface"]
+    assert interface["status"] == "success"
+    assert interface["eligible_object_count"] == 3
+    assert interface["exported_object_count"] == 3
+    manifest_path = Path(interface["manifest_path"])
+    manifest = load_final_object_observations(manifest_path)
+    observations = manifest.observations
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest.status == "success"
+    assert manifest.source_final.status == "success"
+    assert manifest.interface.status == "success"
+    assert manifest.source_final.candidate_count_evaluation.success is False
+    assert [item.candidate_id for item in observations] == [
+        "candidate_001",
+        "candidate_002",
+        "candidate_003",
+    ]
+    assert all(item.depth_m.dtype == np.float32 for item in observations)
+    assert all(item.depth_m.shape == item.mask.shape == (100, 100) for item in observations)
+    assert all(item.mask_source == "depth_foreground_component" for item in observations)
+    assert all(item.T_world_camera_optical[3] == (0.0, 0.0, 0.0, 1.0) for item in observations)
+    assert all(
+        item["mask"]["uses_layout_or_simulation_segmentation"] is False
+        for item in manifest_payload["objects"]
+    )
+    object_payload = json.dumps(manifest_payload["objects"])
+    assert '"T_world_object"' not in object_payload
+    assert '"grasp_target"' not in object_payload
+    assert "T_world_object" in manifest_payload["boundary"]["not_provided_by_task1"]
+    invalid_manifest = json.loads(json.dumps(manifest_payload))
+    invalid_manifest["objects"][0]["mask"][
+        "uses_layout_or_simulation_segmentation"
+    ] = True
+    manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="independent of evaluation truth"):
+        load_final_object_observations(manifest_path)
+    for field, replacement, message in (
+        (("depth", "registered_to_rgb"), False, "depth geometry contract"),
+        (
+            ("camera", "optical_axis_convention"),
+            "z_backward",
+            "camera geometry contract",
+        ),
+        (
+            ("camera", "intrinsics", "distortion_model"),
+            "brown_conrady",
+            "camera geometry contract",
+        ),
+        (("support_plane", "normal_world"), [0.0, 1.0, 0.0], r"world \+Z normal"),
+    ):
+        invalid_manifest = json.loads(json.dumps(manifest_payload))
+        target = invalid_manifest["objects"][0]
+        for key in field[:-1]:
+            target = target[key]
+        target[field[-1]] = replacement
+        manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            load_final_object_observations(manifest_path)
+
+    first_observation = observations[0]
+    original_depth_bytes = first_observation.depth_path.read_bytes()
+    original_depth = first_observation.depth_m.copy()
+    invalid_depth = original_depth.copy()
+    mask_y, mask_x = np.argwhere(first_observation.mask)[0]
+    invalid_depth[mask_y, mask_x] = np.nan
+    with first_observation.depth_path.open("wb") as stream:
+        np.save(stream, invalid_depth, allow_pickle=False)
+    invalid_manifest = json.loads(json.dumps(manifest_payload))
+    invalid_manifest["objects"][0]["depth"]["sha256"] = hashlib.sha256(
+        first_observation.depth_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="valid positive depth"):
+        load_final_object_observations(manifest_path)
+    first_observation.depth_path.write_bytes(original_depth_bytes)
+
+    from PIL import Image
+
+    original_mask = first_observation.mask_path.read_bytes()
+    with Image.open(first_observation.mask_path) as image:
+        invalid_mask = np.asarray(image, dtype=np.uint8).copy()
+    invalid_mask[0, 0] = 255
+    Image.fromarray(invalid_mask, mode="L").save(first_observation.mask_path)
+    invalid_manifest = json.loads(json.dumps(manifest_payload))
+    invalid_manifest["objects"][0]["mask"]["sha256"] = hashlib.sha256(
+        first_observation.mask_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="clipped detection bbox"):
+        load_final_object_observations(manifest_path)
+    first_observation.mask_path.write_bytes(original_mask)
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
     planned_attempt = next(
         attempt
         for attempt in report["results"][0]["camera_target_attempts"]
@@ -940,6 +1041,20 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
     assert [item["status"] for item in report["results"]] == ["success", "failed", "success"]
     assert report["results"][1]["failure_stage"] == "curobo_planning"
     assert capture.captured == ["candidate_001", "candidate_003"]
+    partial_interface = report["object_observation_interface"]
+    assert partial_interface["status"] == "success"
+    assert partial_interface["manifest_status"] == "partial"
+    partial_manifest = load_final_object_observations(Path(partial_interface["manifest_path"]))
+    assert partial_manifest.status == "partial"
+    assert partial_manifest.source_final.status == "partial"
+    assert partial_manifest.interface.status == "success"
+    assert [item.candidate_id for item in partial_manifest.observations] == [
+        "candidate_001",
+        "candidate_003",
+    ]
+    assert [item.candidate_id for item in partial_manifest.source_final.failed_candidates] == [
+        "candidate_002"
+    ]
 
     empty_planner = _FinalPlannerStub()
     empty_capture = _FinalCaptureStub(tmp_path)
@@ -1028,6 +1143,45 @@ def test_final_reports_partial_and_empty_without_fabricating_results(
     assert artifact_result["artifact_failures"][0]["failure_stage"] == "detection_annotation"
     assert artifact_report["stable_objects"][0]["annotated_rgb_path"] is None
 
+    missing_class_report = _final_processor(
+        tmp_path,
+        _FinalPlannerStub(),
+        _FinalCaptureStub(tmp_path),
+        monkeypatch,
+        detector=_FinalDetectorStub(
+            detections=(
+                Detection2D(
+                    "unclassified",
+                    (40.0, 40.0, 60.0, 60.0),
+                    0.9,
+                    "not portable",
+                ),
+            )
+        ),
+    ).run(
+        (_final_candidate(0),),
+        start_joint_positions=SURVEY_START_JOINT_POSITIONS,
+        source_survey_report=tmp_path / "survey_report.json",
+    )
+    assert missing_class_report["status"] == "success"
+    assert missing_class_report["successful_candidate_count"] == 1
+    assert missing_class_report["object_observation_interface"]["status"] == "failed"
+    assert missing_class_report["object_observation_interface"]["exported_object_count"] == 0
+    assert missing_class_report["results"][0]["object_observation"]["failure_stage"] == (
+        "object_observation_export"
+    )
+    failed_manifest_path = Path(
+        missing_class_report["object_observation_interface"]["manifest_path"]
+    )
+    with pytest.raises(ValueError, match="no processable observations"):
+        load_final_object_observations(failed_manifest_path)
+    failed_manifest = load_final_object_observations(
+        failed_manifest_path,
+        allow_failed=True,
+    )
+    assert failed_manifest.interface.failed_object_count == 1
+    assert failed_manifest.observations == ()
+
 
 def test_rgbd_localization_estimates_bottom_position() -> None:
     depth = np.ones((100, 100), dtype=float)
@@ -1063,6 +1217,49 @@ def test_rgbd_localization_estimates_bottom_position() -> None:
                 max_depth_m=0.5,
             ),
         )
+
+    two_component_depth = np.ones((100, 100), dtype=float)
+    two_component_depth[40:50, 20:30] = 0.8
+    two_component_depth[40:50, 70:80] = 0.8
+    two_component_frame = RgbdFrame(
+        view_id="final_candidate_001",
+        depth_m=two_component_depth,
+        intrinsics=CameraIntrinsics(
+            width=100,
+            height=100,
+            fx=100.0,
+            fy=100.0,
+            cx=50.0,
+            cy=50.0,
+        ),
+        T_world_camera_optical=(
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, -1.0, 0.0, 0.0),
+            (0.0, 0.0, -1.0, 1.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+        ground_z_m=0.0,
+    )
+    mask, mask_quality = depth_foreground_component_mask(
+        frame=two_component_frame,
+        detection=Detection2D(
+            "two_components",
+            (15.0, 35.0, 85.0, 55.0),
+            0.9,
+            "marker",
+        ),
+        seed_position_world=(0.196, 0.044, 0.0),
+        localization_policy=CandidateLocalizationPolicy(
+            sample_stride_px=1,
+            min_valid_depth_samples=20,
+        ),
+        connectivity=8,
+        maximum_seed_xy_distance_m=0.1,
+    )
+    assert np.count_nonzero(mask) == 100
+    assert np.all(mask[40:50, 70:80])
+    assert not np.any(mask[40:50, 20:30])
+    assert mask_quality["eligible_component_count"] == 2
 
 
 def test_fusion_enforces_view_exclusivity_and_preserves_soft_class_evidence() -> None:
@@ -1880,7 +2077,9 @@ class _FinalCaptureStub:
         center_y = 0.40
         path = self.root / "final" / "images" / f"{candidate_id}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"test image placeholder")
+        from PIL import Image
+
+        Image.new("RGB", (100, 100), "white").save(path)
         frame = RgbdFrame(
             view_id=f"final_{candidate_id}",
             depth_m=np.full((100, 100), self.depth_m, dtype=float),
@@ -1894,7 +2093,7 @@ class _FinalCaptureStub:
             ),
             T_world_camera_optical=(
                 (1.0, 0.0, 0.0, center_x),
-                (0.0, 1.0, 0.0, center_y),
+                (0.0, -1.0, 0.0, center_y),
                 (0.0, 0.0, -1.0, 1.0),
                 (0.0, 0.0, 0.0, 1.0),
             ),

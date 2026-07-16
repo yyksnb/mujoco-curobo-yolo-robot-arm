@@ -6,6 +6,8 @@
 - `scene.py`、`detection.py`、`vision.py` 提供共享的坐标变换、YOLO 适配和 RGB-D 定位/融合接口。
 - `survey/` 负责固定路线、Survey 配置、采集和评估。
 - `final/processing.py`、`simulation.py`、`evaluation.py` 分别负责生产处理、MuJoCo 采集和评估。
+- `final/observations.py` 只负责生产前景掩码和观测 artifact 导出；共享的 schema、DTO 和严格 loader
+  位于 `robot_arm_pipeline.perception.object_observation`，Task2 不导入 Task1 内部实现。
 - `zoom/processing.py` 只消费 Final 正式结果，负责数字裁剪、放大和独立报告。
 - `replay.py` 只读消费一次运行的 layout、报告和已执行 cuRobo 轨迹，在 MuJoCo GUI 中回放。
 - Task1 只依赖 `PoseRoutePlanner` 的 pose、批量 IK 和轨迹正式接口；真实 cuRobo runtime 由共享
@@ -67,6 +69,29 @@ Final 处理 Survey 的全部候选，不要求输入数量恰好为 5。首个�
 artifact，生成失败不丢弃正式检测和位姿结果。Final 在 spawn 子进程中运行，隔离 MuJoCo/OpenGL、
 YOLO CUDA 和 cuRobo native runtime。
 
+### Task1 -> Task2 接口
+
+Task1 的边界止于“物体观测”，不输出精确 `T_world_object` 或抓取位姿。Final 对每个成功重识别对象
+写入 `object_observation_manifest.json`，其中只包含同帧 RGB、对齐的米制深度、生产前景掩码、相机
+内参、实际 `T_world_camera_optical`、支撑面、检测框/类别，以及 Survey 和 Final 的底面位置先验。
+候选数量不要求为 5，manifest 按 Final 正式结果顺序交付全部成功对象，不补齐或裁剪。
+
+前景掩码由 `configs/task1/final/config.yaml` 明确选择的 `depth_foreground_component` 策略生成：在检测框
+内按正式深度/高度门限提取连通域，再以 Survey 候选底面位置选择最近组件。每项记录 mask 来源、像素
+数、组件数和选择距离；该策略不读取 layout、MuJoCo segmentation 或评估真值，也不伪装成 YOLO
+instance segmentation。深度和掩码在这里属于正式跨阶段输入，不是诊断深度。
+
+Task2 只能依赖该 manifest 和共享 loader 的公开字段。物体模型 frame/scale、稳定放置姿态、对称性、
+刚体或可变形状态估计、end-effector/TCP frame、物体坐标系抓取库，以及 world/base 抓取变换均由
+Task2 负责，不得反向写入或影响 Task1 的检测、关联和生产状态。Task1 的底面位置只可作为初始化先验，
+语义不是 6D pose。
+
+manifest 将源 Final 状态与观测接口状态分开记录。源 Final 为 `partial` 时，共享 loader 仍返回全部合法
+observations，Task2 应继续处理这些对象，同时在自己的顶层状态中保留源失败；不得把该批输入包装为
+完整成功。观测接口自身为 `partial` 时也采用相同规则；没有合法 observation 的 `failed` manifest 默认
+拒绝，只有显式诊断读取才可开启 `allow_failed`。接口导出失败单独写入
+`object_observation_interface` 和逐候选 `object_observation`，不覆盖已有 Final 识别结果。
+
 ## Zoom
 
 Zoom 只读取 `task1_final_report` 的正式 `stable_objects`，并用简要 `results` 判断候选是否成功；
@@ -110,10 +135,13 @@ benchmark 聚合只用于独立 `*_evaluation.json`，不参与生产控制。�
 ## 逻辑分类
 
 - 正式设计：多视角 Survey 融合、开口连线斜拍、roll-aware 投影定距、批量碰撞 IK、多 standoff、
-  portal continuation、逐候选重检测和定位，以及基于 Final 正式 bbox 的横/竖屏数字变焦。
+  portal continuation、逐候选重检测和定位、同帧 RGB-D 下游观测合同，以及基于 Final 正式 bbox 的
+  横/竖屏数字变焦。
 - 工程防御：schema/指纹校验、逐阶段失败、生产报告原子落盘、native runtime 与评估故障隔离；
   portal 路线额外校验关节端点、停止速度和碰撞；Replay 框图缺失时显式显示不可用，不回退到
-  未标注 RGB；Zoom 保留完整可见 bbox、记录触边/留白并隔离框图生成失败。
+  未标注 RGB；Zoom 保留完整可见 bbox、记录触边/留白并隔离框图生成失败；下游观测 artifact 使用
+  相对路径、SHA-256、实际编码、尺寸、dtype、RGB-D 注册、相机约定、SE(3)、mask/depth/bbox 关系和
+  真值隔离校验。
 - Debug/评估：layout 真值、segmentation、真值 bbox、诊断深度、benchmark 聚合和 artifact Replay。
 - 临时 workaround：无；当前没有仅为样例通过而引入或计划删除的生产逻辑。
 
@@ -123,5 +151,8 @@ benchmark 聚合只用于独立 `*_evaluation.json`，不参与生产控制。�
 - Final footprint 不表达物体高度、遮挡和油箱口可见性，完整入框距离仍是平面近似。
 - coverage margin 尚未覆盖实机内参、手眼标定和机械臂执行误差，MuJoCo 与实机存在 domain gap。
 - 当前 YOLO 对小物体、旋转和斜视角敏感；模型、相机或场景分布变化后必须重新评估正式参数。
+- `depth_foreground_component` 是几何前景掩码而非语义实例分割；近邻物体在同一深度连通域、透明/反光
+  深度缺失或 Survey 位置先验偏差较大时，Task2 输入会明确失败或包含质量较低的 mask。后续接入
+  YOLO-seg 等生产 mask 时应新增显式策略并重新回归，不能静默替换或读取仿真 segmentation。
 - portal continuation 只在全部直接姿态失败后运行；极端深腔下可能额外尝试多个 roll，规划时间会
   明显增加，且 portal 可达分支仍可能无法连续进入目标。

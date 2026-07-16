@@ -63,6 +63,14 @@
   "association": {
     "maximum_xy_distance_m": 0.10
   },
+  "object_observation_interface": {
+    "enabled": true,
+    "world_frame_id": "world",
+    "camera_optical_frame_id": "gen3_wrist_optical",
+    "support_frame_id": "tank_bottom",
+    "mask_source": "depth_foreground_component",
+    "connected_component_connectivity": 8
+  },
   "evaluation": {
     "expected_object_count": 5,
     "truth_match_maximum_xy_distance_m": 0.10,

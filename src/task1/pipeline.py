@@ -226,6 +226,12 @@ def _run_final_worker(
             expected_object_count=final_config.evaluation.expected_object_count,
             candidate_count=len(candidates),
         )
+        report["object_observation_interface"].update(
+            {
+                "enabled": final_config.object_observation_interface.enabled,
+                "message": "Final failed before object observations could be finalized.",
+            }
+        )
         report["simulation"] = _final_simulation_metadata(final_config)
     final_dir.mkdir(parents=True, exist_ok=True)
     production_report = report
@@ -427,6 +433,7 @@ def _final_result_summary(result: dict[str, Any]) -> dict[str, Any]:
         "annotated_rgb_path",
         "localized_detection_count",
         "artifact_status",
+        "object_observation",
     )
     summary = {field: result[field] for field in fields if field in result}
     failures = result.get("artifact_failures")
@@ -493,6 +500,7 @@ def _load_valid_final_report(path: Path) -> dict[str, Any] | None:
         "unprocessed_candidate_count",
         "candidate_processing_order",
         "candidate_count_evaluation",
+        "object_observation_interface",
         "artifact_generation_failure_count",
         "results",
         "stable_objects",
@@ -809,6 +817,12 @@ class Task1Pipeline:
                 final_config_path=final_config.config_path,
                 expected_object_count=final_config.evaluation.expected_object_count,
                 candidate_count=len(candidates),
+            )
+            report["object_observation_interface"].update(
+                {
+                    "enabled": final_config.object_observation_interface.enabled,
+                    "message": "Final worker exited before object observations could be finalized.",
+                }
             )
             report["simulation"] = _final_simulation_metadata(final_config)
             _persist_final_production_report(final_dir, report)

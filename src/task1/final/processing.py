@@ -17,8 +17,16 @@ from robot_arm_pipeline.planning import (
     offset_pose_target_along_local_z,
     plan_pose_route,
 )
+from robot_arm_pipeline.perception.object_observation import (
+    MASK_SOURCE,
+    ensure_frame_id,
+)
 from robot_arm_pipeline.types import RobotState
 from task1.detection import Detector, YoloInferenceConfig, render_detection_overlay
+from task1.final.observations import (
+    FinalObservationExporter,
+    FinalObservationExportPolicy,
+)
 from task1.vision import (
     CandidateLocalizationPolicy,
     Detection2D,
@@ -111,6 +119,7 @@ class FinalConfig:
     detection: FinalDetectionConfig
     localization: CandidateLocalizationPolicy
     association: FinalAssociationPolicy
+    object_observation_interface: FinalObservationExportPolicy
     evaluation: FinalEvaluationPolicy
 
 
@@ -155,6 +164,7 @@ def load_final_config(path: Path, *, repo_root: Path) -> FinalConfig:
     detection = _mapping(payload, "detection")
     localization = _mapping(payload, "localization")
     association = _mapping(payload, "association")
+    object_observation_interface = _mapping(payload, "object_observation_interface")
     evaluation = _mapping(payload, "evaluation")
     result = FinalConfig(
         config_path=config_path,
@@ -286,6 +296,20 @@ def load_final_config(path: Path, *, repo_root: Path) -> FinalConfig:
         ),
         association=FinalAssociationPolicy(
             maximum_xy_distance_m=_number(association, "maximum_xy_distance_m")
+        ),
+        object_observation_interface=FinalObservationExportPolicy(
+            enabled=_boolean(object_observation_interface, "enabled"),
+            world_frame_id=_string(object_observation_interface, "world_frame_id"),
+            camera_optical_frame_id=_string(
+                object_observation_interface, "camera_optical_frame_id"
+            ),
+            support_frame_id=_string(object_observation_interface, "support_frame_id"),
+            mask_source=_string(object_observation_interface, "mask_source"),
+            connected_component_connectivity=_integer(
+                object_observation_interface,
+                "connected_component_connectivity",
+                minimum=1,
+            ),
         ),
         evaluation=FinalEvaluationPolicy(
             expected_object_count=_integer(evaluation, "expected_object_count", minimum=1),
@@ -466,6 +490,16 @@ class FinalProcessor:
         self.config = config
         self.world_pose_base = world_pose_base
         self.output_dir = output_dir
+        self.observation_exporter = (
+            FinalObservationExporter(
+                output_dir=output_dir,
+                policy=config.object_observation_interface,
+                localization_policy=config.localization,
+                maximum_seed_xy_distance_m=config.association.maximum_xy_distance_m,
+            )
+            if config.object_observation_interface.enabled
+            else None
+        )
 
     def run(
         self,
@@ -558,7 +592,55 @@ class FinalProcessor:
             "results": results,
             "stable_objects": stable_objects,
         })
+        report["object_observation_interface"] = self._finalize_object_observations(report)
         return report
+
+    def _finalize_object_observations(
+        self,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        stable_objects = report["stable_objects"]
+        if self.observation_exporter is None:
+            return {
+                "enabled": False,
+                "status": "disabled",
+                "failure_stage": None,
+                "manifest_status": "not_run",
+                "source_final_status": report["status"],
+                "manifest_path": None,
+                "eligible_object_count": len(stable_objects),
+                "prepared_object_count": 0,
+                "exported_object_count": 0,
+                "failed_object_count": 0,
+                "message": "Final object observation export is disabled by configuration.",
+            }
+        source_final = {
+            "status": report["status"],
+            "failure_stage": report["failure_stage"],
+            "candidate_count": report["candidate_count"],
+            "processed_candidate_count": report["processed_candidate_count"],
+            "successful_candidate_count": report["successful_candidate_count"],
+            "failed_candidate_count": report["failed_candidate_count"],
+            "unprocessed_candidate_count": report["unprocessed_candidate_count"],
+            "successful_candidate_ids": [
+                str(item["candidate_id"]) for item in stable_objects
+            ],
+            "failed_candidates": [
+                {
+                    "candidate_id": str(result["candidate_id"]),
+                    "failure_stage": str(result["failure_stage"]),
+                    "message": str(result["message"]),
+                }
+                for result in report["results"]
+                if result["status"] != "success"
+            ],
+            "candidate_count_evaluation": dict(report["candidate_count_evaluation"]),
+        }
+        return self.observation_exporter.finalize(
+            eligible_candidate_ids=[str(item["candidate_id"]) for item in stable_objects],
+            source_final_report=self.output_dir / "final_report.json",
+            source_final=source_final,
+        )
 
     def _prepare_candidates(
         self,
@@ -931,6 +1013,24 @@ class FinalProcessor:
                 str(annotated_path) if annotated_path is not None else None
             ),
         }
+        if self.observation_exporter is not None:
+            try:
+                export_result = self.observation_exporter.export(
+                    candidate_id=candidate.candidate_id,
+                    survey_bottom_position_world=candidate.bottom_position_world,
+                    final_bottom_position_world=observation.position_world,
+                    detection=detection,
+                    frame=captured.frame,
+                    rgb_path=captured.rgb_path,
+                )
+            except Exception as exc:
+                export_result = self.observation_exporter.record_failure(
+                    candidate.candidate_id,
+                    _error_message(exc),
+                )
+            base_result["object_observation"] = export_result
+            if export_result["status"] == "success":
+                stable["object_observation_id"] = export_result["observation_id"]
         return (
             {
                 **base_result,
@@ -1067,6 +1167,19 @@ def _final_report_base(
         "ik_rejected_camera_target_count": 0,
         "motion_planning_attempt_count": 0,
         "artifact_generation_failure_count": 0,
+        "object_observation_interface": {
+            "enabled": None,
+            "status": "not_run",
+            "failure_stage": None,
+            "manifest_status": "not_run",
+            "source_final_status": status,
+            "manifest_path": None,
+            "eligible_object_count": 0,
+            "prepared_object_count": 0,
+            "exported_object_count": 0,
+            "failed_object_count": 0,
+            "message": "Final object observation export did not run.",
+        },
         "simulation": None,
         "diagnostics_path": None,
         "evaluation_status": "not_run",
@@ -1108,6 +1221,19 @@ def _validate_final_config(config: FinalConfig) -> None:
         raise ValueError("Final camera standoff_distance_scales must all be at least 1")
     if config.association.maximum_xy_distance_m <= 0.0:
         raise ValueError("Final association maximum_xy_distance_m must be positive")
+    observation_interface = config.object_observation_interface
+    if observation_interface.mask_source != MASK_SOURCE:
+        raise ValueError(
+            f"Final object observation mask_source must be {MASK_SOURCE!r}"
+        )
+    if observation_interface.connected_component_connectivity not in {4, 8}:
+        raise ValueError("Final object observation connectivity must be 4 or 8")
+    ensure_frame_id(observation_interface.world_frame_id, "world_frame_id")
+    ensure_frame_id(
+        observation_interface.camera_optical_frame_id,
+        "camera_optical_frame_id",
+    )
+    ensure_frame_id(observation_interface.support_frame_id, "support_frame_id")
     planning = config.planning
     if planning.position_tolerance_m <= 0.0 or planning.orientation_tolerance_rad <= 0.0:
         raise ValueError("Final planning pose tolerances must be positive")
