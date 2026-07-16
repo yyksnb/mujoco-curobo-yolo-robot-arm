@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from task1.final.processing import FinalCaptureResult
+from task1.scene import apply_target_object_layout
 from task1.vision import CameraIntrinsics, RgbdFrame
 
 
@@ -189,18 +190,7 @@ class MujocoFinalCapture:
         selected = {str(item["object_id"]): item for item in raw_objects if isinstance(item, dict)}
         model = mujoco.MjModel.from_xml_path(str(self.model_path.resolve()))
         data = mujoco.MjData(model)
-        for body_id in range(model.nbody):
-            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
-            if not name.startswith("target_") or name == "target_object_include_root":
-                continue
-            item = selected.get(name)
-            if item is None:
-                model.body_pos[body_id] = (0.0, 0.0, -10.0)
-                continue
-            model.body_pos[body_id] = tuple(float(value) for value in item["position"])
-            yaw = float(item["yaw_rad"])
-            model.body_quat[body_id] = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
-        mujoco.mj_forward(model, data)
+        apply_target_object_layout(mujoco, model, data, selected)
         self._mujoco = mujoco
         self._model = model
         self._data = data

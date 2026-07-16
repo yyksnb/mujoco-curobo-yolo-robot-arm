@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from robot_arm_pipeline.planning import MotionPlanResult, MotionPlanSegment
+from task1.scene import apply_target_object_layout
 
 
 _ReplayPhase = Literal["survey", "final"]
@@ -1319,30 +1320,13 @@ class _MujocoReplaySession:
 
     def _apply_layout(self, model: Any, data: Any) -> None:
         selected = {str(item["object_id"]): item for item in self.plan.layout_objects}
-        positions: list[tuple[float, float, float]] = []
-        for body_id in range(model.nbody):
-            name = (
-                self.mujoco.mj_id2name(model, self.mujoco.mjtObj.mjOBJ_BODY, body_id)
-                or ""
-            )
-            if not name.startswith("target_") or name == "target_object_include_root":
-                continue
-            item = selected.get(name)
-            if item is None:
-                model.body_pos[body_id] = (0.0, 0.0, -10.0)
-                continue
-            position = tuple(float(value) for value in item["position"])
-            yaw = float(item["yaw_rad"])
-            model.body_pos[body_id] = position
-            model.body_quat[body_id] = (
-                math.cos(yaw / 2.0),
-                0.0,
-                0.0,
-                math.sin(yaw / 2.0),
-            )
-            positions.append(position)
-        self.mujoco.mj_forward(model, data)
-        if not positions:
+        applied = apply_target_object_layout(
+            self.mujoco,
+            model,
+            data,
+            selected,
+        )
+        if not applied:
             raise ValueError(
                 "Task1 replay layout objects do not match the MuJoCo model"
             )

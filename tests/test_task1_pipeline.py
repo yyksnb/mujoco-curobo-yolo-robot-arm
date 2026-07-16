@@ -38,6 +38,7 @@ from task1.scene import (
     PlacementBounds,
     TargetObjectSpec,
     RigidPose,
+    apply_target_object_layout,
     convex_polygons_intersect,
     generate_random_target_object_poses,
     load_tank_pose_in_base,
@@ -1659,7 +1660,7 @@ def test_target_layout_uses_model_footprints_without_overlap() -> None:
     poses = generate_random_target_object_poses(
         specs,
         seed=7,
-        base_height_m=0.03,
+        base_height_m=0.025,
         bounds=bounds,
         collision_margin_m=0.01,
     )
@@ -1669,7 +1670,7 @@ def test_target_layout_uses_model_footprints_without_overlap() -> None:
         "target_medium",
         "target_small",
     }
-    assert all(pose.position[2] == 0.03 for pose in poses)
+    assert all(pose.position[2] == 0.025 for pose in poses)
     assert all(-math.pi <= pose.yaw_rad <= math.pi for pose in poses)
     polygons = [np.asarray(pose.footprint_polygon_xy, dtype=float) for pose in poses]
     assert all(polygon_within_bounds(polygon, bounds) for polygon in polygons)
@@ -1686,6 +1687,225 @@ def test_target_layout_uses_model_footprints_without_overlap() -> None:
         assert len(model_specs) >= 5
         assert all(spec.object_id.startswith("target_") for spec in model_specs)
         assert all(spec.footprint_area_m2 > 0.0 for spec in model_specs)
+
+
+def test_competition_target_objects_are_free_and_layout_updates_qpos() -> None:
+    mujoco = pytest.importorskip("mujoco")
+    model = mujoco.MjModel.from_xml_path(
+        str((REPO_ROOT / "examples/mujoco/gen3_with_tank.xml").resolve())
+    )
+    data = mujoco.MjData(model)
+    target_body_ids = {
+        name: body_id
+        for body_id in range(model.nbody)
+        if (
+            name := mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_BODY, body_id
+            )
+        )
+        and name.startswith("target_")
+    }
+    assert "target_marker" in target_body_ids
+
+    for body_id in target_body_ids.values():
+        assert int(model.body_parentid[body_id]) == 0
+        assert int(model.body_jntnum[body_id]) == 1
+        joint_id = int(model.body_jntadr[body_id])
+        assert int(model.jnt_type[joint_id]) == int(mujoco.mjtJoint.mjJNT_FREE)
+        assert float(model.body_mass[body_id]) > 0.0
+
+    position = (2.0, 2.0, 1.0)
+    yaw = 0.4
+    applied = apply_target_object_layout(
+        mujoco,
+        model,
+        data,
+        {"target_marker": {"position": position, "yaw_rad": yaw}},
+    )
+    assert applied == ("target_marker",)
+
+    marker_body_id = target_body_ids["target_marker"]
+    marker_joint_id = int(model.body_jntadr[marker_body_id])
+    marker_qpos_address = int(model.jnt_qposadr[marker_joint_id])
+    expected_qpos = (
+        *position,
+        math.cos(yaw / 2.0),
+        0.0,
+        0.0,
+        math.sin(yaw / 2.0),
+    )
+    assert data.qpos[marker_qpos_address : marker_qpos_address + 7] == pytest.approx(
+        expected_qpos
+    )
+    assert model.qpos0[
+        marker_qpos_address : marker_qpos_address + 7
+    ] == pytest.approx(expected_qpos)
+
+    unselected_geom_ids = {
+        geom_id
+        for geom_id in range(model.ngeom)
+        if int(model.geom_bodyid[geom_id]) in set(target_body_ids.values()) - {marker_body_id}
+    }
+    assert unselected_geom_ids
+    assert all(int(model.geom_contype[geom_id]) == 0 for geom_id in unselected_geom_ids)
+    assert all(int(model.geom_conaffinity[geom_id]) == 0 for geom_id in unselected_geom_ids)
+
+    initial_z = float(data.qpos[marker_qpos_address + 2])
+    for _ in range(10):
+        mujoco.mj_step(model, data)
+    assert float(data.qpos[marker_qpos_address + 2]) < initial_z
+    assert float(data.qvel[int(model.jnt_dofadr[marker_joint_id]) + 2]) < 0.0
+    assert all(
+        int(contact.geom1) not in unselected_geom_ids
+        and int(contact.geom2) not in unselected_geom_ids
+        for contact in data.contact[: data.ncon]
+    )
+
+
+def test_competition_target_objects_settle_against_tank_floor_and_ribs() -> None:
+    mujoco = pytest.importorskip("mujoco")
+    model = mujoco.MjModel.from_xml_path(
+        str((REPO_ROOT / "examples/mujoco/gen3_with_tank.xml").resolve())
+    )
+    data = mujoco.MjData(model)
+    keyframe_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_KEY, "gen3_home"
+    )
+    assert keyframe_id >= 0
+    mujoco.mj_resetDataKeyframe(model, data, keyframe_id)
+    mujoco.mj_forward(model, data)
+
+    tank_collision_groups = np.zeros(6, dtype=np.uint8)
+    tank_collision_groups[3] = 1
+
+    def tank_surface_z_at(x_m: float, y_m: float) -> float:
+        ray_origin_z_m = 0.1
+        geom_id = np.full(1, -1, dtype=np.int32)
+        distance_m = mujoco.mj_ray(
+            model,
+            data,
+            np.array([x_m, y_m, ray_origin_z_m]),
+            np.array([0.0, 0.0, -1.0]),
+            tank_collision_groups,
+            True,
+            -1,
+            geom_id,
+        )
+        assert distance_m >= 0.0
+        assert int(geom_id[0]) >= 0
+        return ray_origin_z_m - float(distance_m)
+
+    floor_surface_z_m = 0.003
+    rib_surface_z_m = 0.023
+    assert tank_surface_z_at(0.22, 0.30) == pytest.approx(
+        floor_surface_z_m, abs=1e-6
+    )
+    for y_m in (0.2, 0.4, 0.6, 0.8):
+        assert tank_surface_z_at(0.505, y_m) == pytest.approx(
+            rib_surface_z_m, abs=1e-6
+        )
+    for x_m in (0.145, 0.295, 0.445, 0.565, 0.715, 0.865):
+        assert tank_surface_z_at(x_m, 0.30) == pytest.approx(
+            rib_surface_z_m, abs=1e-6
+        )
+
+    rib_geom_ids = [
+        geom_id
+        for geom_id in range(model.ngeom)
+        if (
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or ""
+        ).startswith("tank_bottom_rib_")
+    ]
+    assert len(rib_geom_ids) == 10
+
+    targets: dict[str, tuple[int, int]] = {}
+    initial_body_z_m: dict[str, float] = {}
+    for body_id in range(model.nbody):
+        body_name = (
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+        )
+        if not body_name.startswith("target_"):
+            continue
+        joint_id = int(model.body_jntadr[body_id])
+        qpos_address = int(model.jnt_qposadr[joint_id])
+        dof_address = int(model.jnt_dofadr[joint_id])
+        assert float(data.qpos[qpos_address + 2]) == pytest.approx(0.025)
+        assert data.qvel[dof_address : dof_address + 6] == pytest.approx(
+            np.zeros(6)
+        )
+        targets[body_name] = (body_id, dof_address)
+        initial_body_z_m[body_name] = float(data.xpos[body_id, 2])
+    assert targets
+
+    target_geom_ids = {
+        name: next(
+            geom_id
+            for geom_id in range(model.ngeom)
+            if int(model.geom_bodyid[geom_id]) == body_id
+        )
+        for name, (body_id, _dof_address) in targets.items()
+    }
+    for name, geom_id in target_geom_ids.items():
+        closest_rib_distance_m = min(
+            float(
+                mujoco.mj_geomDistance(model, data, geom_id, rib_geom_id, 0.1, None)
+            )
+            for rib_geom_id in rib_geom_ids
+        )
+        assert closest_rib_distance_m >= -1e-6, name
+    target_geom_id_set = set(target_geom_ids.values())
+    assert all(
+        int(contact.geom1) not in target_geom_id_set
+        and int(contact.geom2) not in target_geom_id_set
+        for contact in data.contact[: data.ncon]
+    )
+
+    timestep = float(model.opt.timestep)
+    total_steps = round(10.0 / timestep)
+    observation_steps = round(2.0 / timestep)
+    linear_speed_samples = {name: [] for name in targets}
+    for step in range(total_steps):
+        mujoco.mj_step(model, data)
+        if step == 0:
+            assert all(
+                float(data.qvel[dof_address + 2]) < 0.0
+                for _body_id, dof_address in targets.values()
+            )
+        if step < total_steps - observation_steps:
+            continue
+        for name, (body_id, dof_address) in targets.items():
+            linear_speed_samples[name].append(
+                float(np.linalg.norm(data.qvel[dof_address : dof_address + 3]))
+            )
+
+    contact_tolerance_m = 0.002
+    for name, (body_id, _dof_address) in targets.items():
+        geom_id = target_geom_ids[name]
+        mesh_id = int(model.geom_dataid[geom_id])
+        vertex_address = int(model.mesh_vertadr[mesh_id])
+        vertex_count = int(model.mesh_vertnum[mesh_id])
+        vertices = np.asarray(
+            model.mesh_vert[vertex_address : vertex_address + vertex_count]
+        )
+        rotation = np.asarray(data.geom_xmat[geom_id]).reshape(3, 3)
+        world_vertices = vertices @ rotation.T + np.asarray(data.geom_xpos[geom_id])
+        bottom_z_m = float(np.min(world_vertices[:, 2]))
+
+        assert bottom_z_m >= floor_surface_z_m - contact_tolerance_m, name
+        assert bottom_z_m <= rib_surface_z_m + contact_tolerance_m, name
+        closest_rib_distance_m = min(
+            float(
+                mujoco.mj_geomDistance(model, data, geom_id, rib_geom_id, 0.1, None)
+            )
+            for rib_geom_id in rib_geom_ids
+        )
+        assert closest_rib_distance_m >= -contact_tolerance_m, name
+        assert float(np.mean(linear_speed_samples[name])) <= 0.02, name
+    assert any(
+        float(data.xpos[body_id, 2]) < initial_body_z_m[name] - 0.001
+        for name, (body_id, _dof_address) in targets.items()
+    )
+    assert all(int(warning.number) == 0 for warning in data.warning)
 
 
 def _write_replay_run(root: Path, name: str) -> Path:

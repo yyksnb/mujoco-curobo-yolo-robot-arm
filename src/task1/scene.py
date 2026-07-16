@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 import xml.etree.ElementTree as ElementTree
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ import numpy as np
 TARGET_BODY_PREFIX = "target_"
 DEFAULT_MODEL_PATH = Path("examples/mujoco/gen3_with_tank.xml")
 DEFAULT_OBJECT_COUNT = 5
-DEFAULT_BASE_HEIGHT_M = 0.03
+DEFAULT_BASE_HEIGHT_M = 0.025
 DEFAULT_COLLISION_MARGIN_M = 0.012
 
 
@@ -291,12 +292,74 @@ def _is_target_object_body(body_name: str) -> bool:
     return body_name.startswith(TARGET_BODY_PREFIX) and body_name != "target_object_include_root"
 
 
+def apply_target_object_layout(
+    mujoco: Any,
+    model: Any,
+    data: Any,
+    selected_objects: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Initialize target free joints from a Task1 layout and hide unselected objects."""
+    applied: list[str] = []
+    for body_id in range(model.nbody):
+        body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+        if not _is_target_object_body(body_name):
+            continue
+
+        item = selected_objects.get(body_name)
+        if item is None:
+            position = (0.0, 0.0, -10.0)
+            quaternion = (1.0, 0.0, 0.0, 0.0)
+            for geom_id in range(model.ngeom):
+                if int(model.geom_bodyid[geom_id]) == body_id:
+                    model.geom_contype[geom_id] = 0
+                    model.geom_conaffinity[geom_id] = 0
+        else:
+            raw_position = item.get("position")
+            if not isinstance(raw_position, (list, tuple)) or len(raw_position) != 3:
+                raise ValueError(f"layout position for {body_name} must contain three values")
+            position = tuple(float(value) for value in raw_position)
+            yaw = float(item["yaw_rad"])
+            if not all(math.isfinite(value) for value in (*position, yaw)):
+                raise ValueError(f"layout pose for {body_name} must be finite")
+            quaternion = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
+            applied.append(body_name)
+
+        qpos_address, dof_address = _target_free_joint_addresses(
+            mujoco, model, body_id, body_name
+        )
+        free_joint_qpos = (*position, *quaternion)
+        model.qpos0[qpos_address : qpos_address + 7] = free_joint_qpos
+        data.qpos[qpos_address : qpos_address + 7] = free_joint_qpos
+        data.qvel[dof_address : dof_address + 6] = 0.0
+
+    mujoco.mj_forward(model, data)
+    return tuple(applied)
+
+
+def _target_free_joint_addresses(
+    mujoco: Any,
+    model: Any,
+    body_id: int,
+    body_name: str,
+) -> tuple[int, int]:
+    if int(model.body_jntnum[body_id]) != 1:
+        raise ValueError(f"target object body must have exactly one free joint: {body_name}")
+    joint_id = int(model.body_jntadr[body_id])
+    if int(model.jnt_type[joint_id]) != int(mujoco.mjtJoint.mjJNT_FREE):
+        raise ValueError(f"target object body joint must be free: {body_name}")
+    return int(model.jnt_qposadr[joint_id]), int(model.jnt_dofadr[joint_id])
+
+
 def _target_mesh_vertices_in_body_frame(mujoco, model, data, body_id: int, geom_id: int) -> np.ndarray:
-    original_pos = np.asarray(model.body_pos[body_id], dtype=float).copy()
-    original_quat = np.asarray(model.body_quat[body_id], dtype=float).copy()
+    body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or str(body_id)
+    qpos_address, dof_address = _target_free_joint_addresses(
+        mujoco, model, body_id, body_name
+    )
+    original_qpos = np.asarray(data.qpos[qpos_address : qpos_address + 7], dtype=float).copy()
+    original_qvel = np.asarray(data.qvel[dof_address : dof_address + 6], dtype=float).copy()
     try:
-        model.body_pos[body_id] = np.zeros(3, dtype=float)
-        model.body_quat[body_id] = np.asarray((1.0, 0.0, 0.0, 0.0), dtype=float)
+        data.qpos[qpos_address : qpos_address + 7] = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+        data.qvel[dof_address : dof_address + 6] = 0.0
         mujoco.mj_forward(model, data)
 
         if int(model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_MESH:
@@ -312,8 +375,8 @@ def _target_mesh_vertices_in_body_frame(mujoco, model, data, body_id: int, geom_
         geom_position = np.asarray(data.geom_xpos[geom_id], dtype=float)
         return vertices @ geom_rotation.T + geom_position
     finally:
-        model.body_pos[body_id] = original_pos
-        model.body_quat[body_id] = original_quat
+        data.qpos[qpos_address : qpos_address + 7] = original_qpos
+        data.qvel[dof_address : dof_address + 6] = original_qvel
         mujoco.mj_forward(model, data)
 
 

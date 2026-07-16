@@ -1,41 +1,59 @@
-<body name="target_object_include_root">
-  <body name="target_hex_key" pos="0.50 0.45 0.03" euler="0 0 0">
-    <geom name="target_hex_key_geom" type="mesh" mesh="target_hex_key_mesh" euler="90 0 0"
-      material="target_metal_light" contype="1" conaffinity="1"/>
+<mujocoinclude>
+  <!-- Geom offsets map each source STL frame to a body frame centered on the
+       XY bounding box with the mesh bottom at local z=0. -->
+  <body name="target_hex_key" pos="0.50 0.45 0.025" euler="0 0 0">
+    <freejoint name="target_hex_key_freejoint"/>
+    <geom name="target_hex_key_geom" type="mesh" mesh="target_hex_key_mesh"
+      pos="-0.059531249 0.014319250 0" euler="90 0 0"
+      material="target_metal_light" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_drill_bit" pos="0.70 0.45 0.03" euler="0 0 0">
+  <body name="target_drill_bit" pos="0.70 0.45 0.025" euler="0 0 0">
+    <freejoint name="target_drill_bit_freejoint"/>
     <geom name="target_drill_bit_geom" type="mesh" mesh="target_drill_bit_mesh"
-      material="target_drill_bit" contype="1" conaffinity="1"/>
+      pos="-0.004000000 -0.040000000 -0.000037047"
+      material="target_drill_bit" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_glove" pos="0.30 0.45 0.03" euler="0 0 0">
-    <geom name="target_glove_geom" type="mesh" mesh="target_glove_mesh" euler="90 0 0"
-      material="target_glove" contype="1" conaffinity="1"/>
+  <body name="target_glove" pos="0.30 0.45 0.025" euler="0 0 0">
+    <freejoint name="target_glove_freejoint"/>
+    <geom name="target_glove_geom" type="mesh" mesh="target_glove_mesh"
+      pos="-0.048384124 0.067654407 0" euler="90 0 0"
+      material="target_glove" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_notebook" pos="0.40 0.65 0.03" euler="0 0 0">
-    <geom name="target_notebook_geom" type="mesh" mesh="target_notebook_mesh" euler="0 90 180"
-      material="target_notebook" contype="1" conaffinity="1"/>
+  <body name="target_notebook" pos="0.40 0.65 0.025" euler="0 0 0">
+    <freejoint name="target_notebook_freejoint"/>
+    <geom name="target_notebook_geom" type="mesh" mesh="target_notebook_mesh"
+      pos="-0.167974830 0.084773737 -0.002248173" euler="0 90 180"
+      material="target_notebook" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_marker" pos="0.50 0.25 0.03" euler="0 0 0">
-    <geom name="target_marker_geom" type="mesh" mesh="target_marker_mesh" euler="0 90 0"
-      material="target_marker" contype="1" conaffinity="1"/>
+  <body name="target_marker" pos="0.50 0.25 0.025" euler="0 0 0">
+    <freejoint name="target_marker_freejoint"/>
+    <geom name="target_marker_geom" type="mesh" mesh="target_marker_mesh"
+      pos="0.018773122 0 0.009581937" euler="0 90 0"
+      material="target_marker" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_rivet_gun" pos="0.30 0.25 0.03" euler="0 0 0">
-    <geom name="target_rivet_gun_geom" type="mesh" mesh="target_rivet_gun_mesh" euler="0 90 0"
-      material="target_tool_black" contype="1" conaffinity="1"/>
+  <body name="target_rivet_gun" pos="0.30 0.25 0.025" euler="0 0 0">
+    <freejoint name="target_rivet_gun_freejoint"/>
+    <geom name="target_rivet_gun_geom" type="mesh" mesh="target_rivet_gun_mesh"
+      pos="0.032206425 0.019703770 0.013947060" euler="0 90 0"
+      material="target_tool_black" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_standard_part" pos="0.40 0.55 0.03" euler="0 0 0">
-    <geom name="target_standard_part_geom" type="mesh" mesh="target_standard_part_mesh" euler="90 0 0"
-      material="target_metal_dark" contype="1" conaffinity="1"/>
+  <body name="target_standard_part" pos="0.40 0.55 0.025" euler="0 0 0">
+    <freejoint name="target_standard_part_freejoint"/>
+    <geom name="target_standard_part_geom" type="mesh" mesh="target_standard_part_mesh"
+      pos="0 0.007100000 0.002694798" euler="90 0 0"
+      material="target_metal_dark" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
 
-  <body name="target_tape" pos="0.75 0.30 0.03" euler="0 0 0">
-    <geom name="target_tape_geom" type="mesh" mesh="target_tape_mesh" euler="180 0 90"
-      material="target_tape" contype="1" conaffinity="1"/>
+  <body name="target_tape" pos="0.75 0.30 0.025" euler="0 0 0">
+    <freejoint name="target_tape_freejoint"/>
+    <geom name="target_tape_geom" type="mesh" mesh="target_tape_mesh"
+      pos="0.038000001 0.038000001 0.020000000" euler="180 0 90"
+      material="target_tape" contype="1" conaffinity="1" condim="6" friction="1 0.1 0.01"/>
   </body>
-</body>
+</mujocoinclude>

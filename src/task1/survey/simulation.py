@@ -10,6 +10,7 @@ import numpy as np
 
 from robot_arm_pipeline.planning import MotionPlanResult
 from task1.detection import Detector, render_detection_overlay
+from task1.scene import apply_target_object_layout
 from task1.vision import (
     CameraIntrinsics,
     CandidateLocalizationPolicy,
@@ -308,18 +309,12 @@ class MujocoSurveySimulation:
 
     def _apply_layout(self) -> None:
         mujoco, model, data = self._required_runtime()
-        for body_id in range(model.nbody):
-            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
-            if not name.startswith("target_") or name == "target_object_include_root":
-                continue
-            item = self._selected_objects.get(name)
-            if item is None:
-                model.body_pos[body_id] = (0.0, 0.0, -10.0)
-                continue
-            model.body_pos[body_id] = tuple(float(value) for value in item["position"])
-            yaw = float(item["yaw_rad"])
-            model.body_quat[body_id] = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
-        mujoco.mj_forward(model, data)
+        apply_target_object_layout(
+            mujoco,
+            model,
+            data,
+            self._selected_objects,
+        )
 
     def _capture(
         self,
