@@ -9,6 +9,7 @@ description = "Mock robot arm planning pipeline with a MuJoCo executor skeleton.
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
+    "PyYAML>=6.0",
     "scipy>=1.10",
     "shapely>=2.0",
 ]
