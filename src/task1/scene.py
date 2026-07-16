@@ -14,8 +14,10 @@ import numpy as np
 TARGET_BODY_PREFIX = "target_"
 DEFAULT_MODEL_PATH = Path("examples/mujoco/gen3_with_tank.xml")
 DEFAULT_OBJECT_COUNT = 5
-DEFAULT_BASE_HEIGHT_M = 0.025
+DEFAULT_SPAWN_HEIGHT_M = 0.025
 DEFAULT_COLLISION_MARGIN_M = 0.012
+_SUPPORT_GEOM_NAMES = ("tank_bottom_collision",)
+_SUPPORT_GEOM_PREFIXES = ("tank_bottom_rib_",)
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,25 @@ class PlacementBounds:
     x_max: float = 0.85
     y_min: float = 0.15
     y_max: float = 0.85
+
+
+@dataclass(frozen=True)
+class SupportPlacementPolicy:
+    search_lower_z_m: float = 0.0
+    search_upper_z_m: float = 0.1
+    search_step_m: float = 0.0005
+    height_tolerance_m: float = 1e-7
+    max_iterations: int = 60
+
+    def __post_init__(self) -> None:
+        if self.search_lower_z_m >= self.search_upper_z_m:
+            raise ValueError("support placement z search interval is invalid")
+        if (
+            self.search_step_m <= 0
+            or self.height_tolerance_m <= 0
+            or self.max_iterations <= 0
+        ):
+            raise ValueError("support placement convergence policy is invalid")
 
 
 @dataclass(frozen=True)
@@ -64,20 +85,26 @@ def make_random_target_object_pose_payload(
     model_path: Path,
     seed: int,
     object_count: int = DEFAULT_OBJECT_COUNT,
-    base_height_m: float = DEFAULT_BASE_HEIGHT_M,
+    spawn_height_m: float = DEFAULT_SPAWN_HEIGHT_M,
     bounds: PlacementBounds = PlacementBounds(),
     collision_margin_m: float = DEFAULT_COLLISION_MARGIN_M,
     max_attempts_per_object: int = 6000,
+    support_policy: SupportPlacementPolicy = SupportPlacementPolicy(),
 ) -> dict[str, Any]:
     specs = load_target_object_specs(model_path)
     selected_specs = select_target_object_specs(specs, object_count=object_count, seed=seed)
     poses = generate_random_target_object_poses(
         selected_specs,
         seed=seed,
-        base_height_m=base_height_m,
+        spawn_height_m=spawn_height_m,
         bounds=bounds,
         collision_margin_m=collision_margin_m,
         max_attempts_per_object=max_attempts_per_object,
+    )
+    poses = place_target_objects_on_support(
+        model_path,
+        poses,
+        policy=support_policy,
     )
     poses_by_name = {pose.object_id: pose for pose in poses}
     ordered_poses = tuple(poses_by_name[spec.object_id] for spec in selected_specs)
@@ -86,7 +113,8 @@ def make_random_target_object_pose_payload(
         "model_path": str(model_path),
         "seed": seed,
         "object_count": object_count,
-        "base_height_m": base_height_m,
+        "spawn_height_m": spawn_height_m,
+        "support_placement_policy": asdict(support_policy),
         "placement_bounds": asdict(bounds),
         "collision_margin_m": collision_margin_m,
         "max_attempts_per_object": max_attempts_per_object,
@@ -95,7 +123,7 @@ def make_random_target_object_pose_payload(
             "Object poses are generated from MuJoCo target_* mesh footprints.",
             "The script writes poses only; it does not modify MJCF/XML files.",
             "Collision checks use conservative 2D footprint polygons on the tank bottom plane.",
-            "The z coordinate is controlled by base_height_m.",
+            "Spawn poses are lowered onto the first non-penetrating tank support contact.",
         ],
         "objects": [target_pose_to_dict(pose) for pose in ordered_poses],
     }
@@ -166,7 +194,7 @@ def generate_random_target_object_poses(
     specs: tuple[TargetObjectSpec, ...],
     *,
     seed: int,
-    base_height_m: float,
+    spawn_height_m: float,
     bounds: PlacementBounds = PlacementBounds(),
     collision_margin_m: float = DEFAULT_COLLISION_MARGIN_M,
     max_attempts_per_object: int = 6000,
@@ -197,7 +225,8 @@ def generate_random_target_object_poses(
             if footprint_collides_with_any(polygon, placed_polygons, collision_margin_m):
                 continue
 
-            position = (_round(x), _round(y), _round(base_height_m))
+            position = (_round(x), _round(y), _round(spawn_height_m))
+            quaternion = _yaw_quaternion_wxyz(yaw_rad)
             placed.append(
                 TargetObjectPose(
                     object_id=spec.object_id,
@@ -205,8 +234,8 @@ def generate_random_target_object_poses(
                     position=position,
                     yaw_rad=_round(yaw_rad),
                     yaw_deg=_round(math.degrees(yaw_rad)),
-                    quat_wxyz=_yaw_quaternion_wxyz(yaw_rad),
-                    T_world_object=_make_yaw_transform(position, yaw_rad),
+                    quat_wxyz=quaternion,
+                    T_world_object=_make_transform(position, quaternion),
                     footprint_polygon_xy=_tuple_points(polygon),
                     footprint_area_m2=spec.footprint_area_m2,
                     footprint_radius_m=spec.footprint_radius_m,
@@ -220,6 +249,95 @@ def generate_random_target_object_poses(
             raise RuntimeError(f"could not place target object without collision: {spec.object_id}")
 
     return tuple(sorted(placed, key=lambda pose: pose.selection_order))
+
+
+def place_target_objects_on_support(
+    model_path: Path,
+    poses: tuple[TargetObjectPose, ...],
+    *,
+    policy: SupportPlacementPolicy = SupportPlacementPolicy(),
+) -> tuple[TargetObjectPose, ...]:
+    """Resolve each normalized object origin onto the tank support collision geometry."""
+    mujoco = _import_mujoco()
+    model = mujoco.MjModel.from_xml_path(str(Path(model_path).resolve()))
+    data = mujoco.MjData(model)
+    selected = {
+        pose.object_id: {
+            "position": pose.position,
+            "quat_wxyz": pose.quat_wxyz,
+        }
+        for pose in poses
+    }
+    apply_target_object_layout(mujoco, model, data, selected)
+    support_geom_ids = _support_geom_ids(mujoco, model)
+
+    for pose in poses:
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, pose.object_id)
+        if body_id < 0:
+            raise ValueError(f"layout target body does not exist: {pose.object_id}")
+        target_geom_id = _single_target_geom_id(model, body_id, pose.object_id)
+        qpos_address, dof_address = _target_free_joint_addresses(
+            mujoco, model, body_id, pose.object_id
+        )
+        support_z = _first_support_contact_z(
+            mujoco,
+            model,
+            data,
+            target_geom_id=target_geom_id,
+            qpos_address=qpos_address,
+            support_geom_ids=support_geom_ids,
+            policy=policy,
+        )
+        data.qpos[qpos_address + 2] = support_z
+        data.qvel[dof_address : dof_address + 6] = 0.0
+        model.qpos0[qpos_address : qpos_address + 7] = data.qpos[
+            qpos_address : qpos_address + 7
+        ]
+    mujoco.mj_forward(model, data)
+
+    supported: list[TargetObjectPose] = []
+    for pose in poses:
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, pose.object_id)
+        target_geom_id = _single_target_geom_id(model, body_id, pose.object_id)
+        qpos_address, _ = _target_free_joint_addresses(
+            mujoco, model, body_id, pose.object_id
+        )
+        qpos = np.asarray(data.qpos[qpos_address : qpos_address + 7], dtype=float)
+        position = (
+            _round(qpos[0]),
+            _round(qpos[1]),
+            _round(qpos[2], 9),
+        )
+        quaternion = _normalized_quaternion_values(qpos[3:7])
+        vertices_world = _mesh_vertices_world(model, data, target_geom_id)
+        footprint = _convex_hull_xy(vertices_world[:, :2])
+        if len(footprint) < 3:
+            raise ValueError(f"supported target footprint is degenerate: {pose.object_id}")
+        radius = float(
+            np.max(
+                np.linalg.norm(
+                    footprint - np.asarray(position[:2], dtype=float), axis=1
+                )
+            )
+        )
+        yaw_rad = _yaw_from_quaternion(quaternion)
+        supported.append(
+            TargetObjectPose(
+                object_id=pose.object_id,
+                class_name=pose.class_name,
+                position=position,
+                yaw_rad=_round(yaw_rad),
+                yaw_deg=_round(math.degrees(yaw_rad)),
+                quat_wxyz=quaternion,
+                T_world_object=_make_transform(position, quaternion),
+                footprint_polygon_xy=_tuple_points(footprint),
+                footprint_area_m2=round(abs(_polygon_area_xy(footprint)), 6),
+                footprint_radius_m=round(radius, 6),
+                placement_order=pose.placement_order,
+                selection_order=pose.selection_order,
+            )
+        )
+    return tuple(sorted(supported, key=lambda pose: pose.selection_order))
 
 
 def target_pose_to_dict(pose: TargetObjectPose) -> dict[str, Any]:
@@ -318,10 +436,12 @@ def apply_target_object_layout(
             if not isinstance(raw_position, (list, tuple)) or len(raw_position) != 3:
                 raise ValueError(f"layout position for {body_name} must contain three values")
             position = tuple(float(value) for value in raw_position)
-            yaw = float(item["yaw_rad"])
-            if not all(math.isfinite(value) for value in (*position, yaw)):
+            raw_quaternion = item.get("quat_wxyz")
+            if not isinstance(raw_quaternion, (list, tuple)) or len(raw_quaternion) != 4:
+                raise ValueError(f"layout quat_wxyz for {body_name} must contain four values")
+            quaternion = _normalized_quaternion_values(raw_quaternion)
+            if not all(math.isfinite(value) for value in position):
                 raise ValueError(f"layout pose for {body_name} must be finite")
-            quaternion = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
             applied.append(body_name)
 
         qpos_address, dof_address = _target_free_joint_addresses(
@@ -334,6 +454,88 @@ def apply_target_object_layout(
 
     mujoco.mj_forward(model, data)
     return tuple(applied)
+
+
+def _support_geom_ids(mujoco: Any, model: Any) -> tuple[int, ...]:
+    support_geom_ids = tuple(
+        geom_id
+        for geom_id in range(model.ngeom)
+        if (
+            (name := mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
+            in _SUPPORT_GEOM_NAMES
+            or name.startswith(_SUPPORT_GEOM_PREFIXES)
+        )
+    )
+    if not support_geom_ids:
+        raise ValueError("Task1 scene has no named tank support collision geometry")
+    return support_geom_ids
+
+
+def _single_target_geom_id(model: Any, body_id: int, body_name: str) -> int:
+    geom_ids = [
+        geom_id
+        for geom_id in range(model.ngeom)
+        if int(model.geom_bodyid[geom_id]) == body_id
+    ]
+    if len(geom_ids) != 1:
+        raise ValueError(f"target object body must have exactly one geom: {body_name}")
+    return geom_ids[0]
+
+
+def _first_support_contact_z(
+    mujoco: Any,
+    model: Any,
+    data: Any,
+    *,
+    target_geom_id: int,
+    qpos_address: int,
+    support_geom_ids: tuple[int, ...],
+    policy: SupportPlacementPolicy,
+) -> float:
+    support_geom_id_set = set(support_geom_ids)
+
+    def has_support_contact(z_m: float) -> bool:
+        data.qpos[qpos_address + 2] = z_m
+        mujoco.mj_forward(model, data)
+        return any(
+            target_geom_id in (int(contact.geom1), int(contact.geom2))
+            and bool(
+                {int(contact.geom1), int(contact.geom2)} & support_geom_id_set
+            )
+            for contact in data.contact[: data.ncon]
+        )
+
+    upper = policy.search_upper_z_m
+    if has_support_contact(upper):
+        raise ValueError("support placement upper z intersects tank geometry")
+    previous = upper
+    lower = policy.search_lower_z_m
+    search_steps = math.ceil((upper - lower) / policy.search_step_m)
+    for step in range(1, search_steps + 1):
+        candidate = max(lower, upper - step * policy.search_step_m)
+        if has_support_contact(candidate):
+            lower = candidate
+            upper = previous
+            break
+        previous = candidate
+    else:
+        raise ValueError("target object footprint has no tank support below it")
+
+    for _ in range(policy.max_iterations):
+        middle = (lower + upper) / 2.0
+        if has_support_contact(middle):
+            lower = middle
+        else:
+            upper = middle
+        if upper - lower <= policy.height_tolerance_m:
+            break
+
+    support_z = upper
+    data.qpos[qpos_address + 2] = support_z
+    mujoco.mj_forward(model, data)
+    if has_support_contact(support_z):
+        raise ValueError("resolved target support pose remains in contact penetration")
+    return support_z
 
 
 def _target_free_joint_addresses(
@@ -361,7 +563,6 @@ def _target_mesh_vertices_in_body_frame(mujoco, model, data, body_id: int, geom_
         data.qpos[qpos_address : qpos_address + 7] = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
         data.qvel[dof_address : dof_address + 6] = 0.0
         mujoco.mj_forward(model, data)
-
         if int(model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_MESH:
             raise ValueError(f"target object geom must be a mesh: {geom_id}")
         mesh_id = int(model.geom_dataid[geom_id])
@@ -378,6 +579,20 @@ def _target_mesh_vertices_in_body_frame(mujoco, model, data, body_id: int, geom_
         data.qpos[qpos_address : qpos_address + 7] = original_qpos
         data.qvel[dof_address : dof_address + 6] = original_qvel
         mujoco.mj_forward(model, data)
+
+
+def _mesh_vertices_world(model: Any, data: Any, geom_id: int) -> np.ndarray:
+    mesh_id = int(model.geom_dataid[geom_id])
+    vertex_start = int(model.mesh_vertadr[mesh_id])
+    vertex_count = int(model.mesh_vertnum[mesh_id])
+    if vertex_count <= 0:
+        raise ValueError(f"target object mesh has no vertices: {mesh_id}")
+    vertices = np.asarray(
+        model.mesh_vert[vertex_start : vertex_start + vertex_count], dtype=float
+    )
+    rotation = np.asarray(data.geom_xmat[geom_id], dtype=float).reshape(3, 3)
+    position = np.asarray(data.geom_xpos[geom_id], dtype=float)
+    return vertices @ rotation.T + position
 
 
 def _convex_hull_xy(points_xy: np.ndarray) -> np.ndarray:
@@ -423,29 +638,53 @@ def _point_sets_too_close(points_a: np.ndarray, points_b: np.ndarray, margin_m: 
     return False
 
 
-def _make_yaw_transform(
+def _make_transform(
     position: tuple[float, float, float],
-    yaw_rad: float,
+    quaternion_wxyz: tuple[float, float, float, float],
 ) -> tuple[
     tuple[float, float, float, float],
     tuple[float, float, float, float],
     tuple[float, float, float, float],
     tuple[float, float, float, float],
 ]:
-    cos_yaw = math.cos(yaw_rad)
-    sin_yaw = math.sin(yaw_rad)
+    w, x, y, z = quaternion_wxyz
+    rotation = (
+        (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+        (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
+        (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
+    )
     x, y, z = position
     return (
-        (_round(cos_yaw), _round(-sin_yaw), 0.0, x),
-        (_round(sin_yaw), _round(cos_yaw), 0.0, y),
-        (0.0, 0.0, 1.0, z),
+        (*(_round(value) for value in rotation[0]), x),
+        (*(_round(value) for value in rotation[1]), y),
+        (*(_round(value) for value in rotation[2]), z),
         (0.0, 0.0, 0.0, 1.0),
     )
 
 
 def _yaw_quaternion_wxyz(yaw_rad: float) -> tuple[float, float, float, float]:
     half_yaw = yaw_rad / 2.0
-    return (_round(math.cos(half_yaw)), 0.0, 0.0, _round(math.sin(half_yaw)))
+    return (math.cos(half_yaw), 0.0, 0.0, math.sin(half_yaw))
+
+
+def _normalized_quaternion_values(
+    values: Any,
+) -> tuple[float, float, float, float]:
+    quaternion = np.asarray(values, dtype=float)
+    if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)):
+        raise ValueError("layout quaternion must contain four finite values")
+    norm = float(np.linalg.norm(quaternion))
+    if norm <= 1e-12:
+        raise ValueError("layout quaternion must be non-zero")
+    quaternion /= norm
+    if quaternion[0] < 0.0:
+        quaternion *= -1.0
+    return tuple(float(value) for value in quaternion)
+
+
+def _yaw_from_quaternion(quaternion_wxyz: tuple[float, float, float, float]) -> float:
+    w, x, y, z = quaternion_wxyz
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def _tuple_points(points_xy: np.ndarray) -> tuple[tuple[float, float], ...]:

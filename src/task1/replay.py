@@ -556,8 +556,15 @@ def _load_layout(path: Path) -> tuple[dict[str, Any], ...]:
             or any(_optional_number(value) is None for value in position)
         ):
             raise ValueError(f"layout objects[{index}].position must contain 3 numbers")
-        if _optional_number(item.get("yaw_rad")) is None:
-            raise ValueError(f"layout objects[{index}].yaw_rad must be a number")
+        quaternion = item.get("quat_wxyz")
+        if (
+            not isinstance(quaternion, list)
+            or len(quaternion) != 4
+            or any(_optional_number(value) is None for value in quaternion)
+        ):
+            raise ValueError(
+                f"layout objects[{index}].quat_wxyz must contain 4 numbers"
+            )
     return tuple(objects)
 
 
