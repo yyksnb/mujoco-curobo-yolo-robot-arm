@@ -1,7 +1,7 @@
 {
   "schema": "task1_survey_route_plan",
   "input_fingerprint": {
-    "sha256": "0bc70fcde54ccc21533afd2460efcff748e2779f85b6628e2563ff2030e4160e",
+    "sha256": "3cd17e310189c1c0cdd10b70957b2d7a56533fef698dc938c3e30934ccd0302d",
     "files": [
       {
         "path": "configs/curobo/gen3/gen3_camera.urdf",
@@ -21,7 +21,7 @@
       },
       {
         "path": "examples/mujoco/gen3_with_tank.xml",
-        "sha256": "54f20df10813b5889e45ee206419044b2f29374f2235b63c8a02ed842be9e5ff"
+        "sha256": "5b23d78501e120afb17e5d3ea1e693e9658665980baa3de99365fbf1003fdcf1"
       },
       {
         "path": "examples/mujoco/kinova_gen3/assets/base_link.stl",

@@ -1708,12 +1708,43 @@ def test_competition_target_objects_are_free_and_layout_updates_qpos() -> None:
     }
     assert "target_marker" in target_body_ids
 
-    for body_id in target_body_ids.values():
+    for body_name, body_id in target_body_ids.items():
         assert int(model.body_parentid[body_id]) == 0
         assert int(model.body_jntnum[body_id]) == 1
         joint_id = int(model.body_jntadr[body_id])
         assert int(model.jnt_type[joint_id]) == int(mujoco.mjtJoint.mjJNT_FREE)
         assert float(model.body_mass[body_id]) > 0.0
+        geom_ids = {
+            geom_id
+            for geom_id in range(model.ngeom)
+            if int(model.geom_bodyid[geom_id]) == body_id
+        }
+        visual_geom_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_GEOM,
+            f"{body_name}_visual",
+        )
+        collision_geom_ids = {
+            geom_id
+            for geom_id in geom_ids
+            if (
+                mujoco.mj_id2name(
+                    model, mujoco.mjtObj.mjOBJ_GEOM, geom_id
+                )
+                or ""
+            ).startswith(f"{body_name}_collision_")
+        }
+        assert visual_geom_id in geom_ids
+        assert collision_geom_ids
+        assert geom_ids == {visual_geom_id, *collision_geom_ids}
+        assert int(model.geom_contype[visual_geom_id]) == 0
+        assert int(model.geom_conaffinity[visual_geom_id]) == 0
+        assert all(
+            int(model.geom_contype[geom_id]) == 1
+            and int(model.geom_conaffinity[geom_id]) == 1
+            and int(model.geom_group[geom_id]) == 3
+            for geom_id in collision_geom_ids
+        )
 
     position = (2.0, 2.0, 1.0)
     yaw = 0.4
@@ -1764,6 +1795,47 @@ def test_competition_target_objects_are_free_and_layout_updates_qpos() -> None:
     )
 
 
+def test_target_tape_collision_preserves_center_hole() -> None:
+    mujoco = pytest.importorskip("mujoco")
+    model = mujoco.MjModel.from_xml_path(
+        str((REPO_ROOT / "examples/mujoco/gen3_with_tank.xml").resolve())
+    )
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    body_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_BODY, "target_tape"
+    )
+    collision_geom_ids = tuple(
+        geom_id
+        for geom_id in range(model.ngeom)
+        if int(model.geom_bodyid[geom_id]) == body_id
+        and (
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+            or ""
+        ).startswith("target_tape_collision_")
+    )
+    assert len(collision_geom_ids) > 1
+
+    center = np.asarray(data.xpos[body_id], dtype=float)
+    ray_direction = np.asarray((0.0, 0.0, 1.0), dtype=float)
+    center_ray_origin = center + np.asarray((0.0, 0.0, -0.1), dtype=float)
+    ring_ray_origin = center + np.asarray((0.03, 0.0, -0.1), dtype=float)
+    assert all(
+        mujoco.mj_rayMesh(
+            model, data, geom_id, center_ray_origin, ray_direction
+        )
+        < 0.0
+        for geom_id in collision_geom_ids
+    )
+    assert any(
+        mujoco.mj_rayMesh(
+            model, data, geom_id, ring_ray_origin, ray_direction
+        )
+        >= 0.0
+        for geom_id in collision_geom_ids
+    )
+
+
 def test_generated_layout_places_objects_on_tank_support() -> None:
     mujoco = pytest.importorskip("mujoco")
     scene_path = REPO_ROOT / "examples/mujoco/gen3_with_tank.xml"
@@ -1790,13 +1862,23 @@ def test_generated_layout_places_objects_on_tank_support() -> None:
     contact_tolerance_m = 2e-6
     for object_id, item in objects.items():
         body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, object_id)
-        geom_id = next(
+        collision_geom_ids = {
             geom_id
             for geom_id in range(model.ngeom)
             if int(model.geom_bodyid[geom_id]) == body_id
-        )
+            and (
+                mujoco.mj_id2name(
+                    model, mujoco.mjtObj.mjOBJ_GEOM, geom_id
+                )
+                or ""
+            ).startswith(f"{object_id}_collision_")
+        }
+        assert collision_geom_ids
         assert all(
-            geom_id not in (int(contact.geom1), int(contact.geom2))
+            not bool(
+                {int(contact.geom1), int(contact.geom2)}
+                & collision_geom_ids
+            )
             or not bool(
                 {int(contact.geom1), int(contact.geom2)} & support_geom_id_set
             )
@@ -1809,7 +1891,10 @@ def test_generated_layout_places_objects_on_tank_support() -> None:
         lowered_contacts = [
             contact
             for contact in data.contact[: data.ncon]
-            if geom_id in (int(contact.geom1), int(contact.geom2))
+            if bool(
+                {int(contact.geom1), int(contact.geom2)}
+                & collision_geom_ids
+            )
             and bool(
                 {int(contact.geom1), int(contact.geom2)} & support_geom_id_set
             )

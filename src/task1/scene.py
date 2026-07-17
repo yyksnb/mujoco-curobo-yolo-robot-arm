@@ -145,17 +145,24 @@ def load_target_object_specs(model_path: Path) -> tuple[TargetObjectSpec, ...]:
         if not _is_target_object_body(body_name):
             continue
 
-        geom_ids = tuple(geom_id for geom_id in range(model.ngeom) if int(model.geom_bodyid[geom_id]) == body_id)
-        if not geom_ids:
-            continue
-        geom_id = geom_ids[0]
-        vertices = _target_mesh_vertices_in_body_frame(mujoco, model, data, body_id, geom_id)
+        visual_geom_id = _target_visual_geom_id(
+            mujoco, model, body_id, body_name
+        )
+        _target_collision_geom_ids(mujoco, model, body_id, body_name)
+        vertices = _target_mesh_vertices_in_body_frame(
+            mujoco, model, data, body_id, visual_geom_id
+        )
         footprint = _convex_hull_xy(vertices[:, :2])
         if len(footprint) < 3:
             raise ValueError(f"target object footprint is degenerate: {body_name}")
 
         radius = float(np.max(np.linalg.norm(footprint, axis=1)))
-        geom_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"{body_name}_geom"
+        geom_name = (
+            mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_GEOM, visual_geom_id
+            )
+            or f"{body_name}_visual"
+        )
         specs.append(
             TargetObjectSpec(
                 object_id=body_name,
@@ -275,7 +282,9 @@ def place_target_objects_on_support(
         body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, pose.object_id)
         if body_id < 0:
             raise ValueError(f"layout target body does not exist: {pose.object_id}")
-        target_geom_id = _single_target_geom_id(model, body_id, pose.object_id)
+        target_geom_ids = _target_collision_geom_ids(
+            mujoco, model, body_id, pose.object_id
+        )
         qpos_address, dof_address = _target_free_joint_addresses(
             mujoco, model, body_id, pose.object_id
         )
@@ -283,7 +292,7 @@ def place_target_objects_on_support(
             mujoco,
             model,
             data,
-            target_geom_id=target_geom_id,
+            target_geom_ids=target_geom_ids,
             qpos_address=qpos_address,
             support_geom_ids=support_geom_ids,
             policy=policy,
@@ -298,7 +307,9 @@ def place_target_objects_on_support(
     supported: list[TargetObjectPose] = []
     for pose in poses:
         body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, pose.object_id)
-        target_geom_id = _single_target_geom_id(model, body_id, pose.object_id)
+        visual_geom_id = _target_visual_geom_id(
+            mujoco, model, body_id, pose.object_id
+        )
         qpos_address, _ = _target_free_joint_addresses(
             mujoco, model, body_id, pose.object_id
         )
@@ -309,7 +320,7 @@ def place_target_objects_on_support(
             _round(qpos[2], 9),
         )
         quaternion = _normalized_quaternion_values(qpos[3:7])
-        vertices_world = _mesh_vertices_world(model, data, target_geom_id)
+        vertices_world = _mesh_vertices_world(model, data, visual_geom_id)
         footprint = _convex_hull_xy(vertices_world[:, :2])
         if len(footprint) < 3:
             raise ValueError(f"supported target footprint is degenerate: {pose.object_id}")
@@ -471,15 +482,97 @@ def _support_geom_ids(mujoco: Any, model: Any) -> tuple[int, ...]:
     return support_geom_ids
 
 
-def _single_target_geom_id(model: Any, body_id: int, body_name: str) -> int:
-    geom_ids = [
+def _target_body_geom_ids(model: Any, body_id: int) -> tuple[int, ...]:
+    return tuple(
         geom_id
         for geom_id in range(model.ngeom)
         if int(model.geom_bodyid[geom_id]) == body_id
-    ]
-    if len(geom_ids) != 1:
-        raise ValueError(f"target object body must have exactly one geom: {body_name}")
-    return geom_ids[0]
+    )
+
+
+def _target_visual_geom_id(
+    mujoco: Any,
+    model: Any,
+    body_id: int,
+    body_name: str,
+) -> int:
+    expected_name = f"{body_name}_visual"
+    visual_geom_ids = tuple(
+        geom_id
+        for geom_id in _target_body_geom_ids(model, body_id)
+        if (
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+            or ""
+        )
+        == expected_name
+    )
+    if len(visual_geom_ids) != 1:
+        raise ValueError(
+            f"target object body must have exactly one named visual geom "
+            f"({expected_name}): {body_name}"
+        )
+    visual_geom_id = visual_geom_ids[0]
+    if int(model.geom_type[visual_geom_id]) != int(mujoco.mjtGeom.mjGEOM_MESH):
+        raise ValueError(f"target object visual geom must be a mesh: {expected_name}")
+    if int(model.geom_contype[visual_geom_id]) != 0 or int(
+        model.geom_conaffinity[visual_geom_id]
+    ) != 0:
+        raise ValueError(
+            f"target object visual geom must not participate in collision: {expected_name}"
+        )
+    return visual_geom_id
+
+
+def _target_collision_geom_ids(
+    mujoco: Any,
+    model: Any,
+    body_id: int,
+    body_name: str,
+) -> tuple[int, ...]:
+    expected_prefix = f"{body_name}_collision_"
+    geom_ids = _target_body_geom_ids(model, body_id)
+    collision_geom_ids = tuple(
+        geom_id
+        for geom_id in geom_ids
+        if (
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+            or ""
+        ).startswith(expected_prefix)
+    )
+    if not collision_geom_ids:
+        raise ValueError(
+            f"target object body has no named collision geoms "
+            f"({expected_prefix}*): {body_name}"
+        )
+
+    visual_geom_id = _target_visual_geom_id(
+        mujoco, model, body_id, body_name
+    )
+    unexpected_geom_ids = set(geom_ids) - {visual_geom_id, *collision_geom_ids}
+    if unexpected_geom_ids:
+        unexpected_names = tuple(
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+            or str(geom_id)
+            for geom_id in sorted(unexpected_geom_ids)
+        )
+        raise ValueError(
+            f"target object body contains geoms outside the shared visual/collision "
+            f"contract: {body_name}: {unexpected_names}"
+        )
+    for geom_id in collision_geom_ids:
+        geom_name = (
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+            or str(geom_id)
+        )
+        if int(model.geom_type[geom_id]) != int(mujoco.mjtGeom.mjGEOM_MESH):
+            raise ValueError(f"target object collision geom must be a mesh: {geom_name}")
+        if int(model.geom_contype[geom_id]) == 0 or int(
+            model.geom_conaffinity[geom_id]
+        ) == 0:
+            raise ValueError(
+                f"target object collision geom must participate in collision: {geom_name}"
+            )
+    return collision_geom_ids
 
 
 def _first_support_contact_z(
@@ -487,18 +580,22 @@ def _first_support_contact_z(
     model: Any,
     data: Any,
     *,
-    target_geom_id: int,
+    target_geom_ids: tuple[int, ...],
     qpos_address: int,
     support_geom_ids: tuple[int, ...],
     policy: SupportPlacementPolicy,
 ) -> float:
     support_geom_id_set = set(support_geom_ids)
+    target_geom_id_set = set(target_geom_ids)
 
     def has_support_contact(z_m: float) -> bool:
         data.qpos[qpos_address + 2] = z_m
         mujoco.mj_forward(model, data)
         return any(
-            target_geom_id in (int(contact.geom1), int(contact.geom2))
+            bool(
+                {int(contact.geom1), int(contact.geom2)}
+                & target_geom_id_set
+            )
             and bool(
                 {int(contact.geom1), int(contact.geom2)} & support_geom_id_set
             )
