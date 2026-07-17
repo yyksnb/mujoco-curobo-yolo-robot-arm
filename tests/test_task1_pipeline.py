@@ -911,6 +911,7 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
     manifest = load_final_object_observations(manifest_path)
     observations = manifest.observations
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest_payload["revision"] == 3
     assert manifest.status == "success"
     assert manifest.source_final.status == "success"
     assert manifest.interface.status == "success"
@@ -924,6 +925,27 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
     assert all(item.depth_m.shape == item.mask.shape == (100, 100) for item in observations)
     assert all(item.mask_source == "depth_foreground_component" for item in observations)
     assert all(item.T_world_camera_optical[3] == (0.0, 0.0, 0.0, 1.0) for item in observations)
+    assert all(item.point_cloud.world_frame_id == "world" for item in observations)
+    assert all(
+        item.point_cloud.points_world_m.shape
+        == item.point_cloud.colors_rgb_uint8.shape
+        == (item.quality.selected_component_pixel_count, 3)
+        for item in observations
+    )
+    assert all(
+        item.point_cloud.pixels_uv.shape
+        == (item.quality.selected_component_pixel_count, 2)
+        for item in observations
+    )
+    first_cloud = observations[0].point_cloud
+    np.testing.assert_array_equal(first_cloud.pixels_uv[0], [40, 40])
+    np.testing.assert_array_equal(first_cloud.pixels_uv[-1], [59, 59])
+    np.testing.assert_allclose(first_cloud.points_world_m[0], [0.22, 0.48, 0.2])
+    np.testing.assert_allclose(first_cloud.points_world_m[-1], [0.372, 0.328, 0.2])
+    np.testing.assert_array_equal(
+        first_cloud.colors_rgb_uint8,
+        np.full((400, 3), 255, dtype=np.uint8),
+    )
     assert all(
         item["mask"]["uses_layout_or_simulation_segmentation"] is False
         for item in manifest_payload["objects"]
@@ -963,6 +985,28 @@ def test_final_processes_non_five_candidates_in_nearest_ik_order(
             load_final_object_observations(manifest_path)
 
     first_observation = observations[0]
+    original_cloud_bytes = first_observation.point_cloud.path.read_bytes()
+    with np.load(first_observation.point_cloud.path, allow_pickle=False) as archive:
+        invalid_points = np.asarray(archive["points_world_m"]).copy()
+        cloud_colors = np.asarray(archive["colors_rgb_uint8"]).copy()
+        cloud_pixels = np.asarray(archive["pixels_uv"]).copy()
+    invalid_points[0, 0] += 0.01
+    with first_observation.point_cloud.path.open("wb") as stream:
+        np.savez_compressed(
+            stream,
+            points_world_m=invalid_points,
+            colors_rgb_uint8=cloud_colors,
+            pixels_uv=cloud_pixels,
+        )
+    invalid_manifest = json.loads(json.dumps(manifest_payload))
+    invalid_manifest["objects"][0]["point_cloud"]["sha256"] = hashlib.sha256(
+        first_observation.point_cloud.path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match RGB-D back-projection"):
+        load_final_object_observations(manifest_path)
+    first_observation.point_cloud.path.write_bytes(original_cloud_bytes)
+
     original_depth_bytes = first_observation.depth_path.read_bytes()
     original_depth = first_observation.depth_m.copy()
     invalid_depth = original_depth.copy()

@@ -19,6 +19,8 @@ from robot_arm_pipeline.perception.object_observation import (
     MASK_ENCODING,
     MASK_SOURCE,
     OPTICAL_AXIS_CONVENTION,
+    POINT_CLOUD_ENCODING,
+    POINT_CLOUD_SOURCE,
     POSITION_PRIOR_SEMANTICS,
     RGB_COLOR_SPACE,
     RGB_ENCODING,
@@ -94,7 +96,7 @@ class FinalObservationExporter:
         if frame.rgb_path is not None and Path(frame.rgb_path).resolve() != rgb_path:
             raise ValueError(f"{candidate_id}: RGB path does not belong to the captured RGB-D frame")
         rgb_relative = _relative_artifact_path(rgb_path, self.output_dir)
-        depth = _validated_depth(frame)
+        depth = np.ascontiguousarray(_validated_depth(frame), dtype=np.float32)
         transform = _rigid_transform(frame.T_world_camera_optical, "T_world_camera_optical")
         mask, mask_diagnostics = depth_foreground_component_mask(
             frame=frame,
@@ -108,8 +110,22 @@ class FinalObservationExporter:
         object_dir = self.output_dir / "observations" / candidate_id
         depth_path = object_dir / "depth_m.npy"
         mask_path = object_dir / "mask.png"
-        _write_npy(depth_path, depth.astype(np.float32, copy=False))
+        point_cloud_path = object_dir / "masked_point_cloud.npz"
+        points_world_m, colors_rgb_uint8, pixels_uv = _masked_rgbd_point_cloud(
+            rgb_path=rgb_path,
+            depth_m=depth,
+            mask=mask,
+            intrinsics=frame.intrinsics,
+            transform=transform,
+        )
+        _write_npy(depth_path, depth)
         _write_mask_png(mask_path, mask)
+        _write_point_cloud(
+            point_cloud_path,
+            points_world_m=points_world_m,
+            colors_rgb_uint8=colors_rgb_uint8,
+            pixels_uv=pixels_uv,
+        )
 
         observation_id = f"final_{candidate_id}"
         intrinsics = frame.intrinsics
@@ -156,6 +172,21 @@ class FinalObservationExporter:
                 "background_value": 0,
                 "uses_layout_or_simulation_segmentation": False,
             },
+            "point_cloud": {
+                "path": _relative_artifact_path(point_cloud_path, self.output_dir),
+                "sha256": _sha256_file(point_cloud_path),
+                "encoding": POINT_CLOUD_ENCODING,
+                "source": POINT_CLOUD_SOURCE,
+                "world_frame_id": self.policy.world_frame_id,
+                "point_count": int(points_world_m.shape[0]),
+                "centroid_world_m": _vector(
+                    np.mean(points_world_m, axis=0, dtype=np.float64)
+                ),
+                "axis_aligned_bounds_world_m": {
+                    "minimum": _vector(np.min(points_world_m, axis=0)),
+                    "maximum": _vector(np.max(points_world_m, axis=0)),
+                },
+            },
             "camera": {
                 "world_frame_id": self.policy.world_frame_id,
                 "camera_optical_frame_id": self.policy.camera_optical_frame_id,
@@ -187,6 +218,7 @@ class FinalObservationExporter:
             "observation_id": observation_id,
             "mask_source": self.policy.mask_source,
             "foreground_pixel_count": mask_diagnostics["selected_component_pixel_count"],
+            "point_count": int(points_world_m.shape[0]),
         }
 
     def record_failure(self, candidate_id: str, message: str) -> dict[str, Any]:
@@ -276,6 +308,7 @@ class FinalObservationExporter:
                     "same_frame_rgb",
                     "registered_metric_depth",
                     "production_foreground_mask",
+                    "world_frame_mask_point_cloud",
                     "camera_intrinsics",
                     "T_world_camera_optical",
                     "detection_and_position_priors",
@@ -286,7 +319,6 @@ class FinalObservationExporter:
                     "T_world_object",
                     "object_model_frame_or_scale",
                     "stable_pose_or_symmetry",
-                    "object_state_estimate",
                     "end_effector_frame_or_grasp_target",
                 ],
             },
@@ -442,6 +474,48 @@ def _project_to_world(
     return points_camera @ matrix[:3, :3].T + matrix[:3, 3]
 
 
+def _masked_rgbd_point_cloud(
+    *,
+    rgb_path: Path,
+    depth_m: np.ndarray,
+    mask: np.ndarray,
+    intrinsics: CameraIntrinsics,
+    transform: Matrix4,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rows, columns = np.nonzero(mask)
+    pixels_uv = np.ascontiguousarray(
+        np.column_stack((columns, rows)), dtype=np.int32
+    )
+    points_world_m = np.ascontiguousarray(
+        _project_to_world(
+            columns,
+            rows,
+            depth_m[rows, columns].astype(np.float64, copy=False),
+            intrinsics,
+            transform,
+        ),
+        dtype=np.float32,
+    )
+    rgb = _load_rgb_png(rgb_path, intrinsics)
+    colors_rgb_uint8 = np.ascontiguousarray(rgb[rows, columns], dtype=np.uint8)
+    return points_world_m, colors_rgb_uint8, pixels_uv
+
+
+def _load_rgb_png(path: Path, intrinsics: CameraIntrinsics) -> np.ndarray:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to export Final RGB point colors") from exc
+    with Image.open(path) as image:
+        if image.format != "PNG" or image.mode != "RGB":
+            raise ValueError("Final RGB image must be an RGB PNG")
+        if image.size != (intrinsics.width, intrinsics.height):
+            raise ValueError(
+                "Final RGB image size does not match the captured camera intrinsics"
+            )
+        return np.asarray(image, dtype=np.uint8).copy()
+
+
 def _rigid_transform(value: Any, field: str) -> Matrix4:
     matrix = np.asarray(value, dtype=float)
     if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
@@ -475,6 +549,25 @@ def _write_mask_png(path: Path, mask: np.ndarray) -> None:
     temporary.replace(path)
 
 
+def _write_point_cloud(
+    path: Path,
+    *,
+    points_world_m: np.ndarray,
+    colors_rgb_uint8: np.ndarray,
+    pixels_uv: np.ndarray,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as stream:
+        np.savez_compressed(
+            stream,
+            points_world_m=points_world_m,
+            colors_rgb_uint8=colors_rgb_uint8,
+            pixels_uv=pixels_uv,
+        )
+    temporary.replace(path)
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -498,3 +591,7 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _vector(values: np.ndarray) -> list[float]:
+    return [float(value) for value in values]

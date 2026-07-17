@@ -2,6 +2,7 @@ from robot_arm_pipeline.perception.bodex_adapter import fake_bodex_grasp_targets
 from robot_arm_pipeline.perception.object_observation import (
     FinalObjectObservation,
     FinalObjectObservationManifest,
+    FinalObservationPointCloud,
     load_final_object_observations,
 )
 from robot_arm_pipeline.perception.yolo_adapter import (
@@ -25,6 +26,7 @@ __all__ = [
     "fake_yolo_object_poses",
     "FinalObjectObservation",
     "FinalObjectObservationManifest",
+    "FinalObservationPointCloud",
     "load_bodex_grasp_target",
     "load_final_object_observations",
     "load_stage3_yolo_profile",

@@ -14,10 +14,12 @@ from robot_arm_pipeline.types import TransformMatrix
 
 
 FINAL_OBJECT_OBSERVATION_SCHEMA = "task1_final_object_observations"
-FINAL_OBJECT_OBSERVATION_REVISION = 2
+FINAL_OBJECT_OBSERVATION_REVISION = 3
 DEPTH_ENCODING = "npy_float32_m"
 MASK_ENCODING = "png_uint8_0_255"
 MASK_SOURCE = "depth_foreground_component"
+POINT_CLOUD_ENCODING = "npz_numeric_arrays_v1"
+POINT_CLOUD_SOURCE = "registered_depth_production_mask_back_projection"
 RGB_ENCODING = "png_rgb_uint8"
 RGB_COLOR_SPACE = "sRGB"
 OPTICAL_AXIS_CONVENTION = "x_right_y_down_z_forward"
@@ -36,6 +38,7 @@ _FRAME_ID = re.compile(
 )
 _STATUS_VALUES = {"success", "partial", "failed"}
 _INTERFACE_STATUS_VALUES = {"success", "partial", "failed"}
+_POINT_CLOUD_ARRAYS = {"points_world_m", "colors_rgb_uint8", "pixels_uv"}
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,15 @@ class FinalObservationMaskQuality:
     selected_component_pixel_count: int
     selected_component_seed_xy_distance_m: float
     component_selection_seed_source: str
+
+
+@dataclass(frozen=True)
+class FinalObservationPointCloud:
+    path: Path
+    world_frame_id: str
+    points_world_m: np.ndarray
+    colors_rgb_uint8: np.ndarray
+    pixels_uv: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,7 @@ class FinalObjectObservation:
     support_plane_z_world_m: float
     mask_source: str
     quality: FinalObservationMaskQuality
+    point_cloud: FinalObservationPointCloud
 
 
 @dataclass(frozen=True)
@@ -320,6 +333,7 @@ def validate_final_object_observation_entry(
     rgb = _mapping(value, "rgb", index)
     depth = _mapping(value, "depth", index)
     mask_value = _mapping(value, "mask", index)
+    point_cloud_value = _mapping(value, "point_cloud", index)
     camera = _mapping(value, "camera", index)
     support = _mapping(value, "support_plane", index)
     quality_value = _mapping(value, "quality", index)
@@ -389,7 +403,7 @@ def validate_final_object_observation_entry(
     rgb_path = _verified_artifact(root, rgb, f"objects[{index}].rgb")
     depth_path = _verified_artifact(root, depth, f"objects[{index}].depth")
     mask_path = _verified_artifact(root, mask_value, f"objects[{index}].mask")
-    _validate_rgb(rgb_path, intrinsics.width, intrinsics.height)
+    rgb_array = _load_rgb_png(rgb_path, intrinsics.width, intrinsics.height)
     depth_m = np.load(depth_path, allow_pickle=False)
     if depth_m.dtype != np.float32 or depth_m.shape != (intrinsics.height, intrinsics.width):
         raise ValueError(f"objects[{index}] depth dtype/shape does not match the contract")
@@ -410,6 +424,17 @@ def validate_final_object_observation_entry(
         index=index,
         clipped_bbox=clipped_bbox,
         selected_pixel_count=int(np.count_nonzero(mask_array)),
+    )
+    point_cloud = _load_point_cloud(
+        root,
+        point_cloud_value,
+        index=index,
+        world_frame_id=world_frame_id,
+        rgb=rgb_array,
+        depth_m=depth_m,
+        mask=mask_array,
+        intrinsics=intrinsics,
+        transform=transform,
     )
 
     return FinalObjectObservation(
@@ -436,7 +461,115 @@ def validate_final_object_observation_entry(
         support_plane_z_world_m=support_z,
         mask_source=MASK_SOURCE,
         quality=quality,
+        point_cloud=point_cloud,
     )
+
+
+def _load_point_cloud(
+    root: Path,
+    value: dict[str, Any],
+    *,
+    index: int,
+    world_frame_id: str,
+    rgb: np.ndarray,
+    depth_m: np.ndarray,
+    mask: np.ndarray,
+    intrinsics: ObservationCameraIntrinsics,
+    transform: TransformMatrix,
+) -> FinalObservationPointCloud:
+    field = f"objects[{index}].point_cloud"
+    if (
+        value.get("encoding") != POINT_CLOUD_ENCODING
+        or value.get("source") != POINT_CLOUD_SOURCE
+    ):
+        raise ValueError(f"{field} encoding/source is unsupported")
+    if value.get("world_frame_id") != world_frame_id:
+        raise ValueError(f"{field} frame must match the camera world frame")
+
+    point_count = _positive_integer(value.get("point_count"), f"{field}.point_count")
+    rows, columns = np.nonzero(mask)
+    if point_count != len(rows):
+        raise ValueError(f"{field} point count must match the production mask")
+    path = _verified_artifact(root, value, field)
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            array_names = set(archive.files)
+            points = np.asarray(archive["points_world_m"]).copy()
+            colors = np.asarray(archive["colors_rgb_uint8"]).copy()
+            pixels = np.asarray(archive["pixels_uv"]).copy()
+    except (OSError, ValueError, KeyError) as exc:
+        raise ValueError(f"cannot load {field} artifact {path}: {exc}") from exc
+    if array_names != _POINT_CLOUD_ARRAYS:
+        raise ValueError(f"{field} arrays do not match the contract")
+
+    if points.dtype != np.float32 or points.shape != (point_count, 3):
+        raise ValueError(f"{field}.points_world_m dtype/shape is invalid")
+    if colors.dtype != np.uint8 or colors.shape != (point_count, 3):
+        raise ValueError(f"{field}.colors_rgb_uint8 dtype/shape is invalid")
+    if pixels.dtype != np.int32 or pixels.shape != (point_count, 2):
+        raise ValueError(f"{field}.pixels_uv dtype/shape is invalid")
+    if not np.all(np.isfinite(points)):
+        raise ValueError(f"{field}.points_world_m must be finite")
+
+    expected_pixels = np.ascontiguousarray(
+        np.column_stack((columns, rows)), dtype=np.int32
+    )
+    if not np.array_equal(pixels, expected_pixels):
+        raise ValueError(f"{field}.pixels_uv must match the production mask")
+    expected_points = _back_project_to_world(
+        pixels, depth_m, intrinsics, transform
+    )
+    if not np.allclose(points, expected_points, rtol=0.0, atol=1e-6):
+        raise ValueError(f"{field}.points_world_m does not match RGB-D back-projection")
+    expected_colors = np.ascontiguousarray(rgb[rows, columns], dtype=np.uint8)
+    if not np.array_equal(colors, expected_colors):
+        raise ValueError(f"{field}.colors_rgb_uint8 does not match source RGB")
+
+    centroid = _float_tuple(value.get("centroid_world_m"), 3, f"{field}.centroid")
+    bounds = value.get("axis_aligned_bounds_world_m")
+    if not isinstance(bounds, dict):
+        raise ValueError(f"{field}.axis_aligned_bounds_world_m must be an object")
+    minimum = _float_tuple(bounds.get("minimum"), 3, f"{field}.bounds.minimum")
+    maximum = _float_tuple(bounds.get("maximum"), 3, f"{field}.bounds.maximum")
+    if not np.allclose(
+        np.mean(points, axis=0, dtype=np.float64), centroid, rtol=0.0, atol=1e-7
+    ):
+        raise ValueError(f"{field} centroid does not match its points")
+    if not np.allclose(
+        np.min(points, axis=0), minimum, rtol=0.0, atol=1e-7
+    ) or not np.allclose(
+        np.max(points, axis=0), maximum, rtol=0.0, atol=1e-7
+    ):
+        raise ValueError(f"{field} bounds do not match its points")
+
+    return FinalObservationPointCloud(
+        path=path,
+        world_frame_id=world_frame_id,
+        points_world_m=points,
+        colors_rgb_uint8=colors,
+        pixels_uv=pixels,
+    )
+
+
+def _back_project_to_world(
+    pixels_uv: np.ndarray,
+    depth_m: np.ndarray,
+    intrinsics: ObservationCameraIntrinsics,
+    transform: TransformMatrix,
+) -> np.ndarray:
+    columns = pixels_uv[:, 0]
+    rows = pixels_uv[:, 1]
+    depth = depth_m[rows, columns].astype(np.float64, copy=False)
+    points_camera = np.column_stack(
+        (
+            (columns.astype(np.float64) - intrinsics.cx) * depth / intrinsics.fx,
+            (rows.astype(np.float64) - intrinsics.cy) * depth / intrinsics.fy,
+            depth,
+        )
+    )
+    matrix = np.asarray(transform, dtype=np.float64)
+    points_world = points_camera @ matrix[:3, :3].T + matrix[:3, 3]
+    return np.ascontiguousarray(points_world, dtype=np.float32)
 
 
 def observation_interface_status(
@@ -780,7 +913,7 @@ def _load_mask_png(path: Path) -> np.ndarray:
     return values == 255
 
 
-def _validate_rgb(path: Path, width: int, height: int) -> None:
+def _load_rgb_png(path: Path, width: int, height: int) -> np.ndarray:
     try:
         from PIL import Image
     except ImportError as exc:
@@ -792,6 +925,7 @@ def _validate_rgb(path: Path, width: int, height: int) -> None:
             raise ValueError(
                 f"Final RGB size {image.size} does not match camera intrinsics {(width, height)}"
             )
+        return np.asarray(image, dtype=np.uint8).copy()
 
 
 def _mapping(value: dict[str, Any], key: str, index: int) -> dict[str, Any]:

@@ -6,7 +6,7 @@
 - `scene.py`、`detection.py`、`vision.py` 提供共享的坐标变换、YOLO 适配和 RGB-D 定位/融合接口。
 - `survey/` 负责固定路线、Survey 配置、采集和评估。
 - `final/processing.py`、`simulation.py`、`evaluation.py` 分别负责生产处理、MuJoCo 采集和评估。
-- `final/observations.py` 只负责生产前景掩码和观测 artifact 导出；共享的 schema、DTO 和严格 loader
+- `final/observations.py` 只负责生产前景掩码、world-frame 点云和观测 artifact 导出；共享的 schema、DTO 和严格 loader
   位于 `robot_arm_pipeline.perception.object_observation`，Task2 不导入 Task1 内部实现。
 - `zoom/processing.py` 只消费 Final 正式结果，负责数字裁剪、放大和独立报告。
 - `replay.py` 只读消费一次运行的 layout、报告和已执行 cuRobo 轨迹，在 MuJoCo GUI 中回放。
@@ -72,8 +72,9 @@ YOLO CUDA 和 cuRobo native runtime。
 ### Task1 -> Task2 接口
 
 Task1 的边界止于“物体观测”，不输出精确 `T_world_object` 或抓取位姿。Final 对每个成功重识别对象
-写入 `object_observation_manifest.json`，其中只包含同帧 RGB、对齐的米制深度、生产前景掩码、相机
-内参、实际 `T_world_camera_optical`、支撑面、检测框/类别，以及 Survey 和 Final 的底面位置先验。
+写入 `object_observation_manifest.json`，其中包含同帧 RGB、对齐的米制深度、生产前景掩码、由该
+RGB-D 直接反投影得到的 world-frame mask 点云、相机内参、实际 `T_world_camera_optical`、支撑面、
+检测框/类别，以及 Survey 和 Final 的底面位置先验。
 候选数量不要求为 5，manifest 按 Final 正式结果顺序交付全部成功对象，不补齐或裁剪。
 
 前景掩码由 `configs/task1/final/config.yaml` 明确选择的 `depth_foreground_component` 策略生成：在检测框
@@ -81,8 +82,13 @@ Task1 的边界止于“物体观测”，不输出精确 `T_world_object` 或�
 数、组件数和选择距离；该策略不读取 layout、MuJoCo segmentation 或评估真值，也不伪装成 YOLO
 instance segmentation。深度和掩码在这里属于正式跨阶段输入，不是诊断深度。
 
+点云 artifact 为 `masked_point_cloud.npz`，固定包含 `points_world_m`、`colors_rgb_uint8` 和
+`pixels_uv`。共享 loader 会校验文件 SHA-256、数组类型和形状，并逐点核对 mask 像素、RGB 颜色及
+由 depth、内参和 `T_world_camera_optical` 得到的反投影结果。Task1 仍不定义物体模型坐标系，也不
+输出 `T_world_object`。
+
 Task2 只能依赖该 manifest 和共享 loader 的公开字段。物体模型 frame/scale、稳定放置姿态、对称性、
-刚体或可变形状态估计、end-effector/TCP frame、物体坐标系抓取库，以及 world/base 抓取变换均由
+模型配准、end-effector/TCP frame、物体坐标系抓取库，以及 world/base 抓取变换均由
 Task2 负责，不得反向写入或影响 Task1 的检测、关联和生产状态。Task1 的底面位置只可作为初始化先验，
 语义不是 6D pose。
 
