@@ -36,8 +36,8 @@ def test_run_curobo_motiongen_demo_gracefully_fails_until_real_robot_config_exis
     assert report["trajectory_available"] is False
     assert report["message"]
     expected_messages = (
-        "cuRobo is not installed or not configured",
-        "cuRobo robot_config_path does not exist",
+        "configuration does not exist",
+        "requires torch and cuRobo",
     )
     assert any(message in report["message"] for message in expected_messages)
 

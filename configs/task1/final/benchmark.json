@@ -1,0 +1,89 @@
+{
+  "schema": "task1_final_benchmark",
+  "revision": 2,
+  "development": [
+    91278,
+    68523,
+    29041,
+    73490,
+    39478,
+    95933,
+    78246,
+    6830,
+    35601,
+    23621,
+    93972,
+    17100,
+    84393,
+    57104,
+    6991,
+    59514,
+    67275,
+    71318,
+    70806,
+    48996,
+    73456,
+    36184
+  ],
+  "regression": [
+    {
+      "seed": 89718,
+      "selection_type": "unseen_random_baseline"
+    },
+    {
+      "seed": 1111,
+      "selection_type": "unseen_random_baseline"
+    },
+    {
+      "seed": 4245,
+      "selection_type": "unseen_random_baseline"
+    },
+    {
+      "seed": 12829,
+      "selection_type": "unseen_random_baseline"
+    }
+  ],
+  "acceptance": [
+    62402,
+    86342,
+    12920,
+    8478,
+    35485,
+    30405,
+    91146,
+    9620,
+    36097,
+    57493,
+    81998,
+    12441,
+    49201,
+    21076,
+    13254,
+    71560,
+    41939,
+    85597,
+    81854,
+    1016,
+    82644,
+    12378,
+    1912,
+    68058,
+    24663
+  ],
+  "generation_policy": {
+    "status": "precommitted_before_inference",
+    "model_sha256": "7453223c6e9decde19684df6591fd01f9d34c5d93a2f5c9da6f28cdd3c0e3fda",
+    "generator": "python random.Random('task1-final-benchmark-v2|model_sha256=7453223c6e9decde19684df6591fd01f9d34c5d93a2f5c9da6f28cdd3c0e3fda|precommitted-before-inference').randrange(1, 100000)",
+    "duplicate_policy": "reject seeds present in either split or either revision-1 Survey/Final benchmark",
+    "excluded_seed_count": 76,
+    "excluded_final_benchmark_sha256": "dbcb5516e830100e08a5263ff9cf5585a6aee27a27d1c5dce25a19f3037479f1",
+    "excluded_survey_benchmark_sha256": "6302817d28e75a80f1a988618227febc185ea45c7f2b802be4165ea014bcf226",
+    "result_based_selection": false,
+    "regression_semantics": "Unseen random baseline; no failure type is claimed before evaluation."
+  },
+  "acceptance_policy": {
+    "isolated_from_revision_1_survey_and_final_benchmarks": true,
+    "run_once_after_freeze": true,
+    "forbid_post_acceptance_tuning": true
+  }
+}

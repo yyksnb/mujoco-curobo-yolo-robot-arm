@@ -10,8 +10,22 @@ from _bootstrap import add_src_to_path
 
 add_src_to_path()
 
-from robot_arm_pipeline.planning.curobo_planner import CuroboPlanner
-from robot_arm_pipeline.types import GraspTarget, ObjectPose, PlanningRequest, Pose3D, RobotState
+from robot_arm_pipeline.planning.curobo_planner import (  # noqa: E402
+    DEFAULT_GRAPH_CONFIG,
+    DEFAULT_ROBOT_CONFIG,
+    DEFAULT_WORLD_CONFIG,
+    CuroboPlanner,
+)
+from robot_arm_pipeline.types import (  # noqa: E402
+    GraspTarget,
+    ObjectPose,
+    PlanningRequest,
+    Pose3D,
+    RobotState,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
@@ -24,12 +38,10 @@ def main() -> None:
     config = _load_config(args.config)
     request = _build_request(config)
     planner = CuroboPlanner(
-        robot_config_path=config.get("robot_config_path"),
-        world_config_path=config.get("world_config_path"),
-        ee_link=config.get("ee_link"),
-        base_link=config.get("base_link"),
-        joint_names=tuple(config.get("joint_names", ())),
-        use_cuda=True,
+        repo_root=REPO_ROOT,
+        robot_config_path=Path(config.get("robot_config_path", DEFAULT_ROBOT_CONFIG)),
+        world_config_path=Path(config.get("world_config_path", DEFAULT_WORLD_CONFIG)),
+        graph_config_path=Path(config.get("graph_config_path", DEFAULT_GRAPH_CONFIG)),
     )
     result = planner.plan(request)
     planning_time_s = round(time.perf_counter() - started, 6)

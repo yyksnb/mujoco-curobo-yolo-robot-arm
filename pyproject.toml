@@ -7,19 +7,34 @@ name = "robot-arm-pipeline"
 version = "0.1.0"
 description = "Mock robot arm planning pipeline with a MuJoCo executor skeleton."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "scipy>=1.10",
+    "shapely>=2.0",
+]
 
 [project.optional-dependencies]
 mujoco = [
     "numpy>=1.24",
     "mujoco>=3.0",
+    "Pillow>=10.0",
+]
+video = [
+    "opencv-python>=4.8",
+]
+yolo = [
+    "Pillow>=10.0",
+    "ultralytics>=8.4,<9",
 ]
 test = [
+    "Pillow>=10.0",
     "pytest>=7.0",
 ]
 dev = [
     "numpy>=1.24",
     "mujoco>=3.0",
+    "Pillow>=10.0",
     "pytest>=7.0",
 ]
 

@@ -1,0 +1,115 @@
+<asset>
+  <!-- High-resolution visual meshes. Their generated hulls are bounded because
+       these assets never participate in collision detection. -->
+  <mesh name="target_hex_key_mesh" file="Wrench.STL" scale="0.001 0.001 0.001" maxhullvert="32"/>
+  <mesh name="target_drill_bit_mesh" file="drill.STL" scale="0.001 0.001 0.001" maxhullvert="32"/>
+  <mesh name="target_glove_mesh" file="Glove.stl" scale="0.01 0.01 0.01" maxhullvert="32"/>
+  <mesh name="target_notebook_mesh" file="Hard.STL" scale="0.0008 0.0008 0.0008" maxhullvert="32"/>
+  <mesh name="target_marker_mesh" file="Sharpie.stl" scale="0.001 0.001 0.001" maxhullvert="32"/>
+  <mesh name="target_rivet_gun_mesh" file="Glue.STL" scale="0.3 0.3 0.3" maxhullvert="32"/>
+  <mesh name="target_standard_part_mesh" file="Screw.stl" scale="0.001 0.001 0.001" maxhullvert="32"/>
+  <mesh name="target_tape_mesh" file="tape.STL" scale="0.004 0.004 0.004" maxhullvert="32"/>
+
+  <!-- CoACD convex collision parts. Generation provenance is recorded in
+       collision/manifest.json. -->
+  <mesh name="target_hex_key_collision_000_mesh" file="collision/hex_key_coacd_000.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_hex_key_collision_001_mesh" file="collision/hex_key_coacd_001.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_hex_key_collision_002_mesh" file="collision/hex_key_coacd_002.obj" scale="0.001 0.001 0.001"/>
+
+  <mesh name="target_drill_bit_collision_000_mesh" file="collision/drill_bit_coacd_000.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_001_mesh" file="collision/drill_bit_coacd_001.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_002_mesh" file="collision/drill_bit_coacd_002.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_003_mesh" file="collision/drill_bit_coacd_003.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_004_mesh" file="collision/drill_bit_coacd_004.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_005_mesh" file="collision/drill_bit_coacd_005.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_006_mesh" file="collision/drill_bit_coacd_006.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_007_mesh" file="collision/drill_bit_coacd_007.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_008_mesh" file="collision/drill_bit_coacd_008.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_009_mesh" file="collision/drill_bit_coacd_009.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_010_mesh" file="collision/drill_bit_coacd_010.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_011_mesh" file="collision/drill_bit_coacd_011.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_012_mesh" file="collision/drill_bit_coacd_012.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_013_mesh" file="collision/drill_bit_coacd_013.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_014_mesh" file="collision/drill_bit_coacd_014.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_drill_bit_collision_015_mesh" file="collision/drill_bit_coacd_015.obj" scale="0.001 0.001 0.001"/>
+
+  <mesh name="target_glove_collision_000_mesh" file="collision/glove_coacd_000.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_001_mesh" file="collision/glove_coacd_001.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_002_mesh" file="collision/glove_coacd_002.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_003_mesh" file="collision/glove_coacd_003.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_004_mesh" file="collision/glove_coacd_004.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_005_mesh" file="collision/glove_coacd_005.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_006_mesh" file="collision/glove_coacd_006.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_007_mesh" file="collision/glove_coacd_007.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_008_mesh" file="collision/glove_coacd_008.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_009_mesh" file="collision/glove_coacd_009.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_010_mesh" file="collision/glove_coacd_010.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_011_mesh" file="collision/glove_coacd_011.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_012_mesh" file="collision/glove_coacd_012.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_013_mesh" file="collision/glove_coacd_013.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_014_mesh" file="collision/glove_coacd_014.obj" scale="0.01 0.01 0.01"/>
+  <mesh name="target_glove_collision_015_mesh" file="collision/glove_coacd_015.obj" scale="0.01 0.01 0.01"/>
+
+  <mesh name="target_notebook_collision_000_mesh" file="collision/notebook_coacd_000.obj" scale="0.0008 0.0008 0.0008"/>
+  <mesh name="target_notebook_collision_001_mesh" file="collision/notebook_coacd_001.obj" scale="0.0008 0.0008 0.0008"/>
+
+  <mesh name="target_marker_collision_000_mesh" file="collision/marker_coacd_000.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_marker_collision_001_mesh" file="collision/marker_coacd_001.obj" scale="0.001 0.001 0.001"/>
+
+  <mesh name="target_rivet_gun_collision_000_mesh" file="collision/rivet_gun_coacd_000.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_001_mesh" file="collision/rivet_gun_coacd_001.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_002_mesh" file="collision/rivet_gun_coacd_002.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_003_mesh" file="collision/rivet_gun_coacd_003.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_004_mesh" file="collision/rivet_gun_coacd_004.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_005_mesh" file="collision/rivet_gun_coacd_005.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_006_mesh" file="collision/rivet_gun_coacd_006.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_007_mesh" file="collision/rivet_gun_coacd_007.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_008_mesh" file="collision/rivet_gun_coacd_008.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_009_mesh" file="collision/rivet_gun_coacd_009.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_010_mesh" file="collision/rivet_gun_coacd_010.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_011_mesh" file="collision/rivet_gun_coacd_011.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_012_mesh" file="collision/rivet_gun_coacd_012.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_013_mesh" file="collision/rivet_gun_coacd_013.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_014_mesh" file="collision/rivet_gun_coacd_014.obj" scale="0.3 0.3 0.3"/>
+  <mesh name="target_rivet_gun_collision_015_mesh" file="collision/rivet_gun_coacd_015.obj" scale="0.3 0.3 0.3"/>
+
+  <mesh name="target_standard_part_collision_000_mesh" file="collision/standard_part_coacd_000.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_001_mesh" file="collision/standard_part_coacd_001.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_002_mesh" file="collision/standard_part_coacd_002.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_003_mesh" file="collision/standard_part_coacd_003.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_004_mesh" file="collision/standard_part_coacd_004.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_005_mesh" file="collision/standard_part_coacd_005.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_006_mesh" file="collision/standard_part_coacd_006.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_007_mesh" file="collision/standard_part_coacd_007.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_008_mesh" file="collision/standard_part_coacd_008.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_009_mesh" file="collision/standard_part_coacd_009.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_010_mesh" file="collision/standard_part_coacd_010.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_011_mesh" file="collision/standard_part_coacd_011.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_012_mesh" file="collision/standard_part_coacd_012.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_013_mesh" file="collision/standard_part_coacd_013.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_014_mesh" file="collision/standard_part_coacd_014.obj" scale="0.001 0.001 0.001"/>
+  <mesh name="target_standard_part_collision_015_mesh" file="collision/standard_part_coacd_015.obj" scale="0.001 0.001 0.001"/>
+
+  <mesh name="target_tape_collision_000_mesh" file="collision/tape_coacd_000.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_001_mesh" file="collision/tape_coacd_001.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_002_mesh" file="collision/tape_coacd_002.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_003_mesh" file="collision/tape_coacd_003.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_004_mesh" file="collision/tape_coacd_004.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_005_mesh" file="collision/tape_coacd_005.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_006_mesh" file="collision/tape_coacd_006.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_007_mesh" file="collision/tape_coacd_007.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_008_mesh" file="collision/tape_coacd_008.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_009_mesh" file="collision/tape_coacd_009.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_010_mesh" file="collision/tape_coacd_010.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_011_mesh" file="collision/tape_coacd_011.obj" scale="0.004 0.004 0.004"/>
+  <mesh name="target_tape_collision_012_mesh" file="collision/tape_coacd_012.obj" scale="0.004 0.004 0.004"/>
+
+  <material name="target_metal_light" rgba="0.75 0.76 0.78 1.0" specular="0.85" shininess="0.7"/>
+  <material name="target_metal_dark" rgba="0.30 0.32 0.35 1.0" specular="0.40" shininess="0.3"/>
+  <material name="target_drill_bit" rgba="0.50 0.52 0.55 1.0" specular="0.55" shininess="0.4"/>
+  <material name="target_glove" rgba="0.65 0.65 0.65 1.0" specular="0.25" shininess="0.2"/>
+  <material name="target_tool_black" rgba="0.15 0.15 0.15 1.0" specular="0.20" shininess="0.1"/>
+  <material name="target_marker" rgba="0.08 0.08 0.08 1.0" specular="0.45" shininess="0.6"/>
+  <material name="target_notebook" rgba="0.10 0.25 0.60 1.0" specular="0.05" shininess="0.05"/>
+  <material name="target_tape" rgba="0.80 0.65 0.45 1.0" specular="0.08" shininess="0.1"/>
+</asset>

@@ -30,7 +30,8 @@ def main() -> None:
 
     import mujoco
 
-    model = mujoco.MjModel.from_xml_path(str(args.model))
+    model_path = args.model.resolve()
+    model = mujoco.MjModel.from_xml_path(str(model_path))
     data = mujoco.MjData(model)
     _apply_keyframe(mujoco, model, data, args.keyframe)
     mujoco.mj_forward(model, data)
@@ -38,7 +39,7 @@ def main() -> None:
     tank_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "tank")
     gen3_base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "gen3_base_link")
 
-    print(f"loaded={args.model}")
+    print(f"loaded={model_path}")
     print(f"nq={model.nq} nv={model.nv} nu={model.nu} nbody={model.nbody} ngeom={model.ngeom} nmesh={model.nmesh}")
     print(f"tank_pos={_body_position(data, tank_body_id)}")
     print(f"gen3_base_pos={_body_position(data, gen3_base_body_id)}")
