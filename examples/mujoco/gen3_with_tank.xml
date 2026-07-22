@@ -1,7 +1,7 @@
 <mujoco model="gen3_with_tank">
   <compiler angle="degree"/>
 
-  <option integrator="implicitfast"/>
+  <option integrator="implicitfast" cone="elliptic" impratio="10"/>
 
   <!-- target_*_visual and target_*_collision_* form the shared object asset
        boundary for every task that loads this MJCF. Both geom sets are
