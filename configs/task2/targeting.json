@@ -1,0 +1,64 @@
+{
+  "schema": "task2_targeting/v1",
+  "default_end_effector_id": "robotiq_2f85",
+  "backends": {
+    "graspgenx_local": {
+      "type": "graspgenx_zmq",
+      "generator_id": "graspgenx_zmq_v1",
+      "parameters": {
+        "host": "127.0.0.1",
+        "port": 5556,
+        "health_timeout_ms": 5000,
+        "inference_timeout_ms": 120000,
+        "planner": "graspmoe",
+        "num_grasps": 8,
+        "score_threshold": -1.0,
+        "max_candidates": 20,
+        "max_input_points": 3500,
+        "planner_parameters": {}
+      }
+    }
+  },
+  "end_effectors": {
+    "robotiq_2f85": {
+      "backend_id": "graspgenx_local",
+      "grasp_frame_id": "graspgenx_canonical_gripper_base",
+      "capability": {
+        "capability_id": "opposed_closing_contacts",
+        "parameters": [
+          {"name": "maximum_opening", "value": 0.085, "unit": "m"}
+        ]
+      },
+      "parameters": {
+        "sweep_volume": {
+          "extents_open": [0.085, 0.032, 0.036],
+          "offset_open": [0.0, 0.0, 0.13],
+          "extents_mid": [0.046, 0.032, 0.036],
+          "offset_mid": [0.0, 0.0, 0.143],
+          "gripper_type": 1,
+          "fingertip_depth": 0.136
+        }
+      }
+    },
+    "robotiq_2f140": {
+      "backend_id": "graspgenx_local",
+      "grasp_frame_id": "graspgenx_canonical_gripper_base",
+      "capability": {
+        "capability_id": "opposed_closing_contacts",
+        "parameters": [
+          {"name": "maximum_opening", "value": 0.125, "unit": "m"}
+        ]
+      },
+      "parameters": {
+        "sweep_volume": {
+          "extents_open": [0.125, 0.032, 0.062],
+          "offset_open": [0.0, 0.0, 0.175],
+          "extents_mid": [0.066, 0.032, 0.062],
+          "offset_mid": [0.0, 0.0, 0.195],
+          "gripper_type": 1,
+          "fingertip_depth": 0.195
+        }
+      }
+    }
+  }
+}
