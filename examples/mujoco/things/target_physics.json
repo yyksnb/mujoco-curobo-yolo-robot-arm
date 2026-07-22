@@ -1,0 +1,172 @@
+{
+  "schema": "target_object_physics_assets/v1",
+  "status": "simulation_nominal_unmeasured",
+  "canonical_mjcf": "../gen3_with_tank.xml",
+  "body_include": "target_objects.xml",
+  "units": {
+    "mass": "kg",
+    "position": "m",
+    "inertia": "kg*m^2",
+    "friction": "MuJoCo [sliding, torsional, rolling]"
+  },
+  "provenance": {
+    "warning": "These are nominal simulation estimates, not measurements of the competition objects.",
+    "inertia_method": "MuJoCo 3.10 integrated each visual mesh at 1000 kg/m^3; COM, principal axes, and shape ratios were retained while principal inertias were scaled linearly to the nominal mass.",
+    "metal_mass_method": "Closed visual-mesh volume multiplied by a nominal steel density of 7850 kg/m^3.",
+    "other_mass_method": "Direct engineering estimates for a rigid-body simulation proxy; replace them with measured mass before sim-to-real calibration.",
+    "required_calibration": [
+      "Measure each object mass with a scale.",
+      "Estimate center of mass from balance tests or CAD/material data.",
+      "Fit object-to-bin and object-to-finger sliding friction from pull or incline tests.",
+      "Validate inertia with CAD/material data or a pendulum test when rotational response matters."
+    ]
+  },
+  "coverage": {
+    "modeled_object_ids": [
+      "target_hex_key",
+      "target_drill_bit",
+      "target_glove",
+      "target_notebook",
+      "target_marker",
+      "target_rivet_gun",
+      "target_standard_part",
+      "target_tape"
+    ],
+    "competition_classes_missing_assets": [
+      "file_bag",
+      "metal_debris"
+    ]
+  },
+  "contact_materials": {
+    "hard_metal": {
+      "condim": 6,
+      "priority": 1,
+      "friction": [0.35, 0.003, 0.0001],
+      "solref": [0.004, 1.0],
+      "solimp": [0.95, 0.99, 0.001, 0.5, 2.0],
+      "calibration_status": "nominal_unmeasured"
+    },
+    "elastomer_shell_rigid_proxy": {
+      "condim": 6,
+      "priority": 1,
+      "friction": [0.8, 0.01, 0.0005],
+      "solref": [0.01, 1.0],
+      "solimp": [0.9, 0.98, 0.003, 0.5, 2.0],
+      "calibration_status": "nominal_unmeasured"
+    },
+    "paper_composite": {
+      "condim": 6,
+      "priority": 1,
+      "friction": [0.5, 0.005, 0.0002],
+      "solref": [0.008, 1.0],
+      "solimp": [0.93, 0.98, 0.002, 0.5, 2.0],
+      "calibration_status": "nominal_unmeasured"
+    },
+    "rigid_plastic": {
+      "condim": 6,
+      "priority": 1,
+      "friction": [0.45, 0.004, 0.0001],
+      "solref": [0.006, 1.0],
+      "solimp": [0.95, 0.99, 0.001, 0.5, 2.0],
+      "calibration_status": "nominal_unmeasured"
+    },
+    "paper_plastic_tape": {
+      "condim": 6,
+      "priority": 1,
+      "friction": [0.55, 0.006, 0.0002],
+      "solref": [0.008, 1.0],
+      "solimp": [0.93, 0.98, 0.002, 0.5, 2.0],
+      "calibration_status": "nominal_unmeasured"
+    }
+  },
+  "objects": {
+    "target_hex_key": {
+      "source_asset": "Wrench.STL",
+      "contact_material": "hard_metal",
+      "mass_kg": 0.058460743228,
+      "mass_range_kg": [0.04, 0.08],
+      "mass_estimation": "visual_mesh_volume_times_7850_kg_m3",
+      "com_body_m": [-0.0243427630116, 0.0048197238436, 0.00274968479378],
+      "com_uncertainty_m": 0.005,
+      "inertia_quat_wxyz": [-0.0430420660226, 0.705795565693, 0.0430420660226, 0.705795565693],
+      "inertia_diag_kg_m2": [0.0000803082091156, 0.0000786987112972, 0.00000177670062701]
+    },
+    "target_drill_bit": {
+      "source_asset": "drill.STL",
+      "contact_material": "hard_metal",
+      "mass_kg": 0.0234906971786,
+      "mass_range_kg": [0.015, 0.035],
+      "mass_estimation": "visual_mesh_volume_times_7850_kg_m3",
+      "com_body_m": [1.96384543523e-09, 0.00217480014932, 0.00299993660922],
+      "com_uncertainty_m": 0.005,
+      "inertia_quat_wxyz": [0.707106781187, 0.707106781187, 0.0, 0.0],
+      "inertia_diag_kg_m2": [0.0000115172085552, 0.0000115238015201, 9.08474173326e-08]
+    },
+    "target_glove": {
+      "source_asset": "Glove.stl",
+      "contact_material": "elastomer_shell_rigid_proxy",
+      "mass_kg": 0.05,
+      "mass_range_kg": [0.03, 0.09],
+      "mass_estimation": "direct_nominal_rigid_proxy",
+      "com_body_m": [0.00760599508525, -0.00707909586898, 0.0175866896494],
+      "com_uncertainty_m": 0.02,
+      "inertia_quat_wxyz": [0.49265346844, 0.485667083428, -0.464734609784, 0.552667880898],
+      "inertia_diag_kg_m2": [0.0000647823744143, 0.0000513857159772, 0.0000166719564836]
+    },
+    "target_notebook": {
+      "source_asset": "Hard.STL",
+      "contact_material": "paper_composite",
+      "mass_kg": 0.25,
+      "mass_range_kg": [0.15, 0.4],
+      "mass_estimation": "direct_nominal_rigid_proxy",
+      "com_body_m": [0.000994765680658, 1.41632136574e-10, 0.00999999939334],
+      "com_uncertainty_m": 0.01,
+      "inertia_quat_wxyz": [-0.5, 0.5, 0.5, 0.5],
+      "inertia_diag_kg_m2": [0.00084602556439, 0.000563621952166, 0.000299164022459]
+    },
+    "target_marker": {
+      "source_asset": "Sharpie.stl",
+      "contact_material": "rigid_plastic",
+      "mass_kg": 0.02,
+      "mass_range_kg": [0.012, 0.035],
+      "mass_estimation": "direct_nominal_rigid_proxy",
+      "com_body_m": [0.0113691881616, -3.8882748788e-07, 0.00920583283537],
+      "com_uncertainty_m": 0.01,
+      "inertia_quat_wxyz": [0.497665709665, 0.502323443036, 0.502323443036, 0.497665709665],
+      "inertia_diag_kg_m2": [0.0000244961099878, 0.0000244623656413, 3.46245394055e-07]
+    },
+    "target_rivet_gun": {
+      "source_asset": "Glue.STL",
+      "contact_material": "hard_metal",
+      "mass_kg": 0.551498684739,
+      "mass_range_kg": [0.35, 0.75],
+      "mass_estimation": "visual_mesh_volume_times_7850_kg_m3",
+      "com_body_m": [0.00149805105377, 0.012487608251, 0.0140542604033],
+      "com_uncertainty_m": 0.02,
+      "inertia_quat_wxyz": [0.69716048383, 0.117980354665, 0.695306269636, -0.128829682539],
+      "inertia_diag_kg_m2": [0.000379859923921, 0.000310567919754, 0.000102890048133]
+    },
+    "target_standard_part": {
+      "source_asset": "Screw.stl",
+      "contact_material": "hard_metal",
+      "mass_kg": 0.00222307104768,
+      "mass_range_kg": [0.001, 0.005],
+      "mass_estimation": "visual_mesh_volume_times_7850_kg_m3",
+      "com_body_m": [1.11881578138e-05, -0.000257940518394, 0.00269568770419],
+      "com_uncertainty_m": 0.002,
+      "inertia_quat_wxyz": [0.707106781187, 0.707106781187, 0.0, 0.0],
+      "inertia_diag_kg_m2": [3.99615868774e-08, 4.00351044153e-08, 3.63746040556e-09]
+    },
+    "target_tape": {
+      "source_asset": "tape.STL",
+      "contact_material": "paper_plastic_tape",
+      "mass_kg": 0.05,
+      "mass_range_kg": [0.03, 0.09],
+      "mass_estimation": "direct_nominal_rigid_proxy",
+      "com_body_m": [1.88728240674e-09, 1.88728240674e-09, 0.01],
+      "com_uncertainty_m": 0.01,
+      "inertia_quat_wxyz": [-0.707106781187, 7.71600526371e-17, -0.707106781187, -3.38622498254e-17],
+      "inertia_diag_kg_m2": [0.0000345066833096, 0.0000186949170225, 0.0000186949170225]
+    }
+  }
+}
