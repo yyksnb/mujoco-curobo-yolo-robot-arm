@@ -1,0 +1,167 @@
+objects:
+  marker:
+    targeting:
+      templates:
+        - template_id: marker_parallel_body
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [-1.0, 0.0, 0.0, 0.006204]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, -1.0, 0.00741914]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: discrete
+            group: C2
+            axis: approach_axis_object
+            axis_vector: [0.0, 0.0, -1.0]
+            values_rad: [0.0, 3.141592654]
+          pregrasp_opening_m: 0.021639206
+          target_opening_m: 0.013014206
+          grip_force_limit_n: 0.75
+          minimum_retention_force_n: 0.30
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 1.0
+          diagnostics:
+            contact_margin_m: 0.062260
+            opening_margin_m: 0.008000
+            force_margin_n: 0.450000
+
+  masking_tape:
+    targeting:
+      templates:
+        - template_id: masking_tape_parallel_outer_wall
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [0.0, 1.0, 0.0, 0.0]
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 0.0, -1.0, 0.0155]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: continuous
+            axis: approach_axis_object
+            axis_vector: [0.0, 0.0, -1.0]
+            range_rad:
+              lower: -3.141592653589793
+              upper: 3.141592653589793
+              lower_inclusive: true
+              upper_inclusive: false
+          pregrasp_opening_m: 0.082000000
+          target_opening_m: 0.074333332
+          grip_force_limit_n: 2.0
+          minimum_retention_force_n: 0.75
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 1.0
+          diagnostics:
+            contact_margin_m: 0.004500
+            opening_margin_m: 0.006000
+            force_margin_n: 1.250000
+
+  rivet_gun:
+    targeting:
+      templates:
+        - template_id: rivet_gun_parallel_handle
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [-0.866025404, 0.0, 0.5, -0.010494798]
+              - [0.0, 1.0, 0.0, 0.017997664]
+              - [-0.5, 0.0, -0.866025404, 0.001004167]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: discrete
+            group: C2
+            axis: approach_axis_object
+            axis_vector: [0.5, 0.0, -0.866025404]
+            values_rad: [0.0, 3.141592654]
+          pregrasp_opening_m: 0.084000000
+          target_opening_m: 0.011946974
+          grip_force_limit_n: 24.0
+          minimum_retention_force_n: 12.0
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 1.0
+          diagnostics:
+            contact_margin_m: 0.017030
+            opening_margin_m: 0.052053
+            force_margin_n: 12.000000
+
+  standard_part:
+    targeting:
+      templates:
+        - template_id: standard_part_parallel_shaft
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [0.0, 1.0, 0.0, 0.0]
+              - [1.0, 0.0, 0.0, 0.004]
+              - [0.0, 0.0, -1.0, 0.000694798]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: discrete
+            group: C2
+            axis: approach_axis_object
+            axis_vector: [0.0, 0.0, -1.0]
+            values_rad: [0.0, 3.141592654]
+          pregrasp_opening_m: 0.010995694
+          target_opening_m: 0.002745694
+          grip_force_limit_n: 0.30
+          minimum_retention_force_n: 0.10
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 1.0
+          diagnostics:
+            contact_margin_m: 0.003100
+            opening_margin_m: 0.008000
+            force_margin_n: 0.200000

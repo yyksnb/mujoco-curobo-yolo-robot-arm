@@ -1,0 +1,168 @@
+<mujoco model="so101_active_wrist_parallel">
+  <!--
+    One-axis active wrist derived from TheRobotStudio/SO-ARM100 at
+    fda892cba81032c46c40976a48c9ceadbf40a9ca (Apache-2.0), combined with
+    Robonine's SO-ARM100/101 parallel gripper at
+    5310ee2b6e9209b7cf33c1e32cc6d0ccbe049e68 (GPL-3.0).
+
+    Source values retained here:
+      wrist range +/-1.6580628 rad and STS3215 effort limit 2.94 N m;
+      gripper total mass 0.170 kg, full stroke 0.084 m, force 120 N,
+      speed 0.014 m/s. The 0.075 kg active-wrist mass comes from the SO-101
+      CAD-derived wrist link mass. A 20 mm Gen3 clearance adapter is represented
+      as a 0.020 kg printed box because the source wrist was not designed around
+      the Gen3 vision bracelet. The camera-equipped RB9.01.060.074 bracket in the
+      source assembly is replaced by the official RB9.01.060.080 compact holder.
+      The fixed-link mass retains the sourced camera-equipped upper bound until
+      the assembled no-camera tool is weighed. Contact friction remains an
+      explicit, uncalibrated simulation parameter.
+  -->
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+
+  <option cone="elliptic" impratio="10"/>
+
+  <asset>
+    <material name="servo_black" rgba="0.08 0.09 0.10 1"/>
+    <material name="printed_yellow" rgba="0.95 0.63 0.06 1"/>
+    <material name="finger_gray" rgba="0.38 0.40 0.42 1"/>
+    <material name="pad_black" rgba="0.08 0.08 0.08 1"/>
+    <mesh name="wrist_holder" file="wrist_holder.stl"/>
+    <mesh name="wrist_servo" file="wrist_servo.stl"/>
+    <!--
+      Robonine's simulation meshes retain the assembled CAD coordinate frame.
+      gripper_fixed_assembly.stl is modified for the no-camera compact holder.
+    -->
+    <mesh name="gripper_fixed_assembly" file="gripper_fixed_assembly.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="gripper_left_clamp" file="gripper_left_clamp.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="gripper_right_clamp" file="gripper_right_clamp.stl"
+      scale="0.001 0.001 0.001"/>
+    <!--
+      Conservative convex envelope of the tapered Robonine clamp tip.  In the
+      jaw-local frame the source CAD narrows from about +/-13.5 mm at z=50 mm
+      to about +/-5.2 mm at z=79 mm.  The previous constant +/-8 mm box
+      protruded below the real tip during inclined floor-level grasps.
+    -->
+    <mesh name="pad_collision_envelope"
+      vertex="-0.004 -0.0140 0.050  0.004 -0.0140 0.050
+              -0.004  0.0140 0.050  0.004  0.0140 0.050
+              -0.004 -0.0055 0.079  0.004 -0.0055 0.079
+              -0.004  0.0055 0.079  0.004  0.0055 0.079"
+      face="0 1 3  0 3 2  4 6 7  4 7 5
+            0 4 5  0 5 1  2 3 7  2 7 6
+            0 2 6  0 6 4  1 5 7  1 7 3"/>
+  </asset>
+
+  <default>
+    <default class="active_wrist_parallel">
+      <joint damping="0.60" frictionloss="0.052" armature="0.028"/>
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" density="0" group="2"/>
+      </default>
+      <default class="structure_collision">
+        <geom contype="1" conaffinity="1" density="0" group="3"
+          friction="0.55 0.004 0.0001" solref="0.006 1"
+          solimp="0.95 0.99 0.001 0.5 2"/>
+      </default>
+      <default class="pad_collision">
+        <geom contype="1" conaffinity="1" density="0" group="3"
+          friction="0.80 0.006 0.0002" solref="0.004 1"
+          solimp="0.95 0.99 0.001 0.5 2" priority="1"
+          material="pad_black"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="mount" childclass="active_wrist_parallel">
+      <inertial mass="0.095" pos="0 0 0.018"
+        diaginertia="0.000045 0.000045 0.000024"/>
+      <geom class="visual" type="box" pos="0 0 -0.010" size="0.022 0.022 0.010"
+        material="printed_yellow"/>
+      <geom name="gen3_clearance_adapter_collision" class="structure_collision"
+        type="box" pos="0 0 -0.010" size="0.022 0.022 0.010"/>
+      <geom class="visual" mesh="wrist_servo" pos="0 0 0.022" material="servo_black"/>
+      <geom class="visual" mesh="wrist_holder" pos="0.03985 0.03545 0.0302"
+        material="printed_yellow"/>
+      <geom name="wrist_mount_collision" class="structure_collision" type="box"
+        pos="0 0 0.024" size="0.026 0.022 0.024"/>
+
+      <body name="wrist_output" pos="0 0 0.040">
+        <joint name="wrist_pitch" type="hinge" axis="0 1 0"
+          range="-1.6580628 1.6580628"/>
+        <inertial mass="0.140" pos="0 0 0.070"
+          diaginertia="0.00031 0.00024 0.00018"/>
+        <geom class="visual" mesh="gripper_fixed_assembly"
+          pos="-0.007062 -0.152066 -0.098627"
+          quat="0.70710678 -0.70710678 0 0" material="printed_yellow"/>
+        <geom name="gripper_frame_collision" class="structure_collision" type="box"
+          pos="0 0 0.062" size="0.064 0.030 0.012"/>
+        <geom name="gripper_holder_collision" class="structure_collision" type="box"
+          pos="-0.00389505 0.01414026 0.03258090"
+          quat="0.70436570 0.03774885 0.70792765 0.03581096"
+          size="0.0085 0.024 0.0185"/>
+
+        <body name="left_jaw" pos="-0.004 0 0.075">
+          <joint name="left_jaw_joint" type="slide" axis="-1 0 0"
+            range="0 0.042" damping="0.5" frictionloss="0.1" armature="0.002"/>
+          <inertial mass="0.015" pos="-0.008 0 0.050"
+            diaginertia="0.000035 0.000030 0.000009"/>
+          <geom class="visual" mesh="gripper_left_clamp"
+            pos="-0.003062 -0.152066 -0.173627"
+            quat="0.70710678 -0.70710678 0 0" material="finger_gray"/>
+          <geom name="left_carriage_collision" class="structure_collision" type="box"
+            pos="-0.010 0 0.010" size="0.018 0.025 0.010"/>
+          <geom name="left_finger_collision" class="structure_collision" type="box"
+            pos="-0.002 0 0.025" size="0.006 0.008 0.025"/>
+          <geom name="left_pad_collision" class="pad_collision"
+            type="mesh" mesh="pad_collision_envelope"/>
+        </body>
+
+        <body name="right_jaw" pos="0.004 0 0.075">
+          <joint name="right_jaw_joint" type="slide" axis="1 0 0"
+            range="0 0.042" damping="0.5" frictionloss="0.1" armature="0.002"/>
+          <inertial mass="0.015" pos="0.008 0 0.050"
+            diaginertia="0.000035 0.000030 0.000009"/>
+          <geom class="visual" mesh="gripper_right_clamp"
+            pos="-0.011062 -0.152066 -0.173627"
+            quat="0.70710678 -0.70710678 0 0" material="finger_gray"/>
+          <geom name="right_carriage_collision" class="structure_collision" type="box"
+            pos="0.010 0 0.010" size="0.018 0.025 0.010"/>
+          <geom name="right_finger_collision" class="structure_collision" type="box"
+            pos="0.002 0 0.025" size="0.006 0.008 0.025"/>
+          <geom name="right_pad_collision" class="pad_collision"
+            type="mesh" mesh="pad_collision_envelope"/>
+        </body>
+
+        <site name="tcp" pos="0 0 0.155" quat="0.70710678 0 0 -0.70710678"
+          size="0.001" group="4"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <fixed name="grip_split">
+      <joint joint="left_jaw_joint" coef="0.5"/>
+      <joint joint="right_jaw_joint" coef="0.5"/>
+    </fixed>
+  </tendon>
+
+  <equality>
+    <joint joint1="left_jaw_joint" joint2="right_jaw_joint"
+      polycoef="0 1 0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+  </equality>
+
+  <contact>
+    <exclude body1="wrist_output" body2="left_jaw"/>
+    <exclude body1="wrist_output" body2="right_jaw"/>
+    <exclude body1="left_jaw" body2="right_jaw"/>
+  </contact>
+
+  <actuator>
+    <position name="wrist_pitch" joint="wrist_pitch" kp="998.22" kv="2.731"
+      forcerange="-2.94 2.94" ctrlrange="-1.6580628 1.6580628"/>
+    <position name="grip" tendon="grip_split" kp="2400" kv="15"
+      forcerange="-120 120" ctrlrange="0 0.042"/>
+  </actuator>
+</mujoco>

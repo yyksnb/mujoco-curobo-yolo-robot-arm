@@ -1,0 +1,9 @@
+end_effectors:
+  parallel_gripper:
+    targeting:
+      family: parallel_gripper
+      capabilities:
+        opening_command_range_m: [0.0, 0.084]
+        grip_force_limit_range_n: [0.0, 120.0]
+        maximum_closing_speed_m_s: 0.014
+        contact_groups: [left_pad, right_pad]
