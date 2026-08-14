@@ -8,17 +8,15 @@ from struct import pack, unpack
 
 import pytest
 
-from task2.adapters.hardware import HardwareExecutorAdapter
 from task2.adapters.mujoco import MuJoCoExecutorAdapter
 from task2.adapters.errors import ControlInterfaceError
-from task2.composition import load_execution_config, load_planning_config
+from task2.config import load_task2_config
 from task2.contracts import (
     BodyKinematicState,
     ContactRecord,
     ControlCommand,
     DynamicsDiagnosticsConfig,
     ExecutionErrorCode,
-    ExecutionObjectConfig,
     ExecutionRequest,
     ExecutionStatus,
     PlannedTrajectory,
@@ -102,12 +100,16 @@ def _planning_result() -> PlanningResult:
             ),
         ),
     )
-    return PlanningResult.succeeded(trajectory, (), {})
+    return PlanningResult.succeeded(
+        trajectory,
+        _pose("world", "object", (9.0, 9.0, 9.0)),
+        (),
+        {},
+    )
 
 
 def _object_binding() -> SceneObjectBinding:
-    config = ExecutionObjectConfig("marker", "marker", "marker_free", ("marker_geom",))
-    return SceneObjectBinding("object", config, _pose("world", "object"))
+    return SceneObjectBinding("object", "marker", _pose("world", "object"))
 
 
 class _RecordingAdapter:
@@ -272,53 +274,37 @@ def test_log_write_failure_does_not_interrupt_planned_controls(tmp_path, monkeyp
     assert adapter.commands[-1].events == ("release",)
 
 
-def test_hardware_adapter_is_explicitly_unavailable_without_mock_success(tmp_path):
-    result = execute(_request(tmp_path, HardwareExecutorAdapter()))
-
-    assert result.execution_status is ExecutionStatus.FAILED
-    assert result.error_code is ExecutionErrorCode.ADAPTER_UNAVAILABLE
-    assert not result.dynamics_diagnostics.evaluated
-
-
 def test_mujoco_adapter_loads_formal_named_bindings():
-    execution = load_execution_config(
-        ROOT / "configs/task2/execution.yaml",
-        ROOT / "configs/task2/objects.yaml",
-        ROOT / "configs/task2/end_effectors.yaml",
-    )
-    planning = load_planning_config(
-        ROOT / "configs/task2/robot.yaml",
-        ROOT / "configs/task2/planning.yaml",
-        ROOT / "configs/task2/objects.yaml",
-        ROOT / "configs/task2/end_effectors.yaml",
-    )
+    config = load_task2_config(ROOT / "configs/task2/pipeline.yaml")
+    profile = config.end_effectors[0]
+    robot_model = config.robot_model(profile)
+    robot_config = config.mujoco_robots[profile.profile_id]
     adapter = MuJoCoExecutorAdapter(
-        execution.robot_config,
-        execution.get_end_effector("parallel_gripper"),
-        execution.objects,
-        project_root=ROOT,
+        robot_config,
+        config.mujoco_end_effectors[profile.profile_id],
+        config.mujoco_objects,
     )
     command = ControlCommand(
         TrajectoryStage.PREGRASP,
         0.0,
-        planning.robot_model.joint_names,
-        planning.robot_model.default_joint_positions,
-        (0.0,) * len(planning.robot_model.joint_names),
-        (0.0,) * len(planning.robot_model.joint_names),
+        robot_model.joint_names,
+        robot_model.default_joint_positions,
+        (0.0,) * len(robot_model.joint_names),
+        (0.0,) * len(robot_model.joint_names),
         {POSITION_CHANNEL: 0.02, FORCE_CHANNEL: 0.75},
     )
     binding = SceneObjectBinding(
         "center_marker",
-        execution.get_object("marker"),
+        "marker",
         _pose("world", "center_marker", (0.5, 0.5, 0.08)),
     )
 
     try:
         observation = adapter.initialize((binding,), "center_marker", command)
-        assert tuple(observation.joint_positions_rad) == planning.robot_model.joint_names
+        assert tuple(observation.joint_positions_rad) == robot_model.joint_names
         assert observation.target_object_state is not None
         assert observation.target_object_state.T_world_body.matrix[2][3] == pytest.approx(0.08)
-        assert observation.T_world_tcp.child_frame == planning.robot_model.tcp_frame
+        assert observation.T_world_tcp.child_frame == robot_model.tcp_frame
 
         core_bodies = (
             "target_marker",
@@ -326,12 +312,12 @@ def test_mujoco_adapter_loads_formal_named_bindings():
             "target_standard_part",
             "target_tape",
         )
-        assert execution.robot_config.scene_object_body_names == core_bodies
+        assert set(robot_config.scene_object_body_names) == set(core_bodies)
         for name in core_bodies:
             assert adapter._mujoco.mj_name2id(
                 adapter._model, adapter._mujoco.mjtObj.mjOBJ_BODY, name
             ) >= 0
-        for object_config in execution.objects:
+        for object_config in config.mujoco_objects:
             assert adapter._mujoco.mj_name2id(
                 adapter._model,
                 adapter._mujoco.mjtObj.mjOBJ_JOINT,
@@ -362,7 +348,7 @@ def test_mujoco_adapter_loads_formal_named_bindings():
                 adapter._model, adapter._mujoco.mjtObj.mjOBJ_MESH, name
             ) == -1
 
-        joint_index = planning.robot_model.joint_names.index("joint_3")
+        joint_index = robot_model.joint_names.index("joint_3")
         model_limit = float(
             adapter._model.actuator_ctrlrange[
                 adapter._joint_actuator_ids["joint_3"], 1

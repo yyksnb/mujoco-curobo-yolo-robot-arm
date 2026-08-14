@@ -5,10 +5,12 @@ from itertools import islice
 from math import ceil, isfinite, pi
 from struct import pack
 
-from .contracts.config import ContinuousYawSymmetry, DiscreteYawSymmetry, GraspTemplateConfig
 from .contracts.geometry import compose, inverse, reframe, rotate_transform_about_parent_axis
 from .contracts.targeting import (
+    ContinuousYawSymmetry,
+    DiscreteYawSymmetry,
     GraspCandidate,
+    GraspTemplateConfig,
     ParallelGripperCommand,
     ScoreComponents,
     TargetingErrorCode,

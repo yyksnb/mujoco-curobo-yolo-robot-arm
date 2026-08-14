@@ -1,255 +1,330 @@
-# Task2 最小重构迁移与清理说明
+# Task2 产物驱动重构迁移与清理说明
 
-本文档用于把实验副本中已经验证的事实迁移到新的 Task2 交付目录，同时阻止迭代代码、
-临时场景和历史 workaround 回流。具体实现契约见
-[task2_minimal_implementation_plan.md](task2_minimal_implementation_plan.md)。
+本文档说明如何从当前三个功能 Commit 已完成的 Task2，迁移到
+[task2_minimal_implementation_plan.md](task2_minimal_implementation_plan.md) 定义的
+产物驱动总流水线。它只覆盖一次性源码/配置迁移和清理，不重新标定抓取参数，也不新增
+规划或动力学策略。
 
-## 1. 前提与责任
+## 1. 当前基线与迁移原则
 
-由负责人完成：
-
-- 在当前工程外创建独立交付目录；
-- 将交付目录置于提交 `60c7bef`；
-- 使用现有 `feature/task2` 分支；
-- 迁移四个核心物体的已验证抓取模板；
-- 清理新 Task2 对旧 Stage、BODex 兼容层、实验性执行器逻辑和临时脚本的依赖。
-
-本文档不要求修改或重置当前实验副本。实验副本包含未提交改动和大量历史实验，只能
-作为只读证据源。任何迁移都必须发生在负责人创建的交付目录中。
-
-## 2. 迁移原则
-
-### 2.1 可以迁移
-
-只允许迁移有来源、可独立验证的数据资产：
-
-- 正式机器人 URDF/MJCF、网格、关节限位和 frame 标定；
-- 负责人选定的一个已验证平行夹爪资产及其 TCP、驱动范围和语义接触组；
-- 记号笔、纸胶带、铆枪和标准件的可视/碰撞资产；
-- 四个物体的抓取模板、开度、夹持力、闭合速度和驻留参数；
-- 物体质量、质心、惯量、摩擦和碰撞参数；
-- 抓取后使用的球、胶囊和盒体代理；
-- VAMP、cuRobo IK、Ruckig 和 MuJoCo 的已确认版本及环境事实。
-
-迁移资产不等于复制旧实现。源码、候选选择逻辑、路径搜索策略、执行状态机和验收分支
-必须按新契约从零实现。
-
-### 2.2 禁止迁移
-
-- `src/task2/` 中现有 Targeting、Planning、Execution 或 pipeline 源码；
-- 当前 `CuroboPlanner` 中为实验成功率迭代出的 Task2 专用控制流；
-- 按物体点位、半径、方位、seed、候选索引或文件名触发的参数；
-- 隐式 fallback、缓存回放、反向路径兜底、自动扩大预算或自动放宽碰撞规则；
-- 临时验收场景、五物体展示场景、扫描脚本和视频渲染逻辑；
-- `outputs/`、视频、CSV、JSON 报告、缓存、`__pycache__` 和 pytest cache；
-- Dexonomy、RH56DFX、柔性手套和其他未进入默认范围的实验逻辑；
-- BODex/Stage 3 grasp target 兼容格式及其 adapter；
-- 无法说明单位、frame、物理意义或来源提交的数值。
-
-## 3. 每项资产的迁移记录
-
-每项迁移数据至少记录以下信息；记录可以先维护在本文件的工作副本中，稳定后再转成
-配置注释或独立资产清单：
-
-| 字段 | 要求 |
-|---|---|
-| 目标字段 | 新 YAML 中的完整键路径 |
-| 来源 | 实验副本文件路径和 Git commit；工作区数据需额外标记未提交 |
-| 物理意义 | 该数值或资产实际描述什么 |
-| 单位 | m、rad、s、kg、N 等 |
-| 坐标系 | parent/child frame 和四元数 `wxyz` |
-| 适用对象 | object type、end-effector family/capability |
-| 独立验证 | 几何、质量、静置、接触或驱动范围检查方式 |
-| 排除内容 | 确认未携带点位、seed 或算法内部参数 |
-
-建议的迁移判定：
+当前基线：
 
 ```text
-能指出来源 + 能解释含义 + 能独立复核 + 不依赖实验点位
-  -> 可以迁移
-否则
-  -> 不迁移，重新测量或显式失败
+branch: feature/task2
+HEAD:   f5a4e0e feat: [step3] execute planned trajectories
 ```
 
-## 4. 四个物体抓取模板迁移
+已完成：
 
-抓取模板由负责人迁移。每个物体按以下清单处理：
+- Commit 1：四物体 config-driven Targeting；
+- Commit 2：VAMP + 可替换 IK + Ruckig Planning；
+- Commit 3：忠实轨迹 Execution 与独立 MuJoCo 动力学诊断。
 
-1. 只读取实验副本中最后经过中心场景验证的参数，不复制候选生成代码。
-2. 把 TCP 和 pregrasp 变换还原为物体局部 frame 下的 `T_object_tcp`、`T_tcp_pregrasp`。
-3. 核对变换方向、单位、`wxyz` 四元数顺序和执行器真实 TCP。
-4. 提取物体几何允许的 yaw 对称性/区间，不迁移世界方位或半径相关采样参数。
-5. 提取 pregrasp/grasp 开度、最大允许夹持力、闭合速度和驻留时间。
-6. 把 MuJoCo geom 名称替换为 `left_pad`、`right_pad` 等语义接触组。
-7. 用执行器行程检查开度，用物体碰撞几何检查接触截面和穿透。
-8. 给模板分配稳定 `template_id` 和可解释的先验评分分项。
-9. 在相同输入下重复运行 Targeting，确认 candidate ID、数量和顺序稳定。
+本轮不是第四次重写。必须冻结上述行为，从依赖图、公开入口和重复职责入手做减法。
+`dd89f7a` 的 Task1 只提供“总入口明显、阶段产物清晰、脚本薄”的风格参照。
 
-首版对象：
+迁移规则：
 
-| object type | Targeting 迁移重点 | 不得迁移 |
-|---|---|---|
-| `marker` | 细长轴、局部 yaw 对称性、预抓/抓取开度 | 100 mm 点位或特定世界 yaw |
-| `masking_tape` | 圆盘抓取截面、开度裕量、对称性 | 400 mm 成功点和候选编号 |
-| `rivet_gun` | 已验证夹持截面、较紧夹持命令、代理体 | 中心/200 mm 专用退出路径 |
-| `standard_part` | 小物体接触裕量、最小合法开度 | 200 mm 点位或固定 seed |
+- 先做 import、配置和调用方依赖审查，再移动或删除；
+- 一次性改完仓库内调用方，不保留兼容层；
+- 不新建分支，不操作暂存区，除非负责人明确授权；
+- 不修改 Task1、Stage 1/2/3、MockPlanner 或其他正式共享行为；
+- 不迁移 `outputs/`、cache、临时场景、扫描和视频；
+- 不借重构修改候选、路径、碰撞、Ruckig 或 Execution 失败语义。
 
-若实验副本里的模板依赖世界坐标或机器人姿态才能成立，该数据不是 Targeting 模板；
-应舍弃，并由新的 Planning 对局部候选做可达性选择。
+## 2. 迁移前冻结证据
 
-## 5. 机器人与执行器迁移
+实施前记录但不提交当前四物体中心场景基线：
 
-只选择一个已经验证的平行夹爪作为默认执行器，不在迁移文档中假定它是 2F85、2F140
-或其他具体型号。迁移前由负责人确定稳定 `end_effector_id` 和
-`end_effector_family: parallel_gripper`。
+- Targeting candidate ID、顺序、template/profile/family 和语义抓取命令；
+- Planning 六阶段顺序、命名关节/执行器通道及稳定错误码；
+- Execution 的 `execution_status`、事件通道、控制/日志采样和诊断字段；
+- 四物体当前是否满足 Planning 成功及 `execution_status=completed`；
+- 当前工作区、暂存区和相关配置/源码 diff。
 
-必须复核：
+冻结证据用于判断行为回归，不要求保存或比较精确 VAMP 路径、knot 数、耗时或 MuJoCo
+浮点日志。生成报告放在被 Git 忽略的 `outputs/task2/`。
 
-- 机器人与执行器组合后的唯一关节顺序；
-- base、flange、tool、TCP 和指垫 frame；
-- 主动腕是否存在、关节限位及其是否属于可定位关节通道；
-- 夹爪开口、闭合、力限制和速度命令到驱动器的映射；
-- `left_pad/right_pad` 等语义组到 Planning collision geometry 和 MuJoCo geom 的映射；
-- 执行器自身碰撞几何、自碰撞排除及其资产来源；
-- MuJoCo asset、控制器和 mount 配置。
+## 3. 配置一次性迁移
 
-主动腕首版不迁移实验性的“主动腕优先”权重或零空间代价，只作为普通关节。配置可
-声明可选 posture objective capability，但默认关闭。
-
-`RobotModel` 必须由组合层一次构建并传给 VAMP、IK adapter 和 Ruckig。发现同一限位
-或关节顺序在多个后端配置中重复时，应先统一真源，而不是复制并靠测试维持一致。
-
-## 6. 物理与碰撞参数迁移
-
-Execution 物理参数与 Planning 代理体分别验证：
-
-- Execution 使用真实质量、质心、惯量、摩擦和 MuJoCo 碰撞资产。
-- Planning 抓取前使用 SceneSnapshot 中的原始目标碰撞体。
-- Planning 抓取后只使用物体局部 frame 下的球、胶囊和盒体组合代理。
-- 代理体必须保守覆盖搬运时可能碰撞的实体，但不能从某次 MuJoCo 运行状态动态生成。
-
-最低独立检查：
-
-1. 网格尺度和轴方向；
-2. 质量、质心和惯量数量级；
-3. 无机械臂情况下的自由落体与静置稳定性；
-4. 物体与油箱、物体与指垫的摩擦参数来源；
-5. 原始碰撞体和简化代理体的可视叠加；
-6. 代理体在 `T_tcp_object` 下的变换闭合。
-
-检查失败时保留明确失败，不通过增大碰撞豁免、改变加载点或修改验收阈值制造成功。
-
-## 7. 清理顺序
-
-清理由负责人完成，建议在每笔功能 commit 前后分别做依赖审查，不把大规模删除与行为
-修改混成无法定位的提交。
-
-### 7.1 建立清理清单
-
-先对交付目录执行只读依赖扫描，按以下类别标记：
-
-- 新 Task2 必需；
-- Task1 或其他正式模块仍在使用；
-- 仅旧 Task2/Stage/BODex 使用；
-- 仅临时验收、展示或实验使用；
-- 生成物或缓存。
-
-不得因为新 Task2 不再使用某个共享文件就直接删除它。`src/robot_arm_pipeline/` 下的
-planner、executor、scene 和 types 可能仍是 Task1 或其他正式入口的依赖；只有确认没有
-正式消费者后才能删除。否则新 Task2 只需停止依赖该文件。
-
-### 7.2 优先删除或重写的旧 Task2 内容
-
-以 `60c7bef` 为基线时，重点审查：
+目标布局：
 
 ```text
-src/task2/targeting.py
-src/task2/pipeline.py
-scripts/run_task2_pipeline.py
-configs/task2/targeting.json
-configs/task2/end_effectors.json
+configs/task2/
+  pipeline.yaml
+  objects.yaml
+  robot.yaml
+  planning.yaml
+  execution.yaml
+  end_effectors/
+    active_wrist_parallel.yaml
+```
+
+### 3.1 新增 pipeline.yaml
+
+只记录：
+
+- `objects.yaml`、`robot.yaml`、`planning.yaml`、`execution.yaml` 的相对路径；
+- 可用执行器 profile 文件；
+- 默认 Planning backend 与 Execution adapter 的显式选择；
+- 通用候选、seed、阶段和总时间预算。
+
+它不得复制机器人限位、物体模板、backend 参数或 MuJoCo 名称。
+
+### 3.2 拆分 end_effectors.yaml
+
+将当前 `configs/task2/end_effectors.yaml` 的唯一 profile 迁入
+`end_effectors/active_wrist_parallel.yaml`：
+
+- family 与 Targeting capabilities；
+- 语义执行器通道和接触组；
+- 主动腕、工具关节、TCP、限位和默认状态；
+- Planning 使用的工具语义视图；
+- 对 cuRobo/VAMP/MuJoCo 内部 profile 的引用。
+
+MuJoCo actuator/geom 名称不进入通用 capability；它们迁往 `execution.yaml`。迁移完成后
+删除旧 `end_effectors.yaml`，不保留双格式读取。
+
+### 3.3 瘦身 robot.yaml
+
+保留 Gen3 本体：
+
+- model/base frame；
+- 七个本体关节的唯一顺序、限位和默认状态。
+
+移出：
+
+- 主动腕关节和工具 TCP；
+- cuRobo config asset；
+- VAMP module、sphere count、tool fraction 和碰撞球索引组；
+- 最大夹爪开度。
+
+组合层使用基础机器人和选定执行器 profile 构造正式 RobotModel；cuRobo/VAMP 组合资产
+仍可复用现有已验证文件，但路径只进入对应 backend 内部配置。
+
+### 3.4 瘦身 objects.yaml
+
+每个物体保留：
+
+- Targeting 模板、局部变换、yaw 对称性、语义抓取命令和评分分项；
+- Planning 球/胶囊/盒附着代理。
+
+删除每个物体 `execution` 下的 MuJoCo body、free joint 和 collision geom 名称；这些绑定
+迁入 `execution.yaml` 的 MuJoCo adapter section。不得修改四物体已标定数值、模板 ID、
+family 或候选排序。
+
+### 3.5 重组 planning.yaml
+
+分为：
+
+- 实现无关 `PlanningPolicy`；
+- VAMP 内部 profile；
+- cuRobo IK 内部 profile；
+- Ruckig 内部 profile。
+
+将版本、backend 名称、VAMP 搜索参数、cuRobo/VAMP 资产路径从正式 PlanningConfig/
+RobotModel 移入内部 profile。版本检查和 backend 不可用语义保持不变。
+
+### 3.6 重组 execution.yaml
+
+保留通用控制频率、控制日志频率、诊断频率和诊断策略；在 MuJoCo adapter section 集中：
+
+- model asset 和 TCP site；
+- 机器人 runtime joint/actuator 绑定；
+- 主动腕及夹爪 actuator 映射；
+- 语义接触组到 geom 的映射；
+- 四物体 runtime body/free joint/collision geom 绑定。
+
+Execution 正式 contract 不得继续携带这些 MuJoCo 专用类型。
+
+## 4. 类型与依赖迁移
+
+### 4.1 Contracts
+
+新增 `contracts/pipeline.py`，只定义：
+
+- `Task2Request`；
+- `Task2PipelineResult`；
+- 单一 `PIPELINE_FAILED` 错误码。
+
+移动：
+
+- 抓取模板、yaw 对称性、Targeting diagnostics/profile 到
+  `contracts/targeting.py`；
+- Planning 物体代理和执行器视图到 `contracts/planning.py`；
+- MuJoCo runtime 绑定到 `adapters/mujoco.py` 或紧邻的私有类型。
+
+随后删除 `contracts/config.py`。`contracts/__init__.py` 只 re-export 正式 request、
+result、error code 和跨模块值对象，不导出 YAML parser 中间类型。
+
+### 4.2 RobotModel 与 PlanningPolicy
+
+先让所有 backend 显式接收自己的内部 profile，再删除 RobotModel 中的后端字段，避免在
+迁移中临时回读 YAML 或复制限位。确认 VAMP、cuRobo IK 和 Ruckig 仍消费同一个精简
+RobotModel 的关节顺序与限位。
+
+PlanningRequest 改为接收通用 PlanningPolicy 和必要的阶段视图。已有 Planning 错误码、
+六阶段、碰撞语义、候选/seed 尝试和轨迹输出保持不变。
+
+### 4.3 IK 边界
+
+把 `src/task2/backends/ik.py` 的默认 backend factory 合并进 `src/task2/ik.py`，继续保留
+公开 `IKSolver` Protocol、结果和错误语义。cuRobo 仍采用惰性 import；未知或不可用
+backend 明确失败，不回退其他 IK。
+
+### 4.4 配置加载边界
+
+用较小的 `src/task2/config.py` 取代 909 行 `composition.py`：
+
+- 顶层只解析路径、通用 profile 和职责引用；
+- 各 backend/adapter 解析自己的内部 section；
+- 所有路径相对 `pipeline.yaml` 解析一次；
+- 阶段只接收类型化视图，不读取 YAML；
+- 不通过当前工作目录或 `Path(__file__)` 猜工程根目录。
+
+只校验会导致语义歧义、单位/frame 错误、危险命令或 backend 无法确定的字段。未知顶层
+职责和关键控制字段仍拒绝；删除重复的全字段机械校验和配置 hash 扩散。
+
+## 5. 总入口与 artifact 迁移
+
+### 5.1 Pipeline
+
+新增 `src/task2/pipeline.py`：
+
+- `from_config(config_path, output_root)` 构建默认依赖；
+- 构造函数可注入 Targeting、Planning、Execution 和 `EndEffectorRuntime`；
+- `run(request)` 完成 setup、三个阶段和总结果；
+- 每个阶段必须写结果并重新读取后再进入下一阶段；
+- 阶段失败写正式失败结果并停止；
+- `execution_status=completed` 决定总完成状态，动力学诊断不 gate 流程。
+
+不要增加 `run_targeting()`、`run_planning()`、`run_execution()` 等第二套公开阶段 API。
+
+### 5.2 Runtime provider
+
+新增最小内部 runtime 边界，当前只接入 `active_wrist_parallel`：
+
+- object family 在当前组合中必须唯一解析到一个 profile；
+- 显式 profile 只用于约束，不允许静默替换；
+- provider 激活工具后返回 RobotModel、完整状态和内部 executor factory；
+- setup artifact 不序列化 adapter、MuJoCo model 或 Python 对象；
+- 不引入 provider 注册平台或第二执行器的占位实现。
+
+旧 switcher 中只迁移实际需要且可独立验证的 `MjSpec.attach`/公共状态迁移算法；不能迁移
+旧 JSON schema、独立 registry 类型或兼容 API。
+
+### 5.3 Artifact codec
+
+新增单一 `src/task2/artifacts.py`，负责：
+
+- 固定运行目录和相对路径；
+- `request.json`、`setup.json`、三个阶段结果和 `result.json`；
+- 正式结果的完整 JSON 编解码；
+- 重跑阶段时删除当前 run dir 内的下游结果与日志。
+
+Contracts 不增加公共 `from_dict()`。不要新增 Pydantic/msgspec 等序列化依赖，不加入
+schema version、兼容读取、自动字段修复、hash 门禁或原子迁移框架。
+
+### 5.4 CLI
+
+恢复 `scripts/run_task2_pipeline.py`，保持薄适配：
+
+```text
+full/targeting: --request + --config + --output-root
+planning/execution: --run-dir + --config
+```
+
+CLI 不构造临时场景、不补齐请求、不读取 MuJoCo 内部状态生成 Planning 输入，也不生成
+视频。下游 step 只读取根请求、setup、直接上游结果和配置。
+
+## 6. 明确删除清单
+
+依赖迁移完成并用 `rg` 确认无正式调用方后删除：
+
+```text
+src/task2/composition.py
+src/task2/contracts/config.py
+src/task2/backends/ik.py
+src/task2/adapters/hardware.py
+src/robot_arm_pipeline/scene/end_effector.py
+configs/task2/end_effectors.yaml
+```
+
+同步清理：
+
+- `src/task2/adapters/__init__.py` 中的 hardware export；
+- `src/robot_arm_pipeline/scene/__init__.py` 中的旧 switcher/registry export；
+- 所有旧类型、旧配置路径和旧 loader import；
+- 当前误名测试文件及只验证被删私有实现的测试。
+
+不要删除仍由 Task1、Stage 1/2/3、MockPlanner、共享 scene/planner/executor 使用的其他
+文件。若依赖扫描发现 `scene/end_effector.py` 仍有正式消费者，先停止删除并报告具体
+调用链；不得复制旧实现或破坏消费者来满足清理清单。
+
+## 7. 测试迁移
+
+目标测试布局：
+
+```text
+tests/test_task2_targeting.py
+tests/test_task2_planning.py
+tests/test_task2_execution.py
 tests/test_task2_pipeline.py
-docs/task2_pipeline.md
-src/task2/README.md
 ```
 
-这些文件不能作为新源码复制。需要相同路径时按新契约重写；不再需要时删除。旧测试不
-应通过修改断言继续保留，应根据新公共边界重新选择最少测试。
+步骤：
 
-随后审查并清理：
+1. 将当前只测试 Targeting 的 `test_task2_pipeline.py` 改名为
+   `test_task2_targeting.py`；
+2. 新增真正的 Pipeline/artifact 边界测试；
+3. 保留稳定错误码、六阶段、命名通道、Execution 事件和日志频率已知回归；
+4. 删除私有 parser/helper、文件布局和一次性迁移过程测试；
+5. 固定用中心 `standard_part`、固定 seed 做一个真实快速 Planning 回归。
 
-- 新 Task2 对 BODex adapter、example grasp target 和 Stage 3 grasp compatibility 的引用；
-- 新 Task2 对 MockPlanner、MockExecutor 和旧 mock pipeline 的引用；
-- 旧 MuJoCo executor skeleton 和 demo-only physical grasp；
-- 旧 cuRobo MotionGen Task2 路线；
-- Dexonomy、RH56DFX、手套柔性模型及对应脚本；
-- 临时中心/半径扫描/多物体展示/视频脚本；
-- 不再引用的配置、资产摘要和历史诊断文档。
+每个局部修改后运行相关 contract 测试和快速 Planning 回归。快速回归只守护 Planning
+成功、六阶段和约束，不守护路径形状、knot 数或耗时。
 
-对共享模块的处理必须以依赖扫描结果为准，不能破坏 Task1 的正式入口。
-当前工程规则明确要求保留 Stage 1/2/3 和 `MockPlanner`；因此本轮只能令新 Task2 与它们
-解耦，不能从仓库删除共享实现。只有项目规则被另行明确修改，且依赖审查证明没有正式
-消费者后，才能在独立清理提交中讨论物理删除。
+## 8. 推荐实施顺序
 
-### 7.3 生成物清理
+所有改动最终组成一个独立重构 Commit；以下只是工作顺序，不要求产生中间提交：
 
-交付目录不得包含：
+1. 记录当前状态、四物体基线和相关 import graph；
+2. 新增 pipeline 配置和 active-wrist-parallel profile，建立新 loader；
+3. 迁移 RobotModel、PlanningPolicy 和阶段配置视图，保持三个阶段测试通过；
+4. 合并 IK factory，更新 backend/adapter 构造路径；
+5. 新增 Pipeline contracts、runtime provider、artifact codec 和总入口；
+6. 恢复 CLI，验证每个 step 只能从正式 artifact 续跑；
+7. 迁移 MuJoCo object/tool bindings，接通当前平行夹爪；
+8. 改名并瘦身测试；
+9. 删除旧配置、旧 switcher、composition、占位 hardware adapter 和重复 factory；
+10. 运行局部测试、快速 Planning 回归和最终四物体完整验收；
+11. 运行 `git diff --check`，检查工作区和暂存区，更新文档。
+
+实现过程中若为了方便需要让某阶段读取其他阶段内部字段，必须停止并报告耦合风险；
+正确处理是把数据加入正式上游 artifact 或根 Task2Request，而不是直接导入内部类型。
+
+## 9. 最终验收与提交边界
+
+最终验收必须证明：
+
+- `task2` 根包存在唯一明显总入口和三个阶段入口；
+- 四物体候选语义、顺序、抓取命令和稳定错误码未回归；
+- 四物体 Planning 均生成完整六阶段轨迹；
+- 四物体 Execution 均为 completed；
+- 动力学诊断失败不改变总状态；
+- 每个 step 只读取 `request.json`、`setup.json`、直接上游结果和组合配置；
+- RobotModel/PlanningPolicy 不含 cuRobo、VAMP、Ruckig、MuJoCo 或夹爪专用字段；
+- 默认路径无 fallback、cache replay、点位/距离/seed 特判；
+- 删除清单无残余 import，旧配置无兼容读取；
+- 全量测试、快速 Planning 回归和 `git diff --check` 通过；
+- 暂存区未被操作，`outputs/` 与 cache 未进入提交。
+
+建议提交信息：
 
 ```text
-outputs/
-__pycache__/
-.pytest_cache/
-*.pyc
-临时 MJCF
-视频与帧缓存
-扫描 CSV/JSON
-CUDA 或抓取候选 cache
+refactor(task2): add artifact-driven pipeline boundary
 ```
 
-同时更新 `.gitignore` 覆盖这些类别，但不要使用过宽规则忽略正式配置、资产或验收工具。
-
-## 8. 按 commit 执行迁移
-
-### Commit 1 前：Targeting 数据
-
-- 负责人迁移四个物体模板并完成来源记录。
-- 迁移默认平行夹爪 family/capabilities 和语义接触组。
-- 不迁移机器人状态、场景、IK 或动力学结果。
-- 清除旧 BODex/Stage 3 grasp target 在新 Task2 默认路径中的引用。
-
-Commit 1 后检查：Targeting 包的 import graph 不包含 Planning、VAMP、cuRobo、Ruckig
-或 MuJoCo；配置视图不暴露 planning/execution namespace。
-
-### Commit 2 前：Planning 资产
-
-- 迁移并复核正式机器人模型、执行器组合模型和碰撞几何。
-- 迁移四个物体的球/胶囊/盒附着代理。
-- 确认 VAMP、cuRobo IK 和 Ruckig 版本及构建环境，不迁移旧 adapter 源码。
-- 从场景资产离线产生 SceneSnapshot 输入，不让 Planner 读取 MuJoCo model/data。
-
-Commit 2 后检查：默认路径只有 VAMP；cuRobo 只存在于 IKSolver adapter；VAMP、IK、
-Ruckig 使用相同 RobotModel；没有 MuJoCo execution import。
-
-### Commit 3 前：Execution 资产
-
-- 迁移机器人、平行夹爪、油箱和四个物体的正式 MuJoCo assets。
-- 迁移来源明确的质量、质心、惯量、摩擦和控制器参数。
-- 建立语义执行器通道与 MuJoCo actuator/geom 的 adapter 映射。
-- 不迁移旧执行状态机、接触失败中断、缓存轨迹或展示松手逻辑。
-
-Commit 3 后检查：MuJoCo 状态只进入日志和 `DynamicsDiagnostics`；任何动力学任务判据
-都不能改变计划轨迹；控制日志流式写入且控制频率与日志频率分离。
-
-## 9. 清理完成判据
-
-- `rg` 搜索不到新 Task2 对 BODex、Dexonomy、RH56DFX、MockPlanner 或旧 Stage artifact 的引用；共享旧模块本身按工程规则保留。
-- 正式 Targeting/Planning/Execution 各只有一个公共入口。
-- 模块只接收类型化正式输入，不打开其他模块的配置或输出内部字段。
-- YAML 中不存在点位、半径、世界方位、seed 或候选索引特判。
-- 默认路径不存在 fallback、cache replay 或自动放宽约束。
-- pytest 只保留公共契约、关键规则、安全/失败语义和一个快速规划回归。
-- 四物体真实验收报告和视频不进入 Git。
-- 工作区中没有误提交的输出、cache、临时场景或大文件。
-
-如果清理发现 Task1 仍依赖待删除的共享实现，应停止删除：先记录依赖，令新 Task2 与其
-解耦，再单独决定共享模块的后续生命周期。不得为了让清理列表变绿而破坏其他模块。
+不要求 `dynamics_diagnostics.success=true`，也不要求 VAMP 路径、knot 数、耗时或 MuJoCo
+日志逐字节一致。若四物体任一 Planning 或 Execution 回归失败，不得通过旧路径 fallback、
+放宽碰撞或读取缓存制造通过；应报告失败阶段、错误码和最小根因。

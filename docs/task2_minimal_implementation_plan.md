@@ -1,382 +1,374 @@
-# Task2 最小重构实现方案
+# Task2 产物驱动流水线重构实现方案
 
-本文档记录 Task2 最小重构的已确认设计。交付工程由负责人在当前工程外创建，
-以提交 `60c7bef` 为起点，使用 `feature/task2` 分支。本文档所在的实验副本只用于
-提取经过验证且来源明确的资产和参数，不作为源码迁移来源。
+本文档记录 Task2 在三个功能 Commit 已完成后的独立重构规格。当前基线为
+`feature/task2` 分支上的 `f5a4e0e`：Targeting、Planning 和 Execution 已分别实现，
+本轮不重写算法，也不改变正式数据语义。提交 `dd89f7a` 中的 Task1 只作为工程风格
+基准，不作为文件数或代码量基准。
 
-## 1. 完成定义
+本轮目标是冻结行为，从公开入口、依赖方向、配置职责和阶段交接入手做减法：让用户
+明确从哪里调用 Task2，并把 SO-101、VAMP、cuRobo 和 MuJoCo 的具体资产移出通用契约。
 
-正式数据流固定为：
+## 1. 冻结内容与完成定义
+
+以下内容必须保持不变：
+
+- `target()`、`plan()`、`execute()` 三个阶段入口；
+- Targeting、Planning、Execution 的正式请求、结果、数据语义和已有稳定错误码；
+- 确定性抓取候选、六阶段轨迹、按名称索引的关节及执行器通道；
+- Execution 忠实执行 Planning 轨迹，不因 MuJoCo 动力学事实改道或提前停止；
+- `execution_status` 与 `dynamics_diagnostics.success` 相互独立；
+- 当前记号笔、纸胶带、铆枪、标准件和主动腕平行夹爪的已验证行为；
+- 默认路径没有运行中 fallback，没有按点位、距离、seed 或候选索引特判。
+
+本轮允许：
+
+- 新增一个 Task2 总入口；
+- 合并内部类型、移动文件和调整 YAML 内部布局；
+- 一次性迁移仓库内配置和 import，删除旧路径且不保留兼容层；
+- 删除没有正式调用方的占位实现、旧 switcher 和重复 factory。
+
+本轮不包含：
+
+- 吸盘、灵巧手或第二个可用执行器的实现与验收；
+- 多物体调度、比赛顺序规划或自动更换另一执行器重试；
+- 新的抓取姿态、路径选择、主动腕零空间或动力学诊断策略；
+- 临时场景、扫描、视频、结果卡片或展示动作进入正式 pipeline；
+- 运行时兼容读取、schema version、缓存回放或迁移脚本。
+
+完成时，当前四个中心单物体场景必须继续完成 Targeting、Planning 和
+`execution_status=completed`。动力学诊断成功不是本轮验收门槛。
+
+## 2. 正式数据流
+
+总流程固定为：
 
 ```text
-TargetingRequest
+Task2Request
+  -> 执行器选择与激活
+  -> setup.json
   -> target()
-  -> GraspCandidate[]
+  -> targeting/result.json
   -> plan()
-  -> 六阶段时间参数化轨迹
+  -> planning/result.json
   -> execute()
-  -> ExecutionStatus + DynamicsDiagnostics
+  -> execution/result.json + 流式日志
+  -> result.json
 ```
 
-最小方案完成时必须满足：
+`Task2Pipeline.run()` 必须在每个阶段结束后写出正式结果，再从该结果反序列化构造下一
+阶段输入。不能一边写旁路 JSON，一边通过内存对象绕过阶段边界。
 
-- Targeting 能为记号笔、纸胶带、铆枪和标准件确定性生成抓取候选。
-- Planning 使用 VAMP、可替换 `IKSolver` 和 Ruckig 生成完整六阶段轨迹。
-- Execution 忠实执行 Planning 给出的轨迹，不根据 MuJoCo 动力学状态改道或提前中断。
-- MuJoCo 动力学事实被记录并形成独立诊断；动力学任务失败不伪装成规划失败或轨迹执行失败。
-- 油箱底部中心单物体场景中，四个核心物体分别完成规划与真实动力学移除验收。
-- 默认路径只有一套规划策略，没有隐式 fallback，也没有按点位、距离、seed 或候选索引进行特判。
+所有阶段可以读取：
 
-不属于首版范围：
+- 根目录只读 `request.json`；
+- 顶层组合配置及其显式引用；
+- 当前阶段的直接上游结果。
 
-- 学习式抓取生成、BODex、Dexonomy 和多 provider 注册系统。
-- 主动腕零空间优化策略。主动腕首版只作为普通关节参与规划。
-- 实机控制策略。只保留与 MuJoCo executor 共用的 adapter 接口。
-- RH56DFX 等其他执行器的默认实现。
-- 多半径扫描、五物体展示、视频生成和临时场景编排。
+阶段不得读取更早阶段的私有状态、backend 对象、MuJoCo model/data 或临时脚本参数。
+Targeting 不复制它不拥有的机器人状态和场景；Planning 由组合层使用根请求、setup 和
+Targeting 结果构造正式 `PlanningRequest`；Execution 同理由 Planning 结果构造。
 
-## 2. 模块边界
+## 3. 公开接口
 
-### 2.1 Contracts
+### 3.1 根包入口
 
-`src/task2/contracts/` 是独立值对象层，只包含：
+`task2` 根包只提供明显的应用入口：
 
-- 请求、结果和稳定错误码；
-- frame 明确的刚体变换；
-- 抓取候选、轨迹阶段、轨迹 knot 和执行器通道；
-- 场景快照、放置目标、执行状态和动力学诊断结构；
-- 序列化所需的纯数据转换。
-
-该层不得包含配置文件访问、Targeting/Planning/Execution 算法、VAMP、cuRobo、
-Ruckig、MuJoCo 或 CUDA 依赖。各阶段的 Request、Result 和 ErrorCode 在 contracts
-中按阶段分文件归属，不能使用一个含义模糊的通用结果类型。
-
-单位和坐标约定：
-
-- 长度为米，角度为弧度，时间为秒，质量为千克。
-- 四元数统一使用 `wxyz`。
-- 位姿必须携带 `parent_frame` 和 `child_frame`，禁止匿名 4x4 矩阵跨模块传递。
-- 加载器只检查会导致语义歧义或危险执行的内容，不自动补齐、裁剪、重排或猜测输入。
-- 当前代码只支持唯一配置格式，不维护 schema version，也不承诺跨 commit 的 artifact 兼容。
-
-### 2.2 组合与配置层
-
-组合层是唯一可以打开 YAML 的正式运行时位置。它负责：
-
-1. 读取机器人、执行器、物体和 Planning 配置；
-2. 做必要的类型、单位、frame、有限数值、合法范围和跨字段不变量检查；
-3. 把同一物体 YAML 切分成互不泄漏的类型化视图；
-4. 构建唯一真源 `RobotModel`；
-5. 将类型化依赖注入对应阶段。
-
-物体 YAML 建议结构：
-
-```yaml
-objects:
-  marker:
-    targeting:
-      # 抓取模板、对称性和先验评分参数
-    planning:
-      # 抓取后附着碰撞代理体
-    execution:
-      # 质量、质心、惯量、摩擦和 MuJoCo 资产绑定
+```python
+from task2 import Task2Pipeline, Task2PipelineResult, Task2Request
+from task2 import execute, plan, target
 ```
 
-虽然数据位于同一文件，Targeting 只能收到 `TargetingObjectConfig`，Planning 只能
-收到 `PlanningObjectConfig`，Execution 只能收到 `ExecutionObjectConfig`。不得把
-完整 YAML 字典或路径传给阶段模块。
+其他正式值对象从 `task2.contracts` 按需导入。`backends`、`adapters`、配置解析器、
+artifact codec 和执行器 runtime provider 都是内部实现。
 
-建议配置文件：
+总入口固定为：
+
+```python
+Task2Pipeline.from_config(config_path, output_root, ...)
+Task2Pipeline.run(request) -> Task2PipelineResult
+```
+
+`from_config()` 构建默认 backend、adapter 和执行器 runtime provider。构造函数允许测试
+和高级调用者注入 Targeting、Planning、Execution 及 runtime provider 四个高层依赖，
+但不把 VAMP、IK、Ruckig 的每个内部对象提升成总入口参数。运行中禁止 fallback。
+
+Python API 要求显式传入组合配置和输出根目录；只有 CLI 可以提供仓库内默认路径。
+
+### 3.2 Task2Request
+
+总请求是类型化正式输入，至少包含：
+
+- 稳定 `request_id`；
+- 物体类型和有 frame 的世界位姿；
+- 基础机械臂命名状态；
+- `T_world_base`；
+- `SceneSnapshot`；
+- 目标物体 ID 与源支撑碰撞组；
+- `PlacementGoal`；
+- 单次运行 `random_seed`；
+- 可选的 `end_effector_profile_id` 约束。
+
+物体配置、机器人配置、backend 资产、adapter 绑定、规划预算和日志路径不进入请求。
+候选/IK/规划预算属于部署配置；seed 属于单次运行输入。
+
+### 3.3 Task2PipelineResult
+
+总结果只聚合：
+
+- 总状态；
+- 已完成阶段；
+- 失败阶段；
+- 所选执行器 profile；
+- 各阶段耗时；
+- 各阶段结果文件的相对路径；
+- 一个总入口错误码与消息。
+
+总入口只新增一个稳定错误码 `PIPELINE_FAILED`，用于 setup、上游产物、组合配置或产物
+IO 等流水线边界失败。阶段算法失败继续保留原阶段错误码，不包装为新的 Pipeline
+错误分类。
+
+Targeting 和 Planning 成功且 `execution_status=completed` 时，总状态为 completed。
+`dynamics_diagnostics.success=false` 只进入 Execution 结果，不改变总状态。
+
+## 4. 执行器选择与 runtime 边界
+
+每个物体首版只对应一个 `end_effector_family`。组合配置中该 family 必须恰好解析到
+一个 profile：零个或多个都返回 `PIPELINE_FAILED`。调用者可以显式指定 profile；指定
+后只校验 family/capability 兼容性，不能静默换成另一个执行器。
+
+完整运行的 setup 顺序为：
+
+1. 根据物体模板解析唯一 family 和 profile；
+2. 激活执行器；
+3. 从 runtime provider 取得选定 `RobotModel` 和完整命名关节状态；
+4. 写出 `setup.json`；
+5. 开始 Targeting、Planning 和 Execution。
+
+`setup.json` 只保存 profile ID、family、RobotModel ID 和激活后的完整命名关节状态。
+具体 RobotModel、backend 和 adapter 配置仍从顶层配置重建，不复制到 artifact。
+
+内部 `EndEffectorRuntime` Protocol 只负责准备/激活工具并返回内部 activated bundle。
+该 bundle 包含选定 profile、RobotModel、完整初态和创建 `ExecutorAdapter` 的工厂；它不
+负责 Targeting、Planning、重试或结果判定，也不能进入可序列化 artifact。
+
+本轮只实现当前 `active_wrist_parallel` provider。吸盘等第二执行器以后通过新增 profile
+和 provider 接入，并在独立功能 Commit 验收。不得因当前只有一个执行器而在正式
+Pipeline 中写死 SO-101 资产名。
+
+## 5. Artifact 契约
+
+固定运行目录为：
+
+```text
+<output_root>/<request_id>/
+  request.json
+  setup.json
+  targeting/result.json
+  planning/result.json
+  execution/result.json
+  execution/control.csv
+  execution/dynamics.jsonl
+  result.json
+```
+
+规则：
+
+- Targeting 结果完整保存候选、评分分项、抓取命令和位姿；
+- Planning 结果完整保存六阶段轨迹、关键 knot、连续时间段、执行器通道、尝试及失败原因；
+- Execution 结果完整保存状态、耗时、诊断和日志相对路径；
+- `result.json` 只保存流程索引，不复制候选和轨迹；
+- 失败阶段仍写正式失败结果并停止，不创建伪造的下游 `not_run` 结果；
+- 重跑某阶段时覆盖该阶段结果，并删除当前运行目录中所有下游旧结果和日志；
+- 不保存派生的 `targeting/request.json`、`planning/request.json` 或
+  `execution/request.json`，因为根请求、setup、直接上游结果和配置足以确定性重建；
+- 不加入 schema version、hash 驱动兼容、字段猜测、自动补齐或旧格式读取。
+
+Contracts 保持类型化请求/结果，不公开通用 `from_dict()`。单一内部
+`src/task2/artifacts.py` 负责 JSON 编解码和目录布局，Pipeline 与 CLI 共用。Pipeline
+必须保证 artifact 能完整还原正式交接数据。
+
+## 6. 配置与依赖方向
+
+配置布局固定为：
 
 ```text
 configs/task2/
+  pipeline.yaml
   objects.yaml
-  end_effectors.yaml
   robot.yaml
   planning.yaml
+  execution.yaml
+  end_effectors/
+    active_wrist_parallel.yaml
 ```
 
-场景几何、机器人初态、物体世界位姿和放置目标是每次调用的正式输入，不写入默认
-YAML。配置加载器不检查后端内部状态，也不进行重复的防御性校验。
+### 6.1 顶层组合配置
 
-### 2.3 Targeting
+`pipeline.yaml` 只声明其他配置的显式路径、当前可用执行器 profile 和默认 backend/
+adapter 选择。它不是第二份参数真源。
 
-唯一公共入口：
+`Task2Pipeline.from_config()` 是唯一组合入口。顶层加载器解析引用和通用 profile；
+VAMP、cuRobo IK、Ruckig 和 MuJoCo 分别解析自己的内部配置。backend/adapter 只接收
+已经解析的路径和类型化内部配置，禁止通过 `Path(__file__)` 猜工程根目录或自行读取
+其他职责 YAML。
 
-```python
-TargetingResult target(TargetingRequest request)
-```
+### 6.2 RobotModel
 
-Targeting 只回答“这个执行器可以怎样抓这个物体”。输入包含：
+正式 `RobotModel` 只保留：
 
-- 稳定的 `object_type` 和有 frame 的物体世界位姿；
-- 所选执行器的 family 与 capabilities；
-- 已切分的 Targeting 物体/执行器配置；
-- 全局确定性 yaw 采样分辨率和候选上限。
+- model/base/TCP frame；
+- 唯一关节顺序；
+- 关节位置、速度、加速度和 jerk 限位；
+- 默认关节状态。
 
-它不读取机器人关节状态、场景障碍、IK、VAMP、Ruckig、MuJoCo 或 Planning 诊断。
+以下内容必须移出 RobotModel：
 
-抓取 profile 使用“物体 + 执行器 family/capabilities”匹配。首版执行器 family 为
-`parallel_gripper`，不能依赖资产文件名、具体关节名或 Python 类名。
+- cuRobo config asset；
+- VAMP module、sphere count 和 tool fraction；
+- VAMP 碰撞球索引组；
+- 平行夹爪最大开度。
 
-每个模板至少定义：
+基础 `robot.yaml` 保存 Gen3 本体真源。主动腕关节、TCP、工具关节限位和 capability
+属于 `active_wrist_parallel` profile，组合层将二者合成为 RobotModel。组合 URDF、
+cuRobo YAML、VAMP module 和碰撞球布局分别放在对应 backend profile。
 
-- 稳定 `template_id`；
-- 有 frame 的 `T_object_tcp` 和 `T_tcp_pregrasp`；
-- 绕物体局部轴的离散对称群或允许 yaw 区间；
-- 抓取开度、最大允许夹持力、闭合速度和驻留时间等语义命令；
-- `left_pad`、`right_pad` 等语义接触集合；
-- 模板优先级、接触裕量和开度裕量等可解释评分项。
+### 6.3 PlanningPolicy
 
-首版只展开局部 yaw；数据结构可表达命名倾角模板，但不实现按世界点位或机器人姿态
-自适应倾角。输出候选顺序必须确定。`candidate_id` 由 object type、profile、template
-和 symmetry variant 稳定派生，不能包含世界点位、运行序号或随机 seed。
+正式 Planning 配置改为实现无关的 `PlanningPolicy`，只保留：
 
-候选同时保留局部抓取变换和解析后的世界变换，并携带：
+- IK 位置与朝向容差；
+- 通用最大平移/旋转采样步长；
+- lift、preplace 与关节裕量；
+- 候选、seed、阶段和总时间预算。
 
-- `quality_score` 与 `score_components`，不得声称是未经标定的成功概率；
-- 语义化 `grasp_command`；
-- `expected_contacts`；
-- 由已选抓取姿态确定的抓取后 `T_tcp_object`。
+VAMP/Ruckig 版本、IK backend 名称及 VAMP 搜索参数进入 `planning.yaml` 的 backend
+内部 section。PlanningRequest 不知道当前使用 VAMP、cuRobo 或 Ruckig。
 
-Targeting 的稳定错误码至少区分未知物体、执行器不兼容、配置无效、输入 pose/frame
-无效和展开后无候选。它不能在未做 IK 或碰撞规划时宣布候选可达。
+### 6.4 物体与 Execution 配置
 
-### 2.4 Planning
+`objects.yaml` 只保留与模拟器无关的：
 
-唯一公共入口：
+- Targeting 抓取模板、对称性和语义命令；
+- Planning 使用的球、胶囊和盒附着代理。
 
-```python
-PlanningResult plan(PlanningRequest request)
-```
+MuJoCo model asset、runtime body/free joint/geom、actuator、TCP site 和命令映射全部进入
+`execution.yaml` 的 MuJoCo adapter section。Targeting、Planning 和 Execution 仍使用
+各自职责视图，不能创建一个包含全部字段的巨型 EndEffectorModel，也不能把完整 YAML
+字典传给阶段模块。
 
-`PlanningRequest` 显式包含：
+配置只校验会导致字段误解、单位/frame 歧义、危险执行或 backend 无法确定的内容。
+未知顶层职责和关键控制字段必须拒绝；不再为每个普通嵌套 mapping 编写机械式全字段
+防御校验。
 
-- 有序 `GraspCandidate[]`；
-- 有序机器人初始关节状态；
-- 由唯一真源构建的 `RobotModel`；
-- `SceneSnapshot`；
-- `PlacementGoal`；
-- 类型化 Planning 物体和执行器配置；
-- seed、候选预算、阶段时间预算和总预算。
+## 7. 目标源码结构
 
-`SceneSnapshot` 支持带稳定 ID 和位姿的基本体、凸体、静态三角网格、碰撞组和允许
-接触对。MuJoCo、URDF 或其他来源必须在 pipeline 外转换成该契约；Planner 不读取
-MuJoCo 内部 model/data。
-
-机器人模型是关节顺序、限位、运动学链和组合碰撞模型的唯一真源。VAMP adapter、
-IK adapter 和 Ruckig 都消费该模型，禁止各自维护关节顺序或限位副本。
-
-#### 路径算法
-
-默认且唯一的策略为：
-
-1. `PREGRASP`：VAMP 自由空间规划至预抓姿态。
-2. `APPROACH`：按最大平移/旋转步长离散笛卡尔路径，由 Planning 逐点调用 IK 并维持连续分支。
-3. `GRASP`：机械臂停车，按语义执行器通道闭合并驻留。
-4. `LIFT`：连续 IK 生成受约束的脱离支撑路径。
-5. `EGRESS`：VAMP 进行分段退出规划。
-6. `PLACE`：VAMP 到油箱外允许区域中的确定性可行放置目标，停车后产生 release 事件。
-7. 对拼接后的完整关节几何路径统一使用 Ruckig 时间参数化。
-
-阶段是有时间范围的 `TrajectoryPhase`，不是六个离散 waypoint。`GRASP` 和
-`PLACE/release` 边界强制速度归零，其他阶段边界尽量保持速度连续。
-
-PlacementGoal 支持精确位姿和区域；首版使用矩形或圆形区域及高度范围。没有显式
-朝向约束时不验收物体终点朝向，目标采样保持确定性，并选择第一个满足可达性、碰撞
-和限位要求的目标。不得静默把区域目标改成区域中心。
-
-#### IK 与路径选择
-
-首版真实 IK 后端为隔离的 cuRobo adapter，但 Planning 只依赖：
-
-```python
-IKResult solve(targets, seed_states, constraints)
-```
-
-adapter 返回关节名、有序完整关节解、残差和稳定错误码；tensor、CUDA stream 和
-cuRobo 内部对象不得越过边界。后端不可用时返回 `BACKEND_UNAVAILABLE`，不得回退
-MotionGen、mock IK 或另一规划器。
-
-连续 IK 的笛卡尔离散、分支连续性和关节限位裕量由通用 Planning 层负责。多个完整
-路线使用固定字典序选择：
-
-1. 六阶段均有效且无禁止碰撞；
-2. Targeting 候选顺序；
-3. 同一候选内关节路径更短；
-4. 再比较关节限位裕量。
-
-同一个 VAMP 后端允许在显式预算内尝试多个候选和多个 seed，这属于正常搜索而非
-fallback。每次尝试的 seed、阶段、耗时和失败原因必须记录；预算耗尽即明确失败。
-
-#### 碰撞语义
-
-- `PREGRASP/APPROACH/GRASP` 使用场景中的原始目标物体碰撞体。
-- `APPROACH/GRASP` 只允许候选声明的指垫语义组接触目标物体。
-- 手掌、指节、机械臂与目标物体或油箱的碰撞始终禁止。
-- 目标物体与油箱底面的已有支撑接触允许持续到 `LIFT`。
-- `GRASP` 结束时在规划语义上移除静态目标物体，并按 `T_tcp_object` 附着简化代理体。
-- `LIFT/EGRESS/PLACE` 使用物体局部坐标系中的球、胶囊和盒体组合代理。
-- `PLACE` 末端停车前代理体始终保持附着；release 之后的动力学不再规划。
-
-该阶段切换是显式规划语义，不依赖 MuJoCo 是否实际抓牢物体。执行器配置声明语义
-碰撞组，Targeting 候选声明预期接触，Request 声明场景已有允许接触；Planning 根据
-固定阶段规则组合，YAML 不提供任意碰撞白名单。
-
-#### 轨迹输出
-
-PlanningResult 保存分段、连续、时间参数化的轨迹及关键 knot，不固化 MuJoCo 的控制
-频率。所有可定位关节（包括可选主动腕）进入按名称索引的 position、velocity 和
-acceleration 通道；夹爪进入语义化 actuator position、force limit 等通道。Planner
-不能写死夹爪关节名或数量。
-
-Ruckig 只生成时间戳、速度和加速度，不修改几何路径、不删除 waypoint，也不在失败后
-静默降低限制。Planning 结果记录配置内容哈希、后端版本、seed、预算和关键参数摘要，
-不复制完整 YAML 或资产。
-
-Planning 错误码至少区分请求/配置无效、后端不可用、IK 候选耗尽、VAMP 搜索失败、
-连续 IK 中断、阶段碰撞违规、Ruckig 失败、预算耗尽和后端异常。只有六阶段全部成功
-才返回成功；部分轨迹不能包装为正式结果。
-
-### 2.5 Execution
-
-唯一公共入口：
-
-```python
-ExecutionResult execute(ExecutionRequest request)
-```
-
-Request 只包含成功的 PlanningResult、机器人/执行器运行时 adapter、场景对象绑定、
-控制频率、日志频率和动力学诊断配置。Execution 不调用 Targeting 或 Planning，不读取
-它们的配置和内部状态，也不从 MuJoCo 反推或替换轨迹。
-
-MuJoCo executor 和未来实机 executor 消费完全相同的时间参数化关节及执行器通道。
-adapter 只处理控制接口映射。首版实现 MuJoCo executor；实机 adapter 接口明确标记
-未实现，不能使用 mock execution 伪造通过。
-
-Execution 按自身控制频率确定性采样 Planning 轨迹，并以独立日志频率流式持久化：
-
-- 阶段和时间戳；
-- 目标/实际关节状态；
-- 执行器命令与状态；
-- 物体和 TCP 状态；
-- 去重后的接触名称对及动力学事件。
-
-结果必须拆分：
-
-- `execution_status`：轨迹是否完整交给运行时并执行；
-- `dynamics_diagnostics.success`：执行结束后，动力学事实是否满足验收策略。
-
-物体滑落、没有离开支撑面或落点误差过大，不得让 executor 在中途改变路线或伪装成
-Planning failure。模型加载失败、控制接口失败、数值仿真不可继续或日志 IO 失败属于
-明确的 Execution 错误。日志 IO 错误不得被吞掉，也不得改变已规划控制语义。
-
-动力学诊断至少记录：
-
-- 目标物体是否存在；
-- 抓取后是否离开原支撑面；
-- 释放前后的物体 pose、线速度和角速度；
-- 释放后的稳定状态；
-- 目标区域误差；
-- 接触名称对、最大穿透和冲击统计。
-
-诊断可以在完整执行结束后按显式验收策略计算 success，但不能作为中途控制分支。
-视频渲染、展示松手效果和结果卡片均属于 pipeline 外工具。
-
-## 3. 三次 commit
-
-### Commit 1: Targeting
-
-建议提交信息：
+重构后的职责结构建议为：
 
 ```text
-feat(task2): rebuild config-driven grasp targeting
+src/task2/
+  __init__.py
+  pipeline.py
+  artifacts.py
+  config.py
+  runtime.py
+  targeting.py
+  planning.py
+  execution.py
+  ik.py
+  contracts/
+    __init__.py
+    geometry.py
+    pipeline.py
+    targeting.py
+    planning.py
+    execution.py
+  backends/
+    curobo_ik.py
+    vamp.py
+    ruckig.py
+    errors.py
+  adapters/
+    mujoco.py
+    errors.py
 ```
 
-范围：
+具体私有 helper 可以留在最接近的实现文件中；不要仅为缩短单个文件再拆无独立职责的
+模块。`contracts/__init__.py` 只 re-export 正式请求、结果和跨模块值对象，不再全量
+导出 YAML 解析中间类型。
 
-- 新建最小 contracts 公共值对象和 Targeting 专属契约。
-- 新建类型化 YAML 配置视图与组合层切分逻辑。
-- 定义平行夹爪 family/capabilities 和语义执行器命令。
-- 实现四个核心物体的确定性模板展开。
-- 实现唯一 `target()` 入口及稳定失败码。
-- 加入少量 Targeting 契约和模块边界测试。
+抓取模板、yaw 对称性和 Targeting profile 类型归入 `contracts/targeting.py`；Planning
+物体代理和执行器视图归入 `contracts/planning.py`；MuJoCo runtime 绑定归入 adapter
+内部。Targeting、Planning、Execution 的执行器视图保持职责分离，不强行合并。
 
-不包含 VAMP、IK、Ruckig、MuJoCo、机器人场景规划、临时场景或视频。
+## 8. CLI
 
-验收：相同请求产生相同候选 ID 和顺序；frame/单位/变换闭合正确；候选能映射为平行
-夹爪合法语义命令；代码不导入 Planning、MuJoCo 或机器人状态。
-
-### Commit 2: Planning
-
-建议提交信息：
+恢复唯一入口 `scripts/run_task2_pipeline.py`：
 
 ```text
-feat(task2): add VAMP planning with pluggable IK and Ruckig
+--step full      --request <json> --config <yaml> --output-root <dir>
+--step targeting --request <json> --config <yaml> --output-root <dir>
+--step planning  --run-dir <dir>  --config <yaml>
+--step execution --run-dir <dir>  --config <yaml>
 ```
 
-范围：
+`--request` 与 `--run-dir` 不能同时出现。开始新运行时，CLI/Pipeline 先执行 setup；后续
+step 校验 `setup.json` 与当前已激活 profile 一致，不隐式选择或换装另一执行器。
 
-- 增加 PlanningRequest/Result/ErrorCode、六阶段和轨迹契约。
-- 增加 RobotModel、SceneSnapshot、PlacementGoal 类型及组合构建。
-- 实现唯一 VAMP backend adapter。
-- 实现 `IKSolver` 接口及首个 cuRobo IK adapter。
-- 实现通用连续 IK、阶段拼接、碰撞切换和附着代理体。
-- 实现区域放置目标的确定性采样。
-- 使用 Ruckig 完成时间参数化和按名称通道输出。
-- 记录候选尝试、失败阶段、耗时、seed、预算和配置哈希。
+CLI 只负责解析参数、调用正式 API 和输出机器可读摘要。临时场景工具负责构造正式
+Task2Request；加载点、视频、可视化和结果卡片不得进入 CLI 或 Pipeline。
 
-不包含 MuJoCo execution、动力学成功判据、实机控制、视频或临时场景代码。
+## 9. 测试与验收
 
-验收：四个中心场景分别输出或明确拒绝完整六阶段轨迹；成功轨迹满足关节、速度、
-加速度、碰撞和阶段停车规则。真实验收以小型 JSON 报告保存，不保存视频或高频轨迹。
+测试按公开边界保留四类文件：
 
-### Commit 3: Execution
+- `tests/test_task2_targeting.py`；
+- `tests/test_task2_planning.py`；
+- `tests/test_task2_execution.py`；
+- `tests/test_task2_pipeline.py`。
 
-建议提交信息：
+当前误名的 `test_task2_pipeline.py` 先改名为 Targeting 测试，再为真实总入口新增
+Pipeline 测试。保留：
+
+- 正式 Request/Result、frame、单位和稳定错误码；
+- Targeting 确定性、family/capability 匹配；
+- 六阶段、命名通道、碰撞和停车语义；
+- Execution 事件调度、控制/日志频率分离；
+- artifact 只能经正式链路交接、失败停止和下游清理；
+- 一个中心 `standard_part`、固定 seed 的真实快速 Planning 回归。
+
+删除只验证私有 parser/helper、文件移动、一次性迁移过程和重复排列的测试。快速 Planning
+回归只断言成功、六阶段完整和正式约束有效，不断言具体路径、knot 数或耗时。
+
+最终验收重新运行四个中心单物体场景，要求：
+
+1. 四个物体 Targeting 成功；
+2. 四个物体 Planning 生成完整六阶段轨迹；
+3. 四个物体 `execution_status=completed`；
+4. 每个阶段只通过正式 JSON artifact 交接；
+5. 候选语义、顺序、错误码和执行器通道保持一致；
+6. 没有 fallback、cache replay 或点位/seed 特判。
+
+不要求 VAMP 路径、knot 数、规划耗时或 MuJoCo 浮点日志逐字节相同。四物体完整验收
+报告写入 Git 忽略的 `outputs/`，不提交视频或高频日志。
+
+## 10. 提交范围
+
+本轮作为三个功能 Commit 后的一个独立重构 Commit。建议提交信息：
 
 ```text
-feat(task2): execute planned trajectories with MuJoCo diagnostics
+refactor(task2): add artifact-driven pipeline boundary
 ```
 
-范围：
+该 Commit 同时完成配置一次性迁移、总入口、artifact 链、依赖解耦、旧文件删除、测试
+调整和本文档更新。不得执行 `git add` 或 commit，除非负责人明确授权。
 
-- 增加 ExecutionRequest/Result/ErrorCode 和动力学诊断契约。
-- 实现共用 executor adapter 接口和 MuJoCo adapter。
-- 忠实采样并执行六阶段 Planning 轨迹及执行器通道。
-- 分离控制频率与流式日志频率。
-- 记录动力学状态和接触诊断，区分 execution status 与 dynamics success。
-- 保留明确未实现的实机 adapter 接口，不提供 mock 成功路径。
-- 用四个中心场景完成 Planning + MuJoCo 动力学验收。
+明确禁止：
 
-视频生成、临时场景编排和报告汇总仍放在 pipeline 外，不能成为公共模块或 pytest。
-
-## 4. 测试策略
-
-pytest 只保留守住正式能力边界的测试：
-
-- Request/Result、frame、单位和必要配置不变量；
-- Targeting 确定性、执行器 compatibility 和稳定失败传播；
-- 六阶段顺序、按名称通道和 GRASP/PLACE 停车语义；
-- `IKSolver`/VAMP adapter 隔离及后端失败传播；
-- 阶段允许接触与禁止碰撞规则；
-- Ruckig 输出限位；
-- 一个最小、确定、快速的已知规划回归。
-
-不保留入口烟测、重复序列化测试、内部 helper 测试、参数排列测试或慢速四物体 E2E。
-真实四物体 Planning 和 MuJoCo execution 作为一次性验收命令运行，报告写入被 Git 忽略
-的 `outputs/`。
-
-## 5. 明确禁止的实现
-
-- 按 object point、半径、世界方位、candidate ID、seed 或测试文件名选择特殊路径。
-- cuRobo IK 失败后静默切换另一 IK 或 MotionGen。
-- VAMP 失败后回放缓存、反向旧路径或切换另一规划器。
-- 自动放宽碰撞、速度、加速度、夹持力或预算并包装为成功。
-- Execution 读取 MuJoCo 接触或物体位姿后改道、重抓、跳段或提前宣告轨迹失败。
-- 从 MuJoCo model/data 反推 Planning 的目标、碰撞代理或抓取结果。
-- 将临时场景参数、视频动作、结果卡片或展示松手逻辑放入正式 pipeline。
-- 把同一整棵 YAML 字典传给 Targeting、Planning 和 Execution。
-
-合理的有界重试必须使用同一算法、显式配置预算、记录 seed 和每次失败原因。任何降级
-路径都必须是可配置、可追踪、可测试且不改变业务语义的正式设计；首版默认不提供降级。
+- 保留旧配置兼容读取或旧 switcher fallback；
+- 因 family/profile 选择失败改试另一执行器；
+- Planning 或 Execution 读取更早阶段的内部对象；
+- 从 MuJoCo 反推 RobotModel、抓取模板或 Planning 代理；
+- 用默认关节值冒充执行器激活后的实机状态；
+- 为临时场景、点位、seed 或测试名称写正式代码特判；
+- 为重构引入 provider 注册平台、schema 演进框架或新的序列化依赖。

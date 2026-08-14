@@ -7,7 +7,6 @@ from typing import Mapping
 
 from ..contracts import (
     PlannedTrajectory,
-    PlanningConfig,
     RobotModel,
     TrajectoryEvent,
     TrajectoryKnot,
@@ -28,8 +27,27 @@ class GeometricWaypoint:
     minimum_duration_s: float = 0.0
 
 
+@dataclass(frozen=True)
+class RuckigConfig:
+    version: str
+
+    def validate(self) -> None:
+        if not self.version:
+            raise ValueError("Ruckig version must be explicit")
+
+
+def parse_ruckig_config(payload: Mapping[str, object]) -> RuckigConfig:
+    version = payload.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("Ruckig.version must be a non-empty string")
+    result = RuckigConfig(version)
+    result.validate()
+    return result
+
+
 class RuckigTimeParameterizer:
-    def __init__(self, robot_model: RobotModel, planning_config: PlanningConfig):
+    def __init__(self, robot_model: RobotModel, config: RuckigConfig):
+        config.validate()
         try:
             import ruckig
         except (ImportError, OSError) as exc:
@@ -38,13 +56,13 @@ class RuckigTimeParameterizer:
             installed = metadata.version("ruckig")
         except metadata.PackageNotFoundError as exc:
             raise BackendUnavailableError("Ruckig package metadata is unavailable") from exc
-        if installed != planning_config.ruckig_version:
+        if installed != config.version:
             raise BackendUnavailableError(
-                f"Ruckig version {installed} does not match required {planning_config.ruckig_version}"
+                f"Ruckig version {installed} does not match required {config.version}"
             )
         self._ruckig = ruckig
         self._model = robot_model
-        self._config = planning_config
+        self._config = config
         self.version = installed
 
     def parameterize(

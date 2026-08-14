@@ -56,27 +56,6 @@ class JointLimits:
 
 
 @dataclass(frozen=True)
-class CollisionSphereGroup:
-    group: str
-    first_sphere: int
-    sphere_count: int
-    translation_per_closed_fraction_m: Vector3
-    sweep_radius_inflation_m: float
-
-    def validate(self, total_spheres: int) -> None:
-        if not self.group or self.first_sphere < 0 or self.sphere_count <= 0:
-            raise ValueError("collision sphere groups require a name and positive range")
-        if self.first_sphere + self.sphere_count > total_spheres:
-            raise ValueError(f"collision sphere group {self.group} exceeds robot sphere count")
-        if len(self.translation_per_closed_fraction_m) != 3 or not all(
-            isfinite(value) for value in self.translation_per_closed_fraction_m
-        ):
-            raise ValueError("collision sphere group translation must be a finite xyz vector")
-        if not isfinite(self.sweep_radius_inflation_m) or self.sweep_radius_inflation_m < 0.0:
-            raise ValueError("collision sphere group sweep inflation must be non-negative")
-
-
-@dataclass(frozen=True)
 class RobotModel:
     model_id: str
     base_frame: str
@@ -84,13 +63,6 @@ class RobotModel:
     joint_names: tuple[str, ...]
     joint_limits: tuple[JointLimits, ...]
     default_joint_positions: tuple[float, ...]
-    kinematics_asset: str
-    curobo_config_asset: str
-    vamp_robot_module: str
-    vamp_robot_sphere_count: int
-    vamp_tool_fraction_midpoint: float
-    maximum_gripper_opening_m: float
-    collision_sphere_groups: tuple[CollisionSphereGroup, ...]
 
     def validate(self) -> None:
         if not self.model_id or not self.base_frame or not self.tcp_frame:
@@ -109,19 +81,6 @@ class RobotModel:
             limits.validate(name)
             if not limits.minimum_position_rad <= value <= limits.maximum_position_rad:
                 raise ValueError(f"RobotModel default position for {name} is outside limits")
-        if not self.kinematics_asset or not self.curobo_config_asset or not self.vamp_robot_module:
-            raise ValueError("RobotModel backend assets must be explicit")
-        if self.vamp_robot_sphere_count <= 0:
-            raise ValueError("RobotModel VAMP sphere count must be positive")
-        if not 0.0 <= self.vamp_tool_fraction_midpoint <= 1.0:
-            raise ValueError("RobotModel VAMP tool fraction midpoint must lie in [0, 1]")
-        if not isfinite(self.maximum_gripper_opening_m) or self.maximum_gripper_opening_m <= 0.0:
-            raise ValueError("RobotModel maximum gripper opening must be positive")
-        names = [group.group for group in self.collision_sphere_groups]
-        if len(names) != len(set(names)):
-            raise ValueError("RobotModel collision sphere group names must be unique")
-        for group in self.collision_sphere_groups:
-            group.validate(self.vamp_robot_sphere_count)
 
 
 @dataclass(frozen=True)
@@ -364,30 +323,16 @@ class PlanningEndEffectorConfig:
 
 
 @dataclass(frozen=True)
-class PlanningConfig:
-    config_hash: str
-    vamp_version: str
-    ruckig_version: str
-    ik_backend: str
+class PlanningPolicy:
     ik_position_tolerance_m: float
     ik_orientation_tolerance_rad: float
-    ik_solution_count: int
-    ik_seed_count: int
     cartesian_translation_step_m: float
     cartesian_rotation_step_rad: float
     lift_distance_m: float
     preplace_offset_m: float
-    placement_sample_count: int
     joint_limit_margin_rad: float
-    vamp_range_rad: float
-    vamp_max_iterations: int
-    vamp_max_samples: int
 
     def validate(self) -> None:
-        if self.vamp_version != "0.6.4":
-            raise ValueError("Planning requires VAMP 0.6.4")
-        if not self.config_hash or not self.ruckig_version or not self.ik_backend:
-            raise ValueError("Planning config hash and backend selections must be explicit")
         positive_floats = (
             self.ik_position_tolerance_m,
             self.ik_orientation_tolerance_rad,
@@ -396,18 +341,9 @@ class PlanningConfig:
             self.lift_distance_m,
             self.preplace_offset_m,
             self.joint_limit_margin_rad,
-            self.vamp_range_rad,
         )
         if not all(isfinite(value) and value > 0.0 for value in positive_floats):
             raise ValueError("Planning distances, tolerances, margins, and periods must be positive")
-        if min(
-            self.ik_solution_count,
-            self.ik_seed_count,
-            self.placement_sample_count,
-            self.vamp_max_iterations,
-            self.vamp_max_samples,
-        ) <= 0:
-            raise ValueError("Planning counts and VAMP limits must be positive")
 
 
 @dataclass(frozen=True)
@@ -439,7 +375,7 @@ class PlanningRequest:
     placement_goal: PlacementGoal
     object_config: PlanningObjectConfig
     end_effector_config: PlanningEndEffectorConfig
-    planning_config: PlanningConfig
+    planning_policy: PlanningPolicy
     random_seed: int
     budgets: PlanningBudgets
 
@@ -460,7 +396,7 @@ class PlanningRequest:
         self.placement_goal.validate(self.scene.world_frame, self.robot_model.tcp_frame)
         self.object_config.validate()
         self.end_effector_config.validate()
-        self.planning_config.validate()
+        self.planning_policy.validate()
         self.budgets.validate()
         object_ids = {item.object_id for item in self.scene.geometries}
         if self.target_object_id not in object_ids:
@@ -669,6 +605,7 @@ class PlannedTrajectory:
 @dataclass(frozen=True)
 class PlanningResult:
     trajectory: PlannedTrajectory | None
+    T_world_object_goal: RigidTransform | None
     error_code: PlanningErrorCode | None
     message: str
     attempts: tuple[PlanningAttempt, ...]
@@ -682,10 +619,20 @@ class PlanningResult:
     def succeeded(
         cls,
         trajectory: PlannedTrajectory,
+        T_world_object_goal: RigidTransform,
         attempts: tuple[PlanningAttempt, ...],
         metadata: Mapping[str, object],
     ) -> PlanningResult:
-        return cls(trajectory, None, "planning succeeded", attempts, metadata)
+        result = cls(
+            trajectory,
+            T_world_object_goal,
+            None,
+            "planning succeeded",
+            attempts,
+            metadata,
+        )
+        result.validate()
+        return result
 
     @classmethod
     def failed(
@@ -695,7 +642,21 @@ class PlanningResult:
         attempts: tuple[PlanningAttempt, ...] = (),
         metadata: Mapping[str, object] | None = None,
     ) -> PlanningResult:
-        return cls(None, error_code, message, attempts, metadata or {})
+        return cls(None, None, error_code, message, attempts, metadata or {})
+
+    def validate(self) -> None:
+        if self.success:
+            if self.trajectory is None or self.T_world_object_goal is None:
+                raise ValueError(
+                    "successful PlanningResult requires a trajectory and T_world_object_goal"
+                )
+            self.T_world_object_goal.validate(label="PlanningResult.T_world_object_goal")
+            if self.T_world_object_goal.child_frame != "object":
+                raise ValueError("PlanningResult.T_world_object_goal must end at object")
+        elif self.trajectory is not None or self.T_world_object_goal is not None:
+            raise ValueError(
+                "failed PlanningResult cannot contain a trajectory or T_world_object_goal"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -703,6 +664,11 @@ class PlanningResult:
             "error_code": self.error_code.value if self.error_code is not None else None,
             "message": self.message,
             "trajectory": self.trajectory.to_dict() if self.trajectory is not None else None,
+            "T_world_object_goal": (
+                self.T_world_object_goal.to_dict()
+                if self.T_world_object_goal is not None
+                else None
+            ),
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "metadata": dict(self.metadata),
         }

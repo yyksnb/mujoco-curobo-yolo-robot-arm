@@ -1,24 +1,76 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import yaml
 
-from ..contracts import PlanningConfig, RigidTransform, RobotModel, RobotState
+from ..contracts import PlanningPolicy, RigidTransform, RobotModel, RobotState
 from ..ik import IKConstraints, IKErrorCode, IKResult, IKSolution
 from .errors import BackendUnavailableError
+
+
+class CuroboIKConfig:
+    def __init__(
+        self,
+        *,
+        version: str,
+        robot_config_path: Path,
+        kinematics_path: Path,
+        asset_root_path: Path,
+        seed_count: int,
+    ) -> None:
+        self.version = version
+        self.robot_config_path = robot_config_path
+        self.kinematics_path = kinematics_path
+        self.asset_root_path = asset_root_path
+        self.seed_count = seed_count
+
+    def validate(self) -> None:
+        if not self.version or self.seed_count <= 0:
+            raise ValueError("cuRobo version and seed count must be explicit")
+        if (
+            not self.robot_config_path.is_file()
+            or not self.kinematics_path.is_file()
+            or not self.asset_root_path.is_dir()
+        ):
+            raise ValueError("cuRobo robot and kinematics assets must exist")
+
+
+def parse_curobo_ik_config(
+    payload: Mapping[str, object],
+    end_effector_profile: Mapping[str, object],
+    base_dir: Path,
+) -> tuple[str, CuroboIKConfig, int]:
+    backend = _config_string(payload, "backend", "cuRobo IK")
+    result = CuroboIKConfig(
+        version=_config_string(payload, "curobo_version", "cuRobo IK"),
+        robot_config_path=_config_path(
+            end_effector_profile, "curobo_config_asset", "cuRobo IK profile", base_dir
+        ),
+        kinematics_path=_config_path(
+            end_effector_profile, "kinematics_asset", "cuRobo IK profile", base_dir
+        ),
+        asset_root_path=_config_path(
+            end_effector_profile, "asset_root", "cuRobo IK profile", base_dir
+        ),
+        seed_count=_config_integer(payload, "seed_count", "cuRobo IK"),
+    )
+    result.validate()
+    return backend, result, _config_integer(payload, "solution_count", "cuRobo IK")
 
 
 class CuroboIKSolver:
     def __init__(
         self,
         robot_model: RobotModel,
-        planning_config: PlanningConfig,
+        planning_policy: PlanningPolicy,
+        config: CuroboIKConfig,
         *,
-        project_root: Path,
         random_seed: int,
     ):
+        config.validate()
         try:
             import curobo
             import torch
@@ -27,11 +79,11 @@ class CuroboIKSolver:
         except (ImportError, OSError) as exc:
             raise BackendUnavailableError(f"cuRobo import failed: {exc}") from exc
         version = getattr(curobo, "__version__", None)
-        if version != "0.8.0":
-            raise BackendUnavailableError(f"cuRobo 0.8.0 is required, found {version!r}")
+        if version != config.version:
+            raise BackendUnavailableError(f"cuRobo {config.version} is required, found {version!r}")
         if not torch.cuda.is_available():
             raise BackendUnavailableError("cuRobo IK requires an available CUDA device")
-        config_path = (project_root / robot_model.curobo_config_asset).resolve()
+        config_path = config.robot_config_path.resolve()
         if not config_path.is_file():
             raise BackendUnavailableError(f"cuRobo robot config is missing: {config_path}")
         try:
@@ -49,8 +101,8 @@ class CuroboIKSolver:
             ):
                 raise ValueError("cuRobo collision sphere asset is malformed")
             kinematics["collision_spheres"] = sphere_payload["collision_spheres"]
-            kinematics["urdf_path"] = str((project_root / robot_model.kinematics_asset).resolve())
-            kinematics["asset_root_path"] = str(project_root.resolve())
+            kinematics["urdf_path"] = str(config.kinematics_path.resolve())
+            kinematics["asset_root_path"] = str(config.asset_root_path.resolve())
             cspace = kinematics.get("cspace")
             if not isinstance(cspace, dict):
                 raise ValueError("cuRobo robot config must contain cspace")
@@ -64,9 +116,9 @@ class CuroboIKSolver:
             config = InverseKinematicsCfg.create(
                 robot=payload,
                 device_cfg=device,
-                num_seeds=planning_config.ik_seed_count,
-                position_tolerance=planning_config.ik_position_tolerance_m,
-                orientation_tolerance=planning_config.ik_orientation_tolerance_rad,
+                num_seeds=config.seed_count,
+                position_tolerance=planning_policy.ik_position_tolerance_m,
+                orientation_tolerance=planning_policy.ik_orientation_tolerance_rad,
                 random_seed=random_seed,
                 self_collision_check=True,
                 load_collision_spheres=True,
@@ -158,3 +210,33 @@ class CuroboIKSolver:
 
 def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return sum((a - b) ** 2 for a, b in zip(left, right))
+
+
+def _config_value(payload: Mapping[str, object], key: str, label: str) -> object:
+    if key not in payload:
+        raise ValueError(f"{label}.{key} is required")
+    return payload[key]
+
+
+def _config_string(payload: Mapping[str, object], key: str, label: str) -> str:
+    value = _config_value(payload, key, label)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    return value
+
+
+def _config_integer(payload: Mapping[str, object], key: str, label: str) -> int:
+    value = _config_value(payload, key, label)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label}.{key} must be an integer")
+    return value
+
+
+def _config_path(
+    payload: Mapping[str, object],
+    key: str,
+    label: str,
+    base_dir: Path,
+) -> Path:
+    value = Path(_config_string(payload, key, label))
+    return value.resolve() if value.is_absolute() else (base_dir / value).resolve()

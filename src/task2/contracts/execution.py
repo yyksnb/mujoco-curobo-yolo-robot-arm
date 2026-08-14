@@ -25,137 +25,14 @@ class ExecutionStatus(str, Enum):
 
 
 @dataclass(frozen=True)
-class RuntimeJointBinding:
-    joint_name: str
-    runtime_joint_name: str
-    runtime_actuator_name: str
-
-    def validate(self) -> None:
-        if not self.joint_name or not self.runtime_joint_name or not self.runtime_actuator_name:
-            raise ValueError("runtime joint binding names must be non-empty")
-
-
-@dataclass(frozen=True)
-class ExecutionRobotConfig:
-    adapter_id: str
-    model_asset: str
-    tcp_frame: str
-    tcp_site_name: str
-    joint_bindings: tuple[RuntimeJointBinding, ...]
-    scene_object_body_names: tuple[str, ...]
-
-    def validate(self) -> None:
-        if not self.adapter_id or not self.model_asset or not self.tcp_frame or not self.tcp_site_name:
-            raise ValueError("Execution robot adapter, model asset, and TCP site must be explicit")
-        if not self.joint_bindings:
-            raise ValueError("Execution robot config requires joint bindings")
-        joint_names = [item.joint_name for item in self.joint_bindings]
-        runtime_joints = [item.runtime_joint_name for item in self.joint_bindings]
-        runtime_actuators = [item.runtime_actuator_name for item in self.joint_bindings]
-        for values, label in (
-            (joint_names, "joint names"),
-            (runtime_joints, "runtime joint names"),
-            (runtime_actuators, "runtime joint actuator names"),
-        ):
-            if len(values) != len(set(values)):
-                raise ValueError(f"Execution robot {label} must be unique")
-        for item in self.joint_bindings:
-            item.validate()
-        if not self.scene_object_body_names or any(
-            not name for name in self.scene_object_body_names
-        ):
-            raise ValueError("Execution robot config requires scene object body names")
-        if len(self.scene_object_body_names) != len(set(self.scene_object_body_names)):
-            raise ValueError("Execution scene object body names must be unique")
-
-
-@dataclass(frozen=True)
-class ActuatorPositionBinding:
-    channel_name: str
-    runtime_actuator_name: str
-    command_scale: float
-    command_offset: float
-    state_joint_names: tuple[str, ...]
-
-    def validate(self) -> None:
-        if not self.channel_name or not self.runtime_actuator_name or not self.state_joint_names:
-            raise ValueError("actuator position binding names must be explicit")
-        if len(self.state_joint_names) != len(set(self.state_joint_names)):
-            raise ValueError("actuator position state joints must be unique")
-        if not all(isfinite(value) for value in (self.command_scale, self.command_offset)):
-            raise ValueError("actuator position command mapping must be finite")
-        if self.command_scale == 0.0:
-            raise ValueError("actuator position command scale must be non-zero")
-
-
-@dataclass(frozen=True)
-class ActuatorForceLimitBinding:
-    channel_name: str
-    runtime_actuator_name: str
-    command_scale: float
-
-    def validate(self) -> None:
-        if not self.channel_name or not self.runtime_actuator_name:
-            raise ValueError("actuator force-limit binding names must be explicit")
-        if not isfinite(self.command_scale) or self.command_scale <= 0.0:
-            raise ValueError("actuator force-limit command scale must be positive")
-
-
-@dataclass(frozen=True)
-class ExecutionEndEffectorConfig:
-    profile_id: str
-    position: ActuatorPositionBinding
-    force_limit: ActuatorForceLimitBinding
-    contact_group_geoms: Mapping[str, tuple[str, ...]]
-
-    def validate(self) -> None:
-        if not self.profile_id:
-            raise ValueError("Execution end-effector profile ID must be non-empty")
-        self.position.validate()
-        self.force_limit.validate()
-        if self.position.channel_name == self.force_limit.channel_name:
-            raise ValueError("Execution actuator position and force-limit channels must differ")
-        if self.position.runtime_actuator_name != self.force_limit.runtime_actuator_name:
-            raise ValueError("Execution position and force limit must bind the same actuator")
-        if not self.contact_group_geoms:
-            raise ValueError("Execution end-effector contact groups must be explicit")
-        all_geoms: list[str] = []
-        for group, geoms in self.contact_group_geoms.items():
-            if not group or not geoms or any(not name for name in geoms):
-                raise ValueError("Execution contact group and geom names must be non-empty")
-            all_geoms.extend(geoms)
-        if len(all_geoms) != len(set(all_geoms)):
-            raise ValueError("Execution contact geom names must be unique across semantic groups")
-
-
-@dataclass(frozen=True)
-class ExecutionObjectConfig:
-    object_type: str
-    runtime_body_name: str
-    runtime_free_joint_name: str
-    runtime_collision_geom_names: tuple[str, ...]
-
-    def validate(self) -> None:
-        if not self.object_type or not self.runtime_body_name or not self.runtime_free_joint_name:
-            raise ValueError("Execution object type, body, and free joint must be explicit")
-        if not self.runtime_collision_geom_names or any(
-            not name for name in self.runtime_collision_geom_names
-        ):
-            raise ValueError("Execution object collision geom names must be explicit")
-        if len(self.runtime_collision_geom_names) != len(set(self.runtime_collision_geom_names)):
-            raise ValueError("Execution object collision geom names must be unique")
-
-
-@dataclass(frozen=True)
 class SceneObjectBinding:
     object_id: str
-    object_config: ExecutionObjectConfig
+    object_type: str
     T_world_object: RigidTransform
 
     def validate(self, world_frame: str) -> None:
-        if not self.object_id:
-            raise ValueError("Execution scene object ID must be non-empty")
-        self.object_config.validate()
+        if not self.object_id or not self.object_type:
+            raise ValueError("Execution scene object ID and type must be non-empty")
         self.T_world_object.validate(label=f"Execution object {self.object_id} pose")
         if (
             self.T_world_object.parent_frame != world_frame

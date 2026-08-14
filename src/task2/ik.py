@@ -5,7 +5,8 @@ from enum import Enum
 from math import isfinite
 from typing import Protocol
 
-from .contracts import RigidTransform, RobotModel, RobotState
+from .backends.errors import BackendUnavailableError
+from .contracts import PlanningPolicy, RigidTransform, RobotModel, RobotState
 
 
 class IKErrorCode(str, Enum):
@@ -49,6 +50,28 @@ class IKSolver(Protocol):
         seed_states: tuple[RobotState, ...],
         constraints: IKConstraints,
     ) -> IKResult: ...
+
+
+def create_ik_solver(
+    backend: str,
+    robot_model: RobotModel,
+    planning_policy: PlanningPolicy,
+    backend_config: object,
+    *,
+    random_seed: int,
+) -> IKSolver:
+    if backend == "curobo":
+        from .backends.curobo_ik import CuroboIKConfig, CuroboIKSolver
+
+        if not isinstance(backend_config, CuroboIKConfig):
+            raise BackendUnavailableError("cuRobo IK backend config has the wrong type")
+        return CuroboIKSolver(
+            robot_model,
+            planning_policy,
+            backend_config,
+            random_seed=random_seed,
+        )
+    raise BackendUnavailableError(f"IK backend {backend!r} is not registered")
 
 
 def validate_ik_result(result: IKResult, robot_model: RobotModel) -> None:

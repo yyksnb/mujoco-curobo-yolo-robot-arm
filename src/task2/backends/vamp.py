@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import metadata
-from math import ceil, sqrt
+from math import ceil, isfinite, sqrt
 from time import monotonic
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -15,7 +15,6 @@ from ..contracts import (
     Box,
     Capsule,
     ConvexHull,
-    PlanningConfig,
     PointCloud,
     RigidTransform,
     RobotModel,
@@ -23,6 +22,7 @@ from ..contracts import (
     SceneSnapshot,
     Sphere,
     StaticTriangleMesh,
+    Vector3,
 )
 from ..contracts.geometry import compose, inverse
 from .errors import BackendOperationError, BackendUnavailableError
@@ -35,8 +35,110 @@ class VampPlan:
     iterations: int
 
 
+@dataclass(frozen=True)
+class CollisionSphereGroup:
+    group: str
+    first_sphere: int
+    sphere_count: int
+    translation_per_closed_fraction_m: Vector3
+    sweep_radius_inflation_m: float
+
+    def validate(self, total_spheres: int) -> None:
+        if not self.group or self.first_sphere < 0 or self.sphere_count <= 0:
+            raise ValueError("VAMP collision sphere groups require a name and positive range")
+        if self.first_sphere + self.sphere_count > total_spheres:
+            raise ValueError(f"VAMP collision sphere group {self.group} exceeds sphere count")
+        if len(self.translation_per_closed_fraction_m) != 3 or not all(
+            isfinite(value) for value in self.translation_per_closed_fraction_m
+        ):
+            raise ValueError("VAMP collision sphere translation must be finite xyz")
+        if not isfinite(self.sweep_radius_inflation_m) or self.sweep_radius_inflation_m < 0.0:
+            raise ValueError("VAMP sweep radius inflation must be non-negative")
+
+
+@dataclass(frozen=True)
+class VampConfig:
+    version: str
+    robot_module: str
+    robot_sphere_count: int
+    tool_fraction_midpoint: float
+    maximum_gripper_opening_m: float
+    collision_sphere_groups: tuple[CollisionSphereGroup, ...]
+    range_rad: float
+    max_iterations: int
+    max_samples: int
+
+    def validate(self) -> None:
+        if not self.version or not self.robot_module or self.robot_sphere_count <= 0:
+            raise ValueError("VAMP version, robot module, and sphere count must be explicit")
+        if not 0.0 <= self.tool_fraction_midpoint <= 1.0:
+            raise ValueError("VAMP tool fraction midpoint must lie in [0, 1]")
+        if not isfinite(self.maximum_gripper_opening_m) or self.maximum_gripper_opening_m <= 0.0:
+            raise ValueError("VAMP maximum gripper opening must be positive")
+        if not isfinite(self.range_rad) or self.range_rad <= 0.0:
+            raise ValueError("VAMP range must be positive")
+        if self.max_iterations <= 0 or self.max_samples <= 0:
+            raise ValueError("VAMP search limits must be positive")
+        names = [group.group for group in self.collision_sphere_groups]
+        if len(names) != len(set(names)):
+            raise ValueError("VAMP collision sphere group names must be unique")
+        for group in self.collision_sphere_groups:
+            group.validate(self.robot_sphere_count)
+
+
+def parse_vamp_config(
+    payload: Mapping[str, object],
+    end_effector_profile: Mapping[str, object],
+) -> VampConfig:
+    groups_value = _config_value(
+        end_effector_profile, "collision_sphere_groups", "VAMP end-effector profile"
+    )
+    if not isinstance(groups_value, list):
+        raise ValueError("VAMP collision_sphere_groups must be a list")
+    groups = []
+    for index, value in enumerate(groups_value):
+        item = _config_mapping(value, f"VAMP collision_sphere_groups[{index}]")
+        groups.append(
+            CollisionSphereGroup(
+                _config_string(item, "group", "VAMP collision sphere group"),
+                _config_integer(item, "first_sphere", "VAMP collision sphere group"),
+                _config_integer(item, "sphere_count", "VAMP collision sphere group"),
+                _config_vector(
+                    item,
+                    "translation_per_closed_fraction_m",
+                    "VAMP collision sphere group",
+                ),
+                _config_number(
+                    item,
+                    "sweep_radius_inflation_m",
+                    "VAMP collision sphere group",
+                ),
+            )
+        )
+    result = VampConfig(
+        _config_string(payload, "version", "VAMP"),
+        _config_string(end_effector_profile, "vamp_robot_module", "VAMP profile"),
+        _config_integer(
+            end_effector_profile, "vamp_robot_sphere_count", "VAMP profile"
+        ),
+        _config_number(
+            end_effector_profile, "vamp_tool_fraction_midpoint", "VAMP profile"
+        ),
+        _config_number(
+            end_effector_profile, "maximum_gripper_opening_m", "VAMP profile"
+        ),
+        tuple(groups),
+        _config_number(payload, "range_rad", "VAMP"),
+        _config_integer(payload, "max_iterations", "VAMP"),
+        _config_integer(payload, "max_samples", "VAMP"),
+    )
+    result.validate()
+    return result
+
+
 class VampBackend:
-    def __init__(self, robot_model: RobotModel, planning_config: PlanningConfig):
+    def __init__(self, robot_model: RobotModel, config: VampConfig):
+        config.validate()
         try:
             import vamp
         except (ImportError, OSError) as exc:
@@ -45,25 +147,25 @@ class VampBackend:
             installed = metadata.version("vamp-planner")
         except metadata.PackageNotFoundError as exc:
             raise BackendUnavailableError("vamp-planner package metadata is unavailable") from exc
-        if installed != planning_config.vamp_version:
+        if installed != config.version:
             raise BackendUnavailableError(
-                f"VAMP version {installed} does not match required {planning_config.vamp_version}"
+                f"VAMP version {installed} does not match required {config.version}"
             )
-        if tuple(getattr(vamp, "robots", ())) != (robot_model.vamp_robot_module,):
+        if tuple(getattr(vamp, "robots", ())) != (config.robot_module,):
             raise BackendUnavailableError(
                 "patched VAMP must register only the configured Gen3/SO-101 module"
             )
-        robot = getattr(vamp, robot_model.vamp_robot_module, None)
+        robot = getattr(vamp, config.robot_module, None)
         if robot is None:
             raise BackendUnavailableError(
-                f"VAMP robot module {robot_model.vamp_robot_module} is unavailable"
+                f"VAMP robot module {config.robot_module} is unavailable"
             )
         if tuple(robot.joint_names()) != robot_model.joint_names:
             raise BackendUnavailableError("VAMP joint order does not match RobotModel")
-        if int(robot.n_spheres()) != robot_model.vamp_robot_sphere_count:
+        if int(robot.n_spheres()) != config.robot_sphere_count:
             raise BackendUnavailableError("VAMP collision sphere count does not match RobotModel")
         collision_spheres = tuple(robot.fk(robot_model.default_joint_positions))
-        for group in robot_model.collision_sphere_groups:
+        for group in config.collision_sphere_groups:
             first = group.first_sphere
             last = first + group.sphere_count
             if min(item.r for item in collision_spheres[first:last]) <= group.sweep_radius_inflation_m:
@@ -73,7 +175,7 @@ class VampBackend:
         self._vamp = vamp
         self._robot = robot
         self._model = robot_model
-        self._config = planning_config
+        self._config = config
         self._pointcloud_trees: dict[int, cKDTree] = {}
         self.version = installed
 
@@ -126,9 +228,9 @@ class VampBackend:
         self._validate_configuration_shape(start)
         self._validate_configuration_shape(goal)
         settings = self._vamp.RRTCSettings()
-        settings.max_iterations = self._config.vamp_max_iterations
-        settings.max_samples = self._config.vamp_max_samples
-        settings.range = self._config.vamp_range_rad
+        settings.max_iterations = self._config.max_iterations
+        settings.max_samples = self._config.max_samples
+        settings.range = self._config.range_rad
         rng = self._robot.halton()
         rng.skip(seed)
         started = monotonic()
@@ -191,13 +293,13 @@ class VampBackend:
         opening_m: float,
         T_world_base: RigidTransform,
     ) -> frozenset[str]:
-        if not 0.0 <= opening_m <= self._model.maximum_gripper_opening_m:
+        if not 0.0 <= opening_m <= self._config.maximum_gripper_opening_m:
             raise BackendOperationError("gripper opening is outside RobotModel limits")
         sphere_groups = {}
-        for group in self._model.collision_sphere_groups:
+        for group in self._config.collision_sphere_groups:
             for index in range(group.first_sphere, group.first_sphere + group.sphere_count):
                 sphere_groups[index] = group
-        closed_fraction = 1.0 - opening_m / self._model.maximum_gripper_opening_m
+        closed_fraction = 1.0 - opening_m / self._config.maximum_gripper_opening_m
         tcp_rotation = np.asarray(self.tcp_pose(configuration).matrix, dtype=np.float64)[:3, :3]
         contacts = set()
         geometries_in_base = tuple(
@@ -217,7 +319,7 @@ class VampBackend:
             if group is not None:
                 local_shift = np.asarray(
                     group.translation_per_closed_fraction_m, dtype=np.float64
-                ) * (closed_fraction - self._model.vamp_tool_fraction_midpoint)
+                ) * (closed_fraction - self._config.tool_fraction_midpoint)
                 world_shift = tcp_rotation @ local_shift
                 adjusted = self._vamp.Sphere(
                     [
@@ -426,3 +528,51 @@ def _pointcloud_contact_groups(
         for distance, (sphere, group_name) in zip(distances, robot_spheres)
         if float(distance) <= float(sphere.r) + geometry.point_radius_m
     )
+
+
+def _config_value(payload: Mapping[str, object], key: str, label: str) -> object:
+    if key not in payload:
+        raise ValueError(f"{label}.{key} is required")
+    return payload[key]
+
+
+def _config_mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{label} must be a string-keyed mapping")
+    return value
+
+
+def _config_string(payload: Mapping[str, object], key: str, label: str) -> str:
+    value = _config_value(payload, key, label)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    return value
+
+
+def _config_integer(payload: Mapping[str, object], key: str, label: str) -> int:
+    value = _config_value(payload, key, label)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label}.{key} must be an integer")
+    return value
+
+
+def _config_number(payload: Mapping[str, object], key: str, label: str) -> float:
+    value = _config_value(payload, key, label)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label}.{key} must be a number")
+    result = float(value)
+    if not isfinite(result):
+        raise ValueError(f"{label}.{key} must be finite")
+    return result
+
+
+def _config_vector(
+    payload: Mapping[str, object], key: str, label: str
+) -> Vector3:
+    value = _config_value(payload, key, label)
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError(f"{label}.{key} must contain three numbers")
+    result = tuple(
+        _config_number({"value": item}, "value", f"{label}.{key}") for item in value
+    )
+    return result  # type: ignore[return-value]

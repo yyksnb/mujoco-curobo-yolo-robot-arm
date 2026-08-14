@@ -1,0 +1,17 @@
+pipeline:
+  objects_config: objects.yaml
+  robot_config: robot.yaml
+  planning_config: planning.yaml
+  execution_config: execution.yaml
+  end_effector_profiles:
+    - end_effectors/active_wrist_parallel.yaml
+  planning_backend: vamp_curobo_ruckig
+  execution_adapter: mujoco
+  targeting:
+    continuous_yaw_resolution_rad: 0.7853981633974483
+    maximum_candidates: 8
+  planning_budgets:
+    maximum_candidates: 8
+    seeds_per_candidate: 2
+    stage_timeout_s: 120.0
+    total_timeout_s: 600.0

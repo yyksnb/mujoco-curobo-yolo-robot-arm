@@ -10,7 +10,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
-from task2.composition import load_planning_config
+from task2.config import load_task2_config
 
 
 def main() -> int:
@@ -22,20 +22,17 @@ def main() -> int:
     if tuple(vamp.robots) != ("gen3so101activewrist",):
         raise SystemExit(f"unexpected patched VAMP robot modules: {vamp.robots!r}")
     robot = vamp.gen3so101activewrist
-    composition = load_planning_config(
-        REPOSITORY_ROOT / "configs/task2/robot.yaml",
-        REPOSITORY_ROOT / "configs/task2/planning.yaml",
-        REPOSITORY_ROOT / "configs/task2/objects.yaml",
-        REPOSITORY_ROOT / "configs/task2/end_effectors.yaml",
-    )
-    model = composition.robot_model
+    config = load_task2_config(REPOSITORY_ROOT / "configs/task2/pipeline.yaml")
+    profile = config.end_effectors[0]
+    model = config.robot_model(profile)
+    vamp_profile = config.planning_backends[profile.planning_backend_profile].vamp
     start = list(model.default_joint_positions)
     collision_spheres = robot.fk(start)
-    if len(collision_spheres) != model.vamp_robot_sphere_count:
+    if len(collision_spheres) != vamp_profile.robot_sphere_count:
         raise SystemExit(
             "patched VAMP collision sphere count does not match the formal RobotModel"
         )
-    for group in model.collision_sphere_groups:
+    for group in vamp_profile.collision_sphere_groups:
         first = group.first_sphere
         last = first + group.sphere_count
         if min(item.r for item in collision_spheres[first:last]) <= group.sweep_radius_inflation_m:

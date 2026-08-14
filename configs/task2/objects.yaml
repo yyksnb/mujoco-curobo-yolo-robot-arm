@@ -62,13 +62,6 @@ objects:
         - geometry_id: marker_body_6
           T_object_geometry: {parent_frame: object, child_frame: marker_body_6, translation_m: [0.060, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
           sphere: {radius_m: 0.012}
-    execution:
-      runtime_body_name: target_marker
-      runtime_free_joint_name: target_marker_freejoint
-      runtime_collision_geom_names:
-        - target_marker_collision_000
-        - target_marker_collision_001
-
   masking_tape:
     targeting:
       templates:
@@ -117,24 +110,6 @@ objects:
         - geometry_id: masking_tape_body
           T_object_geometry: {parent_frame: object, child_frame: masking_tape_body, translation_m: [0.0, 0.0, 0.010], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
           sphere: {radius_m: 0.040}
-    execution:
-      runtime_body_name: target_tape
-      runtime_free_joint_name: target_tape_freejoint
-      runtime_collision_geom_names:
-        - target_tape_collision_000
-        - target_tape_collision_001
-        - target_tape_collision_002
-        - target_tape_collision_003
-        - target_tape_collision_004
-        - target_tape_collision_005
-        - target_tape_collision_006
-        - target_tape_collision_007
-        - target_tape_collision_008
-        - target_tape_collision_009
-        - target_tape_collision_010
-        - target_tape_collision_011
-        - target_tape_collision_012
-
   rivet_gun:
     targeting:
       templates:
@@ -225,27 +200,6 @@ objects:
         - geometry_id: rivet_gun_proxy_15
           T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_15, translation_m: [-0.013545968, 0.021005736, 0.010708221], quaternion_wxyz: [0.490589361, 0.511345888, 0.518049333, 0.479032723]}
           box: {size_m: [0.008194848, 0.020551820, 0.036881778]}
-    execution:
-      runtime_body_name: target_rivet_gun
-      runtime_free_joint_name: target_rivet_gun_freejoint
-      runtime_collision_geom_names:
-        - target_rivet_gun_collision_000
-        - target_rivet_gun_collision_001
-        - target_rivet_gun_collision_002
-        - target_rivet_gun_collision_003
-        - target_rivet_gun_collision_004
-        - target_rivet_gun_collision_005
-        - target_rivet_gun_collision_006
-        - target_rivet_gun_collision_007
-        - target_rivet_gun_collision_008
-        - target_rivet_gun_collision_009
-        - target_rivet_gun_collision_010
-        - target_rivet_gun_collision_011
-        - target_rivet_gun_collision_012
-        - target_rivet_gun_collision_013
-        - target_rivet_gun_collision_014
-        - target_rivet_gun_collision_015
-
   standard_part:
     targeting:
       templates:
@@ -291,23 +245,3 @@ objects:
         - geometry_id: standard_part_body
           T_object_geometry: {parent_frame: object, child_frame: standard_part_body, translation_m: [0.0, 0.0, 0.002695], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
           sphere: {radius_m: 0.008}
-    execution:
-      runtime_body_name: target_standard_part
-      runtime_free_joint_name: target_standard_part_freejoint
-      runtime_collision_geom_names:
-        - target_standard_part_collision_000
-        - target_standard_part_collision_001
-        - target_standard_part_collision_002
-        - target_standard_part_collision_003
-        - target_standard_part_collision_004
-        - target_standard_part_collision_005
-        - target_standard_part_collision_006
-        - target_standard_part_collision_007
-        - target_standard_part_collision_008
-        - target_standard_part_collision_009
-        - target_standard_part_collision_010
-        - target_standard_part_collision_011
-        - target_standard_part_collision_012
-        - target_standard_part_collision_013
-        - target_standard_part_collision_014
-        - target_standard_part_collision_015

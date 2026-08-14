@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil, cos, pi, sin
-from pathlib import Path
 from time import monotonic
+from typing import Callable
 
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
 from .backends.errors import BackendOperationError, BackendUnavailableError
-from .backends.ik import create_ik_solver
 from .backends.ruckig import GeometricWaypoint, RuckigTimeParameterizer
 from .backends.vamp import VampBackend
 from .contracts import (
@@ -40,31 +39,45 @@ class _RouteFailure(Exception):
 class _Route:
     waypoints: tuple[GeometricWaypoint, ...]
     events: tuple[tuple[str, TrajectoryStage, int, dict[str, float]], ...]
+    T_world_object_goal: RigidTransform
 
 
-def plan(request: PlanningRequest) -> PlanningResult:
+@dataclass(frozen=True)
+class PlanningDependencies:
+    create_vamp: Callable[[object], VampBackend]
+    create_ik: Callable[[object, int], IKSolver]
+    create_ruckig: Callable[[object], RuckigTimeParameterizer]
+    ik_solution_count: int
+    placement_sample_count: int
+
+    def validate(self) -> None:
+        if self.ik_solution_count <= 0 or self.placement_sample_count <= 0:
+            raise ValueError("Planning backend solution and placement counts must be positive")
+
+
+def plan(
+    request: PlanningRequest,
+    *,
+    dependencies: PlanningDependencies | None = None,
+) -> PlanningResult:
     try:
         request.robot_model.validate()
         request.object_config.validate()
         request.end_effector_config.validate()
-        request.planning_config.validate()
+        request.planning_policy.validate()
+        if dependencies is None:
+            raise ValueError("Planning backend dependencies must be configured explicitly")
+        dependencies.validate()
     except (TypeError, ValueError) as exc:
         return PlanningResult.failed(PlanningErrorCode.INVALID_CONFIG, str(exc))
     try:
         request.validate()
     except (TypeError, ValueError) as exc:
         return PlanningResult.failed(PlanningErrorCode.INVALID_REQUEST, str(exc))
-    project_root = Path(__file__).resolve().parents[2]
     try:
-        vamp = VampBackend(request.robot_model, request.planning_config)
-        ik_solver = create_ik_solver(
-            request.planning_config.ik_backend,
-            request.robot_model,
-            request.planning_config,
-            project_root=project_root,
-            random_seed=request.random_seed,
-        )
-        ruckig = RuckigTimeParameterizer(request.robot_model, request.planning_config)
+        vamp = dependencies.create_vamp(request.robot_model)
+        ik_solver = dependencies.create_ik(request.robot_model, request.random_seed)
+        ruckig = dependencies.create_ruckig(request.robot_model)
     except BackendUnavailableError as exc:
         return PlanningResult.failed(PlanningErrorCode.BACKEND_UNAVAILABLE, str(exc))
     except (RuntimeError, ValueError, OSError) as exc:
@@ -89,7 +102,17 @@ def plan(request: PlanningRequest) -> PlanningResult:
                 )
             attempt_started = monotonic()
             try:
-                route = _build_route(request, candidate, seed, ik_solver, vamp, attempts, started)
+                route = _build_route(
+                    request,
+                    candidate,
+                    seed,
+                    ik_solver,
+                    vamp,
+                    attempts,
+                    started,
+                    dependencies.ik_solution_count,
+                    dependencies.placement_sample_count,
+                )
             except _RouteFailure as failure:
                 last_failure = failure
                 attempts.append(
@@ -152,7 +175,12 @@ def plan(request: PlanningRequest) -> PlanningResult:
         )
         metadata["selected_candidate_id"] = candidate.candidate_id
         metadata["selected_seed"] = selected_seed
-        return PlanningResult.succeeded(trajectory, tuple(attempts), metadata)
+        return PlanningResult.succeeded(
+            trajectory,
+            route.T_world_object_goal,
+            tuple(attempts),
+            metadata,
+        )
     if len(request.candidates) > len(candidates):
         code = PlanningErrorCode.BUDGET_EXHAUSTED
         message = "Planning candidate budget was exhausted before a complete route was found"
@@ -178,6 +206,8 @@ def _build_route(
     vamp: VampBackend,
     attempts: list[PlanningAttempt],
     total_started: float,
+    ik_solution_count: int,
+    placement_sample_count: int,
 ) -> _Route:
     target_geometries = tuple(
         item for item in request.scene.geometries if item.object_id == request.target_object_id
@@ -203,6 +233,7 @@ def _build_route(
         pregrasp_pose,
         request.initial_state,
         TrajectoryStage.PREGRASP,
+        ik_solution_count,
     )
     free_environment = vamp.environment(
         request.scene,
@@ -260,8 +291,8 @@ def _build_route(
     approach_poses = _interpolate_poses(
         pregrasp_pose,
         grasp_pose,
-        request.planning_config.cartesian_translation_step_m,
-        request.planning_config.cartesian_rotation_step_rad,
+        request.planning_policy.cartesian_translation_step_m,
+        request.planning_policy.cartesian_rotation_step_rad,
     )[1:]
     approach_states = _continuous_ik(
         request,
@@ -274,6 +305,7 @@ def _build_route(
         environment_geometries,
         TrajectoryStage.APPROACH,
         total_started,
+        ik_solution_count,
     )
     for index, state in enumerate(approach_states):
         waypoints.append(
@@ -344,14 +376,14 @@ def _build_route(
         inverse(request.T_world_base),
         _translate_world_z(
             reframe(candidate.T_world_tcp, child_frame=request.robot_model.tcp_frame),
-            request.planning_config.lift_distance_m,
+            request.planning_policy.lift_distance_m,
         ),
     )
     lift_poses = _interpolate_poses(
         grasp_pose,
         lift_pose,
-        request.planning_config.cartesian_translation_step_m,
-        request.planning_config.cartesian_rotation_step_rad,
+        request.planning_policy.cartesian_translation_step_m,
+        request.planning_policy.cartesian_rotation_step_rad,
     )[1:]
     lift_states = _continuous_ik(
         request,
@@ -364,6 +396,7 @@ def _build_route(
         environment_geometries,
         TrajectoryStage.LIFT,
         total_started,
+        ik_solution_count,
     )
     waypoints.extend(
         GeometricWaypoint(TrajectoryStage.LIFT, state.positions_rad, dict(channels))
@@ -379,10 +412,11 @@ def _build_route(
     )
     egress_start = lift_states[-1].positions_rad
     placement_failure: _RouteFailure | None = None
-    for placement_pose in _sample_placements(request.placement_goal, request.planning_config.placement_sample_count):
+    for placement_pose in _sample_placements(request.placement_goal, placement_sample_count):
+        world_placement_pose = placement_pose
         preplace_pose = compose(
             inverse(request.T_world_base),
-            _translate_world_z(placement_pose, request.planning_config.preplace_offset_m),
+            _translate_world_z(placement_pose, request.planning_policy.preplace_offset_m),
         )
         placement_pose = compose(inverse(request.T_world_base), placement_pose)
         try:
@@ -394,6 +428,7 @@ def _build_route(
                 RobotState(request.robot_model.joint_names, egress_start),
                 strict_loaded_environment,
                 TrajectoryStage.EGRESS,
+                ik_solution_count,
             )
             place_state = _first_valid_ik(
                 request,
@@ -403,6 +438,7 @@ def _build_route(
                 preplace,
                 strict_loaded_environment,
                 TrajectoryStage.PLACE,
+                ik_solution_count,
             )
             egress_plan = _vamp_stage(
                 request,
@@ -473,12 +509,21 @@ def _build_route(
             request.end_effector_config.open_position_m
         )
         release_index = len(waypoints) - 1
+        T_world_object = compose(
+            world_placement_pose,
+            reframe(
+                candidate.T_tcp_object,
+                parent_frame=world_placement_pose.child_frame,
+                child_frame="object",
+            ),
+        )
         return _Route(
             tuple(waypoints),
             (
                 ("grip", TrajectoryStage.GRASP, grip_index, dict(channels)),
                 ("release", TrajectoryStage.PLACE, release_index, released_channels),
             ),
+            T_world_object,
         )
     if placement_failure is not None:
         raise placement_failure
@@ -500,6 +545,7 @@ def _continuous_ik(
     environment_geometries: tuple[SceneGeometry, ...],
     stage: TrajectoryStage,
     total_started: float,
+    ik_solution_count: int,
 ) -> tuple[RobotState, ...]:
     states = []
     current = seed_state
@@ -518,7 +564,9 @@ def _continuous_ik(
     )
     started = monotonic()
     for index, pose in enumerate(poses):
-        solutions = _solve_ik(ik_solver, request, pose, current, stage)
+        solutions = _solve_ik(
+            ik_solver, request, pose, current, stage, ik_solution_count
+        )
         selected = None
         for state in solutions:
             if not _has_joint_margin(state, request):
@@ -624,14 +672,15 @@ def _solve_ik(
     pose: RigidTransform,
     seed_state: RobotState,
     stage: TrajectoryStage,
+    maximum_solutions: int,
 ) -> tuple[RobotState, ...]:
     result = solver.solve(
         (pose,),
         (seed_state,),
         IKConstraints(
-            request.planning_config.ik_position_tolerance_m,
-            request.planning_config.ik_orientation_tolerance_rad,
-            request.planning_config.ik_solution_count,
+            request.planning_policy.ik_position_tolerance_m,
+            request.planning_policy.ik_orientation_tolerance_rad,
+            maximum_solutions,
         ),
     )
     if result.error_code == IKErrorCode.BACKEND_UNAVAILABLE:
@@ -655,8 +704,11 @@ def _first_valid_ik(
     seed_state: RobotState,
     environment,
     stage: TrajectoryStage,
+    maximum_solutions: int,
 ) -> RobotState:
-    for state in _solve_ik(solver, request, pose, seed_state, stage):
+    for state in _solve_ik(
+        solver, request, pose, seed_state, stage, maximum_solutions
+    ):
         if _has_joint_margin(state, request) and vamp.configuration_valid(
             state.positions_rad, environment
         ):
@@ -801,7 +853,7 @@ def _path_has_forbidden_attachment_contact(
 
 
 def _has_joint_margin(state: RobotState, request: PlanningRequest) -> bool:
-    margin = request.planning_config.joint_limit_margin_rad
+    margin = request.planning_policy.joint_limit_margin_rad
     return all(
         limits.minimum_position_rad + margin <= value <= limits.maximum_position_rad - margin
         for value, limits in zip(state.positions_rad, request.robot_model.joint_limits)
@@ -935,7 +987,6 @@ def _metadata(
     ruckig_version: str,
 ) -> dict[str, object]:
     return {
-        "config_hash": request.planning_config.config_hash,
         "backend_versions": {
             "vamp": vamp_version,
             "ik": f"curobo-{ik_version}",
@@ -949,8 +1000,7 @@ def _metadata(
             "total_timeout_s": request.budgets.total_timeout_s,
         },
         "parameters": {
-            "cartesian_translation_step_m": request.planning_config.cartesian_translation_step_m,
-            "cartesian_rotation_step_rad": request.planning_config.cartesian_rotation_step_rad,
-            "vamp_range_rad": request.planning_config.vamp_range_rad,
+            "cartesian_translation_step_m": request.planning_policy.cartesian_translation_step_m,
+            "cartesian_rotation_step_rad": request.planning_policy.cartesian_rotation_step_rad,
         },
     }

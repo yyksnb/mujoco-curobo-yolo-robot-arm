@@ -1,192 +1,378 @@
 from __future__ import annotations
 
-import ast
 from dataclasses import replace
-from math import pi
+import json
 from pathlib import Path
 
-import pytest
-
-from task2.composition import (
-    get_end_effector_targeting_config,
-    get_targeting_object_config,
-    load_targeting_config,
+from task2 import Task2Pipeline
+from task2.artifacts import Task2Artifacts
+from task2.config import load_task2_config
+from task2.contracts import (
+    AllowedContact,
+    Box,
+    DynamicsDiagnostics,
+    ExecutionResult,
+    ExecutionStatus,
+    PlacementGoal,
+    PlacementGoalKind,
+    PlannedTrajectory,
+    PlanningResult,
+    RigidTransform,
+    RobotState,
+    SceneGeometry,
+    SceneSnapshot,
+    Sphere,
+    Task2Request,
+    TrajectoryEvent,
+    TrajectoryKnot,
+    TrajectoryPhase,
+    TrajectoryPolynomialSection,
+    TrajectorySegment,
+    TrajectoryStage,
 )
-from task2.contracts import RigidTransform, TargetingErrorCode, TargetingRequest, compose
+from task2.runtime import ActivatedEndEffector
 from task2.targeting import target
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-OBJECTS_CONFIG = REPO_ROOT / "configs/task2/objects.yaml"
-END_EFFECTORS_CONFIG = REPO_ROOT / "configs/task2/end_effectors.yaml"
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = load_task2_config(ROOT / "configs/task2/pipeline.yaml")
+PROFILE = CONFIG.end_effectors[0]
 
 
-def _world_pose(x_m: float = 0.4) -> RigidTransform:
+def _pose(parent: str, child: str, xyz=(0.0, 0.0, 0.0)) -> RigidTransform:
     return RigidTransform(
-        parent_frame="world",
-        child_frame="object",
-        matrix=(
-            (1.0, 0.0, 0.0, x_m),
-            (0.0, 1.0, 0.0, 0.1),
-            (0.0, 0.0, 1.0, 0.02),
+        parent,
+        child,
+        (
+            (1.0, 0.0, 0.0, xyz[0]),
+            (0.0, 1.0, 0.0, xyz[1]),
+            (0.0, 0.0, 1.0, xyz[2]),
             (0.0, 0.0, 0.0, 1.0),
         ),
     )
 
 
-def _request(object_type: str, *, x_m: float = 0.4) -> TargetingRequest:
-    config = load_targeting_config(OBJECTS_CONFIG, END_EFFECTORS_CONFIG)
-    return TargetingRequest(
-        object_type=object_type,
-        T_world_object=_world_pose(x_m),
-        object_config=get_targeting_object_config(config, object_type),
-        end_effector_config=get_end_effector_targeting_config(config, "parallel_gripper"),
-        continuous_yaw_resolution_rad=pi / 2.0,
-        maximum_candidates=16,
+def _request(request_id: str = "pipeline_contract") -> Task2Request:
+    object_pose = _pose("world", "object", (0.5, 0.0, 0.1))
+    scene = SceneSnapshot(
+        "pipeline_scene",
+        "world",
+        (
+            SceneGeometry(
+                "target",
+                "target_object",
+                "target",
+                _pose("world", "target", (0.5, 0.0, 0.1)),
+                Sphere(0.01),
+            ),
+            SceneGeometry(
+                "support",
+                "tank",
+                "source_support",
+                _pose("world", "support", (0.0, 0.0, -0.1)),
+                Box((2.0, 2.0, 0.1)),
+            ),
+        ),
+        (AllowedContact("target", "source_support"),),
+    )
+    return Task2Request(
+        request_id,
+        "marker",
+        object_pose,
+        RobotState(CONFIG.base_robot.joint_names, CONFIG.base_robot.default_positions),
+        _pose("world", CONFIG.base_robot.base_frame),
+        scene,
+        "target_object",
+        "source_support",
+        PlacementGoal(
+            "place",
+            PlacementGoalKind.EXACT,
+            _pose("world", PROFILE.tcp_frame, (0.6, 0.0, 0.6)),
+        ),
+        7,
     )
 
 
-def test_four_calibrated_templates_are_deterministic_and_executor_compatible() -> None:
-    expected = {
-        "marker": (2, 0.013014206, 0.75),
-        "masking_tape": (4, 0.074333332, 2.0),
-        "rivet_gun": (2, 0.011946974, 24.0),
-        "standard_part": (2, 0.002745694, 0.30),
+def _trajectory(joint_names: tuple[str, ...]) -> PlannedTrajectory:
+    channels = {
+        "parallel_gripper.opening_m": 0.02,
+        "parallel_gripper.force_limit_n": 1.0,
     }
-
-    for object_type, (candidate_count, target_opening_m, grip_force_limit_n) in expected.items():
-        request = _request(object_type)
-        result = target(request)
-        repeated = target(request)
-        moved = target(replace(request, T_world_object=_world_pose(0.7)))
-
-        assert result.success
-        assert result == repeated
-        assert len(result.candidates) == candidate_count
-        calibrated_translation = tuple(
-            request.object_config.templates[0].T_object_tcp.matrix[row][3] for row in range(3)
+    knots = []
+    segments = []
+    phases = []
+    dof = len(joint_names)
+    for index in range(7):
+        stage = tuple(TrajectoryStage)[min(index, 5)]
+        knots.append(
+            TrajectoryKnot(stage, index * 0.1, (0.0,) * dof, (0.0,) * dof, (0.0,) * dof, channels)
         )
-        assert [item.candidate_id for item in result.candidates] == [
-            item.candidate_id for item in moved.candidates
-        ]
-        for candidate in result.candidates:
-            command = candidate.grasp_command
-            capabilities = request.end_effector_config.capabilities
-            assert command.target_opening_m == pytest.approx(target_opening_m)
-            assert command.grip_force_limit_n == pytest.approx(grip_force_limit_n)
-            assert command.calibration == "simulation_nominal"
-            assert capabilities.opening_command_range_m[0] <= command.target_opening_m
-            assert command.pregrasp_opening_m <= capabilities.opening_command_range_m[1]
-            assert capabilities.grip_force_limit_range_n[0] <= command.grip_force_limit_n
-            assert command.grip_force_limit_n <= capabilities.grip_force_limit_range_n[1]
-            assert command.closing_speed_m_s <= capabilities.maximum_closing_speed_m_s
-            assert set(candidate.expected_contacts) <= set(capabilities.contact_groups)
-            assert candidate.quality_score == candidate.score_components.template_priority
-            assert candidate.score_components.to_dict() == {"template_priority": 1.0}
-            assert tuple(candidate.T_object_tcp.matrix[row][3] for row in range(3)) == pytest.approx(
-                calibrated_translation
+    for index, stage in enumerate(TrajectoryStage):
+        segments.append(
+            TrajectorySegment(
+                stage,
+                index * 0.1,
+                0.1,
+                index,
+                index + 1,
+                (
+                    TrajectoryPolynomialSection(
+                        0.0,
+                        0.1,
+                        tuple((0.0, 0.0, 0.0, 0.0) for _ in joint_names),
+                    ),
+                ),
+                channels,
+                channels,
             )
-            assert compose(request.T_world_object, candidate.T_object_tcp) == candidate.T_world_tcp
-            identity = compose(candidate.T_object_tcp, candidate.T_tcp_object).matrix
-            expected_identity = (
-                (1.0, 0.0, 0.0, 0.0),
-                (0.0, 1.0, 0.0, 0.0),
-                (0.0, 0.0, 1.0, 0.0),
-                (0.0, 0.0, 0.0, 1.0),
-            )
-            assert all(
-                identity[row][column] == pytest.approx(expected_identity[row][column], abs=1e-8)
-                for row in range(4)
-                for column in range(4)
-            )
-
-
-def test_continuous_yaw_is_lower_inclusive_upper_exclusive() -> None:
-    result = target(_request("masking_tape"))
-    limited = target(
-        replace(
-            _request("masking_tape"),
-            continuous_yaw_resolution_rad=1e-12,
-            maximum_candidates=3,
         )
+        phases.append(
+            TrajectoryPhase(stage, index, index + 1, index, index, index * 0.1, (index + 1) * 0.1)
+        )
+    return PlannedTrajectory(
+        joint_names,
+        tuple(knots),
+        tuple(segments),
+        tuple(phases),
+        (
+            TrajectoryEvent("grip", TrajectoryStage.GRASP, 0.3, channels),
+            TrajectoryEvent("release", TrajectoryStage.PLACE, 0.6, channels),
+        ),
     )
 
+
+class _UnusedAdapter:
+    adapter_id = "fake_pipeline_adapter"
+
+
+class _FakeRuntime:
+    def activate(self, profile, base_robot_state):
+        model = CONFIG.robot_model(profile)
+        state = RobotState(model.joint_names, model.default_joint_positions)
+        return ActivatedEndEffector(profile, model, state, _UnusedAdapter)
+
+
+def _fake_plan(request):
+    assert request.candidates
+    return PlanningResult.succeeded(
+        _trajectory(request.robot_model.joint_names),
+        _pose("world", "object", (0.6, 0.0, 0.6)),
+        (),
+        {},
+    )
+
+
+def _fake_execute(request):
+    Path(request.control_log_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(request.control_log_path).write_text("planned_time_s\n", encoding="utf-8")
+    Path(request.diagnostic_log_path).write_text("{}\n", encoding="utf-8")
+    return ExecutionResult(
+        ExecutionStatus.COMPLETED,
+        None,
+        "fake execution completed",
+        DynamicsDiagnostics.not_evaluated("fake pipeline executor has no dynamics"),
+        0.6,
+        0.6,
+        7,
+        1,
+        1,
+        0.01,
+    )
+
+
+def _pipeline(tmp_path: Path, *, targeting_stage=target) -> Task2Pipeline:
+    return Task2Pipeline(
+        CONFIG,
+        tmp_path,
+        targeting_stage,
+        _fake_plan,
+        _fake_execute,
+        _FakeRuntime(),
+    )
+
+
+def test_pipeline_hands_off_only_through_formal_artifacts(tmp_path: Path) -> None:
+    result = _pipeline(tmp_path).run(_request())
     assert result.success
-    yaws = [candidate.symmetry_yaw_rad for candidate in result.candidates]
-    assert yaws == pytest.approx([-pi, -pi / 2.0, 0.0, pi / 2.0])
-    assert len(yaws) == len(set(yaws))
-    assert all(yaw < pi for yaw in yaws)
-    assert limited.success
-    assert len(limited.candidates) == 3
-    assert len({item.candidate_id for item in limited.candidates}) == 3
+    assert result.completed_stages == ("setup", "targeting", "planning", "execution")
+    run_dir = tmp_path / "pipeline_contract"
+    assert set(result.artifact_paths) == {
+        "request",
+        "setup",
+        "targeting",
+        "planning",
+        "execution",
+        "control_log",
+        "dynamics_log",
+    }
+    assert not list(run_dir.glob("*/request.json"))
+    assert not json.loads((run_dir / "result.json").read_text()).get("candidates")
+    assert "trajectory" not in json.loads((run_dir / "result.json").read_text())
+    planning = json.loads((run_dir / "planning/result.json").read_text())
+    assert planning["metadata"] == {}
+    assert planning["T_world_object_goal"]["parent_frame"] == "world"
+    assert planning["T_world_object_goal"]["child_frame"] == "object"
+    execution = json.loads((run_dir / "execution/result.json").read_text())
+    assert execution["execution_status"] == "completed"
+    assert not execution["dynamics_diagnostics"]["success"]
 
 
-def test_targeting_failure_codes_preserve_public_failure_semantics() -> None:
-    request = _request("marker")
+def test_cli_steps_resume_from_formal_artifacts(tmp_path: Path) -> None:
+    pipeline = _pipeline(tmp_path)
+    request = _request("cli_steps")
+    targeting = pipeline._run_cli_step("targeting", request=request)
+    assert targeting.completed_stages == ("setup", "targeting")
 
-    unknown = target(replace(request, object_type="unknown_part"))
-    incompatible = target(
-        replace(
-            request,
-            end_effector_config=replace(request.end_effector_config, family="vacuum"),
+    run_dir = tmp_path / request.request_id
+    planning = pipeline._run_cli_step("planning", run_dir=run_dir)
+    assert planning.completed_stages == ("setup", "targeting", "planning")
+
+    execution = pipeline._run_cli_step("execution", run_dir=run_dir)
+    assert execution.success
+    assert execution.completed_stages == (
+        "setup",
+        "targeting",
+        "planning",
+        "execution",
+    )
+
+
+def test_failed_stage_stops_and_removes_stale_downstream_artifacts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "pipeline_contract"
+    (run_dir / "planning").mkdir(parents=True)
+    (run_dir / "planning/result.json").write_text("{}", encoding="utf-8")
+
+    def fail_target(request):
+        from task2.contracts import TargetingErrorCode, TargetingResult
+
+        return TargetingResult.failed(TargetingErrorCode.NO_CANDIDATES, "no candidates")
+
+    result = _pipeline(tmp_path, targeting_stage=fail_target).run(_request())
+    assert not result.success
+    assert result.failed_stage == "targeting"
+    assert result.error_code.value == "no_candidates"
+    assert (run_dir / "targeting/result.json").is_file()
+    assert not (run_dir / "planning/result.json").exists()
+    assert not (run_dir / "execution/result.json").exists()
+    persisted = Task2Artifacts(tmp_path, "pipeline_contract").read_result()
+    assert persisted == result
+
+
+def test_pipeline_boundary_failure_uses_single_pipeline_error_code(tmp_path: Path) -> None:
+    request = _request("invalid_profile")
+    result = _pipeline(tmp_path).run(
+        Task2Request(
+            request.request_id,
+            request.object_type,
+            request.T_world_object,
+            request.base_robot_state,
+            request.T_world_base,
+            request.scene,
+            request.target_object_id,
+            request.source_support_group,
+            request.placement_goal,
+            request.random_seed,
+            "vacuum",
         )
     )
-    invalid_config = target(replace(request, maximum_candidates=0))
-    invalid_pose = target(
-        replace(
-            request,
-            T_world_object=replace(request.T_world_object, child_frame="detected_object"),
-        )
+    assert not result.success
+    assert result.failed_stage == "setup"
+    assert result.error_code.value == "pipeline_failed"
+
+
+def test_setup_failure_removes_previous_run_artifacts(tmp_path: Path) -> None:
+    pipeline = _pipeline(tmp_path)
+    request = _request("reused_request")
+    assert pipeline.run(request).success
+
+    result = pipeline.run(replace(request, end_effector_profile_id="vacuum"))
+    assert not result.success
+    assert result.failed_stage == "setup"
+    assert result.error_code.value == "pipeline_failed"
+    assert result.artifact_paths == {}
+    run_dir = tmp_path / request.request_id
+    assert {
+        str(path.relative_to(run_dir))
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    } == {"result.json"}
+
+
+def test_invalid_request_id_returns_pipeline_failure(tmp_path: Path) -> None:
+    result = _pipeline(tmp_path).run(
+        replace(_request(), request_id="../outside_output_root")
     )
-    invalid_resolution = target(replace(request, continuous_yaw_resolution_rad=1e-30))
-
-    assert unknown.error_code is TargetingErrorCode.UNKNOWN_OBJECT
-    assert incompatible.error_code is TargetingErrorCode.INCOMPATIBLE_END_EFFECTOR
-    assert invalid_config.error_code is TargetingErrorCode.INVALID_CONFIGURATION
-    assert invalid_pose.error_code is TargetingErrorCode.INVALID_INPUT_POSE
-    assert invalid_resolution.error_code is TargetingErrorCode.INVALID_CONFIGURATION
-    assert not unknown.candidates
-    assert not incompatible.candidates
-    assert not invalid_config.candidates
-    assert not invalid_pose.candidates
-    assert not invalid_resolution.candidates
+    assert not result.success
+    assert result.failed_stage == "setup"
+    assert result.error_code.value == "pipeline_failed"
+    assert result.artifact_paths == {}
 
 
-def test_targeting_module_does_not_cross_runtime_module_boundaries() -> None:
-    targeting_path = REPO_ROOT / "src/task2/targeting.py"
-    tree = ast.parse(targeting_path.read_text(encoding="utf-8"))
-    imported_modules = {
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    } | {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
-    forbidden_roots = (
-        "task1",
-        "robot_arm_pipeline",
-        "task2.planning",
-        "task2.execution",
-        "mujoco",
-        "curobo",
-        "ruckig",
-        "torch",
-        "vamp",
+def test_cli_missing_upstream_artifact_returns_pipeline_failure(tmp_path: Path) -> None:
+    run_dir = tmp_path / "missing_upstream"
+    result = _pipeline(tmp_path)._run_cli_step("planning", run_dir=run_dir)
+    assert not result.success
+    assert result.failed_stage == "planning"
+    assert result.error_code.value == "pipeline_failed"
+    assert result.completed_stages == ()
+    assert (run_dir / "result.json").is_file()
+
+
+def test_cli_upstream_failure_removes_stale_downstream_artifacts(tmp_path: Path) -> None:
+    pipeline = _pipeline(tmp_path)
+    cases = (
+        (
+            "planning",
+            "setup.json",
+            {
+                "planning/result.json",
+                "execution/result.json",
+                "execution/control.csv",
+                "execution/dynamics.jsonl",
+            },
+            {"request", "setup", "targeting"},
+        ),
+        (
+            "execution",
+            "request.json",
+            {
+                "execution/result.json",
+                "execution/control.csv",
+                "execution/dynamics.jsonl",
+            },
+            {"request", "setup", "targeting", "planning"},
+        ),
     )
+    for step, corrupted, removed, expected_artifacts in cases:
+        request = _request(f"corrupt_upstream_{step}")
+        assert pipeline.run(request).success
+        run_dir = tmp_path / request.request_id
+        (run_dir / corrupted).write_text("{", encoding="utf-8")
 
-    assert not any(
-        module == root or module.startswith(f"{root}.")
-        for module in imported_modules
-        for root in forbidden_roots
-    )
-    assert set(TargetingRequest.__dataclass_fields__) == {
-        "object_type",
-        "T_world_object",
-        "object_config",
-        "end_effector_config",
-        "continuous_yaw_resolution_rad",
-        "maximum_candidates",
-    }
+        result = pipeline._run_cli_step(step, run_dir=run_dir)
+        assert not result.success
+        assert result.failed_stage == step
+        assert result.error_code.value == "pipeline_failed"
+        assert set(result.artifact_paths) == expected_artifacts
+        assert all(not (run_dir / relative).exists() for relative in removed)
+        assert (run_dir / "result.json").is_file()
+
+
+def test_result_write_failure_overrides_stage_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from task2.contracts import TargetingErrorCode, TargetingResult
+
+    def fail_target(request):
+        return TargetingResult.failed(TargetingErrorCode.NO_CANDIDATES, "no candidates")
+
+    def fail_write_result(self, result):
+        raise OSError("result storage unavailable")
+
+    monkeypatch.setattr(Task2Artifacts, "write_result", fail_write_result)
+    result = _pipeline(tmp_path, targeting_stage=fail_target).run(_request())
+    assert not result.success
+    assert result.failed_stage == "result"
+    assert result.error_code.value == "pipeline_failed"
+    assert "result storage unavailable" in result.message
+    assert not (tmp_path / "pipeline_contract/result.json").exists()

@@ -1,19 +1,58 @@
 execution:
-  adapter_id: mujoco
-  model_asset: examples/mujoco/task2_execution.xml
-  tcp_frame: task2_tool_tcp
-  tcp_site_name: robot_task2_tool_tcp
-  joint_bindings:
-    - {joint_name: joint_1, runtime_joint_name: robot_joint_1, runtime_actuator_name: robot_joint_1}
-    - {joint_name: joint_2, runtime_joint_name: robot_joint_2, runtime_actuator_name: robot_joint_2}
-    - {joint_name: joint_3, runtime_joint_name: robot_joint_3, runtime_actuator_name: robot_joint_3}
-    - {joint_name: joint_4, runtime_joint_name: robot_joint_4, runtime_actuator_name: robot_joint_4}
-    - {joint_name: joint_5, runtime_joint_name: robot_joint_5, runtime_actuator_name: robot_joint_5}
-    - {joint_name: joint_6, runtime_joint_name: robot_joint_6, runtime_actuator_name: robot_joint_6}
-    - {joint_name: joint_7, runtime_joint_name: robot_joint_7, runtime_actuator_name: robot_joint_7}
-    - {joint_name: task2_tool_wrist_pitch, runtime_joint_name: robot_task2_tool_wrist_pitch, runtime_actuator_name: robot_task2_tool_wrist_pitch}
-  scene_object_body_names:
-    - target_marker
-    - target_rivet_gun
-    - target_standard_part
-    - target_tape
+  control_frequency_hz: 100.0
+  control_log_frequency_hz: 10.0
+  diagnostic_log_frequency_hz: 10.0
+  diagnostics:
+    world_frame: world
+    source_support_geom_names: [tank_bottom_collision]
+    minimum_departure_height_m: 0.08
+    target_position_tolerance_m: 0.035
+    post_release_observation_s: 2.0
+    settled_linear_speed_m_s: 0.03
+    settled_angular_speed_rad_s: 0.20
+adapters:
+  mujoco:
+    profiles:
+      active_wrist_parallel:
+        model_asset: ../../examples/mujoco/task2_execution.xml
+        tcp_frame: task2_tool_tcp
+        tcp_site_name: robot_task2_tool_tcp
+        joint_bindings:
+          - {joint_name: joint_1, runtime_joint_name: robot_joint_1, runtime_actuator_name: robot_joint_1}
+          - {joint_name: joint_2, runtime_joint_name: robot_joint_2, runtime_actuator_name: robot_joint_2}
+          - {joint_name: joint_3, runtime_joint_name: robot_joint_3, runtime_actuator_name: robot_joint_3}
+          - {joint_name: joint_4, runtime_joint_name: robot_joint_4, runtime_actuator_name: robot_joint_4}
+          - {joint_name: joint_5, runtime_joint_name: robot_joint_5, runtime_actuator_name: robot_joint_5}
+          - {joint_name: joint_6, runtime_joint_name: robot_joint_6, runtime_actuator_name: robot_joint_6}
+          - {joint_name: joint_7, runtime_joint_name: robot_joint_7, runtime_actuator_name: robot_joint_7}
+          - {joint_name: task2_tool_wrist_pitch, runtime_joint_name: robot_task2_tool_wrist_pitch, runtime_actuator_name: robot_task2_tool_wrist_pitch}
+        position:
+          channel_name: parallel_gripper.opening_m
+          runtime_actuator_name: robot_task2_tool_grip
+          command_scale: 0.5
+          command_offset: 0.0
+          state_joint_names: [robot_task2_tool_left_jaw_joint, robot_task2_tool_right_jaw_joint]
+        force_limit:
+          channel_name: parallel_gripper.force_limit_n
+          runtime_actuator_name: robot_task2_tool_grip
+          command_scale: 1.0
+        contact_group_geoms:
+          left_pad: [robot_task2_tool_left_pad_collision]
+          right_pad: [robot_task2_tool_right_pad_collision]
+    objects:
+      marker:
+        runtime_body_name: target_marker
+        runtime_free_joint_name: target_marker_freejoint
+        runtime_collision_geom_names: [target_marker_collision_000, target_marker_collision_001]
+      masking_tape:
+        runtime_body_name: target_tape
+        runtime_free_joint_name: target_tape_freejoint
+        runtime_collision_geom_names: [target_tape_collision_000, target_tape_collision_001, target_tape_collision_002, target_tape_collision_003, target_tape_collision_004, target_tape_collision_005, target_tape_collision_006, target_tape_collision_007, target_tape_collision_008, target_tape_collision_009, target_tape_collision_010, target_tape_collision_011, target_tape_collision_012]
+      rivet_gun:
+        runtime_body_name: target_rivet_gun
+        runtime_free_joint_name: target_rivet_gun_freejoint
+        runtime_collision_geom_names: [target_rivet_gun_collision_000, target_rivet_gun_collision_001, target_rivet_gun_collision_002, target_rivet_gun_collision_003, target_rivet_gun_collision_004, target_rivet_gun_collision_005, target_rivet_gun_collision_006, target_rivet_gun_collision_007, target_rivet_gun_collision_008, target_rivet_gun_collision_009, target_rivet_gun_collision_010, target_rivet_gun_collision_011, target_rivet_gun_collision_012, target_rivet_gun_collision_013, target_rivet_gun_collision_014, target_rivet_gun_collision_015]
+      standard_part:
+        runtime_body_name: target_standard_part
+        runtime_free_joint_name: target_standard_part_freejoint
+        runtime_collision_geom_names: [target_standard_part_collision_000, target_standard_part_collision_001, target_standard_part_collision_002, target_standard_part_collision_003, target_standard_part_collision_004, target_standard_part_collision_005, target_standard_part_collision_006, target_standard_part_collision_007, target_standard_part_collision_008, target_standard_part_collision_009, target_standard_part_collision_010, target_standard_part_collision_011, target_standard_part_collision_012, target_standard_part_collision_013, target_standard_part_collision_014, target_standard_part_collision_015]

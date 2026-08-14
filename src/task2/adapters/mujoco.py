@@ -1,21 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from math import isfinite, sqrt
 from pathlib import Path
 from struct import pack, unpack
-from typing import Any
+from typing import Any, Mapping
 
 from ..contracts.execution import (
     BodyKinematicState,
     ContactRecord,
     ControlCommand,
-    ExecutionEndEffectorConfig,
-    ExecutionObjectConfig,
-    ExecutionRobotConfig,
     RuntimeObservation,
     SceneObjectBinding,
 )
 from ..contracts.geometry import RigidTransform
+from ..contracts.planning import RobotModel, RobotState
 from .errors import (
     AdapterUnavailableError,
     ControlInterfaceError,
@@ -24,21 +23,288 @@ from .errors import (
 )
 
 
+
+@dataclass(frozen=True)
+class RuntimeJointBinding:
+    joint_name: str
+    runtime_joint_name: str
+    runtime_actuator_name: str
+
+    def validate(self) -> None:
+        if not self.joint_name or not self.runtime_joint_name or not self.runtime_actuator_name:
+            raise ValueError("runtime joint binding names must be non-empty")
+
+
+@dataclass(frozen=True)
+class MuJoCoRobotConfig:
+    model_asset: Path
+    tcp_frame: str
+    tcp_site_name: str
+    joint_bindings: tuple[RuntimeJointBinding, ...]
+    scene_object_body_names: tuple[str, ...]
+
+    def validate(self) -> None:
+        if not self.model_asset.is_file() or not self.tcp_frame or not self.tcp_site_name:
+            raise ValueError("MuJoCo model asset and TCP site must be explicit")
+        if not self.joint_bindings:
+            raise ValueError("MuJoCo robot config requires joint bindings")
+        names = [item.joint_name for item in self.joint_bindings]
+        runtime_joints = [item.runtime_joint_name for item in self.joint_bindings]
+        actuators = [item.runtime_actuator_name for item in self.joint_bindings]
+        if any(len(values) != len(set(values)) for values in (names, runtime_joints, actuators)):
+            raise ValueError("MuJoCo robot joint and actuator bindings must be unique")
+        for item in self.joint_bindings:
+            item.validate()
+        if not self.scene_object_body_names or len(self.scene_object_body_names) != len(
+            set(self.scene_object_body_names)
+        ):
+            raise ValueError("MuJoCo scene object body names must be unique and non-empty")
+
+
+@dataclass(frozen=True)
+class ActuatorPositionBinding:
+    channel_name: str
+    runtime_actuator_name: str
+    command_scale: float
+    command_offset: float
+    state_joint_names: tuple[str, ...]
+
+    def validate(self) -> None:
+        if not self.channel_name or not self.runtime_actuator_name or not self.state_joint_names:
+            raise ValueError("MuJoCo actuator position binding must be explicit")
+        if len(self.state_joint_names) != len(set(self.state_joint_names)):
+            raise ValueError("MuJoCo actuator state joints must be unique")
+        if not all(isfinite(value) for value in (self.command_scale, self.command_offset)):
+            raise ValueError("MuJoCo actuator position mapping must be finite")
+        if self.command_scale == 0.0:
+            raise ValueError("MuJoCo actuator position scale must be non-zero")
+
+
+@dataclass(frozen=True)
+class ActuatorForceLimitBinding:
+    channel_name: str
+    runtime_actuator_name: str
+    command_scale: float
+
+    def validate(self) -> None:
+        if not self.channel_name or not self.runtime_actuator_name:
+            raise ValueError("MuJoCo force-limit binding must be explicit")
+        if not isfinite(self.command_scale) or self.command_scale <= 0.0:
+            raise ValueError("MuJoCo force-limit scale must be positive")
+
+
+@dataclass(frozen=True)
+class MuJoCoEndEffectorConfig:
+    profile_id: str
+    position: ActuatorPositionBinding
+    force_limit: ActuatorForceLimitBinding
+    contact_group_geoms: Mapping[str, tuple[str, ...]]
+
+    def validate(self) -> None:
+        if not self.profile_id:
+            raise ValueError("MuJoCo end-effector profile ID must be non-empty")
+        self.position.validate()
+        self.force_limit.validate()
+        if self.position.channel_name == self.force_limit.channel_name:
+            raise ValueError("MuJoCo actuator position and force-limit channels must differ")
+        if self.position.runtime_actuator_name != self.force_limit.runtime_actuator_name:
+            raise ValueError("MuJoCo position and force limit must bind the same actuator")
+        geoms = [name for values in self.contact_group_geoms.values() for name in values]
+        if not self.contact_group_geoms or len(geoms) != len(set(geoms)):
+            raise ValueError("MuJoCo contact groups must be explicit with unique geoms")
+
+
+@dataclass(frozen=True)
+class MuJoCoObjectConfig:
+    object_type: str
+    runtime_body_name: str
+    runtime_free_joint_name: str
+    runtime_collision_geom_names: tuple[str, ...]
+
+    def validate(self) -> None:
+        if not self.object_type or not self.runtime_body_name or not self.runtime_free_joint_name:
+            raise ValueError("MuJoCo object binding must be explicit")
+        if not self.runtime_collision_geom_names or len(self.runtime_collision_geom_names) != len(
+            set(self.runtime_collision_geom_names)
+        ):
+            raise ValueError("MuJoCo object collision geoms must be unique and non-empty")
+
+
+@dataclass(frozen=True)
+class MuJoCoAdapterConfig:
+    robots: Mapping[str, MuJoCoRobotConfig]
+    end_effectors: Mapping[str, MuJoCoEndEffectorConfig]
+    objects: tuple[MuJoCoObjectConfig, ...]
+
+
+def parse_mujoco_adapter_config(
+    payload: Mapping[str, object],
+    base_dir: Path,
+    profile_bindings: tuple[tuple[str, str], ...],
+) -> MuJoCoAdapterConfig:
+    raw_objects = _adapter_mapping(
+        _adapter_value(payload, "objects", "MuJoCo adapter"),
+        "MuJoCo adapter.objects",
+    )
+    objects = tuple(
+        MuJoCoObjectConfig(
+            object_type,
+            _adapter_string(item, "runtime_body_name", f"MuJoCo object {object_type}"),
+            _adapter_string(
+                item, "runtime_free_joint_name", f"MuJoCo object {object_type}"
+            ),
+            _adapter_strings(
+                item,
+                "runtime_collision_geom_names",
+                f"MuJoCo object {object_type}",
+            ),
+        )
+        for object_type, item in (
+            (name, _adapter_mapping(value, f"MuJoCo object {name}"))
+            for name, value in raw_objects.items()
+        )
+    )
+    for item in objects:
+        item.validate()
+    body_names = tuple(item.runtime_body_name for item in objects)
+    raw_profiles = _adapter_mapping(
+        _adapter_value(payload, "profiles", "MuJoCo adapter"),
+        "MuJoCo adapter.profiles",
+    )
+    robots = {}
+    end_effectors = {}
+    for profile_id, adapter_profile_id in profile_bindings:
+        raw = _adapter_mapping(
+            _adapter_value(
+                raw_profiles, adapter_profile_id, "MuJoCo adapter.profiles"
+            ),
+            f"MuJoCo adapter profile {adapter_profile_id}",
+        )
+        position = _adapter_mapping(
+            _adapter_value(raw, "position", "MuJoCo adapter profile"),
+            "MuJoCo adapter profile.position",
+        )
+        force = _adapter_mapping(
+            _adapter_value(raw, "force_limit", "MuJoCo adapter profile"),
+            "MuJoCo adapter profile.force_limit",
+        )
+        raw_contacts = _adapter_mapping(
+            _adapter_value(raw, "contact_group_geoms", "MuJoCo adapter profile"),
+            "MuJoCo adapter profile.contact_group_geoms",
+        )
+        contacts = {
+            group: _adapter_string_values(
+                value, f"MuJoCo contact_group_geoms.{group}"
+            )
+            for group, value in raw_contacts.items()
+        }
+        raw_joints = _adapter_list(
+            _adapter_value(raw, "joint_bindings", "MuJoCo adapter profile"),
+            "MuJoCo adapter profile.joint_bindings",
+        )
+        robot = MuJoCoRobotConfig(
+            _adapter_path(raw, "model_asset", "MuJoCo adapter profile", base_dir),
+            _adapter_string(raw, "tcp_frame", "MuJoCo adapter profile"),
+            _adapter_string(raw, "tcp_site_name", "MuJoCo adapter profile"),
+            tuple(
+                RuntimeJointBinding(
+                    _adapter_string(item, "joint_name", "MuJoCo joint binding"),
+                    _adapter_string(
+                        item, "runtime_joint_name", "MuJoCo joint binding"
+                    ),
+                    _adapter_string(
+                        item, "runtime_actuator_name", "MuJoCo joint binding"
+                    ),
+                )
+                for item in (
+                    _adapter_mapping(value, "MuJoCo joint binding")
+                    for value in raw_joints
+                )
+            ),
+            body_names,
+        )
+        end_effector = MuJoCoEndEffectorConfig(
+            profile_id,
+            ActuatorPositionBinding(
+                _adapter_string(position, "channel_name", "MuJoCo position"),
+                _adapter_string(
+                    position, "runtime_actuator_name", "MuJoCo position"
+                ),
+                _adapter_number(position, "command_scale", "MuJoCo position"),
+                _adapter_number(position, "command_offset", "MuJoCo position"),
+                _adapter_strings(position, "state_joint_names", "MuJoCo position"),
+            ),
+            ActuatorForceLimitBinding(
+                _adapter_string(force, "channel_name", "MuJoCo force limit"),
+                _adapter_string(
+                    force, "runtime_actuator_name", "MuJoCo force limit"
+                ),
+                _adapter_number(force, "command_scale", "MuJoCo force limit"),
+            ),
+            contacts,
+        )
+        robot.validate()
+        end_effector.validate()
+        robots[profile_id] = robot
+        end_effectors[profile_id] = end_effector
+    return MuJoCoAdapterConfig(robots, end_effectors, objects)
+
+
+def read_activated_joint_state(
+    robot_config: MuJoCoRobotConfig,
+    robot_model: RobotModel,
+    base_state: RobotState,
+) -> RobotState:
+    robot_config.validate()
+    robot_model.validate()
+    configured_names = tuple(item.joint_name for item in robot_config.joint_bindings)
+    if configured_names != robot_model.joint_names:
+        raise ValueError("MuJoCo runtime joint order does not match RobotModel")
+    if len(base_state.joint_names) != len(set(base_state.joint_names)) or len(
+        base_state.joint_names
+    ) != len(base_state.positions_rad):
+        raise ValueError("base robot state must contain unique named positions")
+    provided = dict(zip(base_state.joint_names, base_state.positions_rad))
+    if not set(provided).issubset(robot_model.joint_names):
+        raise ValueError("base robot state contains joints outside the activated RobotModel")
+    try:
+        import mujoco
+    except (ImportError, OSError) as exc:
+        raise AdapterUnavailableError(f"MuJoCo import failed: {exc}") from exc
+    try:
+        model = mujoco.MjModel.from_xml_path(str(robot_config.model_asset.resolve()))
+        data = mujoco.MjData(model)
+    except Exception as exc:
+        raise ModelLoadError(f"MuJoCo model load failed during tool activation: {exc}") from exc
+    positions = []
+    for binding in robot_config.joint_bindings:
+        if binding.joint_name in provided:
+            positions.append(provided[binding.joint_name])
+            continue
+        joint_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_JOINT, binding.runtime_joint_name
+        )
+        if joint_id < 0:
+            raise ControlInterfaceError(
+                f"activated MuJoCo model has no joint {binding.runtime_joint_name!r}"
+            )
+        positions.append(float(data.qpos[int(model.jnt_qposadr[joint_id])]))
+    result = RobotState(robot_model.joint_names, tuple(positions))
+    result.validate(robot_model)
+    return result
+
+
 class MuJoCoExecutorAdapter:
     def __init__(
         self,
-        robot_config: ExecutionRobotConfig,
-        end_effector_config: ExecutionEndEffectorConfig,
-        object_configs: tuple[ExecutionObjectConfig, ...],
-        *,
-        project_root: str | Path,
+        robot_config: MuJoCoRobotConfig,
+        end_effector_config: MuJoCoEndEffectorConfig,
+        object_configs: tuple[MuJoCoObjectConfig, ...],
     ):
         robot_config.validate()
         end_effector_config.validate()
         for item in object_configs:
             item.validate()
-        if robot_config.adapter_id != "mujoco":
-            raise ValueError("MuJoCoExecutorAdapter requires adapter_id 'mujoco'")
         if not object_configs:
             raise ValueError("MuJoCoExecutorAdapter requires object bindings")
         object_types = [item.object_type for item in object_configs]
@@ -47,11 +313,10 @@ class MuJoCoExecutorAdapter:
             raise ValueError("MuJoCo object types and runtime body names must be unique")
         if not set(body_names).issubset(robot_config.scene_object_body_names):
             raise ValueError("MuJoCo object bodies must belong to the configured scene model")
-        self.adapter_id = robot_config.adapter_id
+        self.adapter_id = "mujoco"
         self._robot_config = robot_config
         self._end_effector_config = end_effector_config
         self._object_configs = {item.object_type: item for item in object_configs}
-        self._project_root = Path(project_root)
         self._mujoco: Any | None = None
         self._np: Any | None = None
         self._model: Any | None = None
@@ -80,9 +345,7 @@ class MuJoCoExecutorAdapter:
             import numpy as np
         except (ImportError, OSError) as exc:
             raise AdapterUnavailableError(f"MuJoCo import failed: {exc}") from exc
-        model_path = Path(self._robot_config.model_asset)
-        if not model_path.is_absolute():
-            model_path = self._project_root / model_path
+        model_path = self._robot_config.model_asset
         if not model_path.is_file():
             raise ModelLoadError(f"MuJoCo model asset does not exist: {model_path}")
         try:
@@ -246,13 +509,17 @@ class MuJoCoExecutorAdapter:
     ) -> None:
         model, data = self._runtime()
         mujoco = self._mujoco
-        selected = {item.object_config.runtime_body_name: item for item in scene_objects}
+        selected = {
+            self._object_configs[item.object_type].runtime_body_name: item
+            for item in scene_objects
+            if item.object_type in self._object_configs
+        }
         target = next((item for item in scene_objects if item.object_id == target_object_id), None)
         if target is None:
             raise ControlInterfaceError("target object binding is absent from the MuJoCo scene")
         for item in scene_objects:
-            configured = self._object_configs.get(item.object_config.object_type)
-            if configured != item.object_config:
+            configured = self._object_configs.get(item.object_type)
+            if configured is None:
                 raise ControlInterfaceError(
                     f"scene object {item.object_id} does not match the adapter object config"
                 )
@@ -270,7 +537,7 @@ class MuJoCoExecutorAdapter:
                     data.qpos[qpos : qpos + 7] = (0.0, 0.0, -5.0, 1.0, 0.0, 0.0, 0.0)
 
         for item in scene_objects:
-            config = item.object_config
+            config = self._object_configs[item.object_type]
             body_id = self._named_id(mujoco.mjtObj.mjOBJ_BODY, config.runtime_body_name, "object body")
             joint_id = self._named_id(
                 mujoco.mjtObj.mjOBJ_JOINT,
@@ -302,7 +569,7 @@ class MuJoCoExecutorAdapter:
             )
         target_body = self._named_id(
             mujoco.mjtObj.mjOBJ_BODY,
-            target.object_config.runtime_body_name,
+            self._object_configs[target.object_type].runtime_body_name,
             "target object body",
         )
         self._target_body_id = target_body
@@ -523,3 +790,59 @@ def _rotation_matrix_to_quaternion_wxyz(matrix) -> tuple[float, float, float, fl
     if norm <= 0.0:
         raise ControlInterfaceError("object pose rotation produced a zero quaternion")
     return tuple(value / norm for value in quaternion)
+
+
+def _adapter_value(payload: Mapping[str, object], key: str, label: str) -> object:
+    if key not in payload:
+        raise ValueError(f"{label}.{key} is required")
+    return payload[key]
+
+
+def _adapter_mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{label} must be a string-keyed mapping")
+    return value
+
+
+def _adapter_list(value: object, label: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    return value
+
+
+def _adapter_string(payload: Mapping[str, object], key: str, label: str) -> str:
+    value = _adapter_value(payload, key, label)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    return value
+
+
+def _adapter_string_values(value: object, label: str) -> tuple[str, ...]:
+    values = _adapter_list(value, label)
+    result = tuple(item for item in values if isinstance(item, str) and item.strip())
+    if len(result) != len(values):
+        raise ValueError(f"{label} must contain non-empty strings")
+    return result
+
+
+def _adapter_strings(
+    payload: Mapping[str, object], key: str, label: str
+) -> tuple[str, ...]:
+    return _adapter_string_values(_adapter_value(payload, key, label), f"{label}.{key}")
+
+
+def _adapter_number(payload: Mapping[str, object], key: str, label: str) -> float:
+    value = _adapter_value(payload, key, label)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label}.{key} must be a number")
+    result = float(value)
+    if not isfinite(result):
+        raise ValueError(f"{label}.{key} must be finite")
+    return result
+
+
+def _adapter_path(
+    payload: Mapping[str, object], key: str, label: str, base_dir: Path
+) -> Path:
+    value = Path(_adapter_string(payload, key, label))
+    return value.resolve() if value.is_absolute() else (base_dir / value).resolve()
