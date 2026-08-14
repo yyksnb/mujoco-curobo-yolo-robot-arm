@@ -12,3 +12,19 @@ end_effectors:
       actuator_force_limit_channel: parallel_gripper.force_limit_n
       open_position_m: 0.084
       contact_groups: [left_pad, right_pad]
+    execution:
+      position:
+        channel_name: parallel_gripper.opening_m
+        runtime_actuator_name: robot_task2_tool_grip
+        command_scale: 0.5
+        command_offset: 0.0
+        state_joint_names:
+          - robot_task2_tool_left_jaw_joint
+          - robot_task2_tool_right_jaw_joint
+      force_limit:
+        channel_name: parallel_gripper.force_limit_n
+        runtime_actuator_name: robot_task2_tool_grip
+        command_scale: 1.0
+      contact_group_geoms:
+        left_pad: [robot_task2_tool_left_pad_collision]
+        right_pad: [robot_task2_tool_right_pad_collision]

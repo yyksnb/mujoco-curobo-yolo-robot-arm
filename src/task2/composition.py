@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,12 @@ from .contracts import (
     PlanningObjectConfig,
     RobotModel,
     Sphere,
+    ActuatorForceLimitBinding,
+    ActuatorPositionBinding,
+    ExecutionEndEffectorConfig,
+    ExecutionObjectConfig,
+    ExecutionRobotConfig,
+    RuntimeJointBinding,
 )
 
 
@@ -52,6 +59,25 @@ class PlanningComposition:
         raise KeyError(f"unknown Planning end-effector profile_id: {profile_id}")
 
 
+@dataclass(frozen=True)
+class ExecutionComposition:
+    robot_config: ExecutionRobotConfig
+    objects: tuple[ExecutionObjectConfig, ...]
+    end_effectors: tuple[ExecutionEndEffectorConfig, ...]
+
+    def get_object(self, object_type: str) -> ExecutionObjectConfig:
+        for item in self.objects:
+            if item.object_type == object_type:
+                return item
+        raise KeyError(f"unknown Execution object_type: {object_type}")
+
+    def get_end_effector(self, profile_id: str) -> ExecutionEndEffectorConfig:
+        for item in self.end_effectors:
+            if item.profile_id == profile_id:
+                return item
+        raise KeyError(f"unknown Execution end-effector profile_id: {profile_id}")
+
+
 def load_planning_config(
     robot_path: str | Path,
     planning_path: str | Path,
@@ -63,7 +89,12 @@ def load_planning_config(
         _load_yaml_mapping(path) for path in paths
     )
     robot = _parse_robot(_required_mapping(robot_payload, "robot", "robot"))
-    config_hash = sha256(b"".join(path.read_bytes() for path in paths)).hexdigest()
+    config_hash = _planning_config_hash(
+        robot_payload,
+        planning_payload,
+        objects_payload,
+        end_effectors_payload,
+    )
     planning = _parse_planning(
         _required_mapping(planning_payload, "planning", "planning"), config_hash
     )
@@ -78,6 +109,29 @@ def load_planning_config(
     for item in (*objects, *end_effectors):
         item.validate()
     return PlanningComposition(robot, planning, objects, end_effectors)
+
+
+def load_execution_config(
+    execution_path: str | Path,
+    objects_path: str | Path,
+    end_effectors_path: str | Path,
+) -> ExecutionComposition:
+    execution_payload = _load_yaml_mapping(Path(execution_path))
+    objects_payload = _load_yaml_mapping(Path(objects_path))
+    end_effectors_payload = _load_yaml_mapping(Path(end_effectors_path))
+    robot = _parse_execution_robot(
+        _required_mapping(execution_payload, "execution", "execution")
+    )
+    objects = _parse_execution_objects(
+        _required_mapping(objects_payload, "objects", "objects")
+    )
+    end_effectors = _parse_execution_end_effectors(
+        _required_mapping(end_effectors_payload, "end_effectors", "end_effectors")
+    )
+    robot.validate()
+    for item in (*objects, *end_effectors):
+        item.validate()
+    return ExecutionComposition(robot, objects, end_effectors)
 
 
 def load_targeting_config(
@@ -330,6 +384,193 @@ def _parse_planning_end_effectors(
             )
         )
     return tuple(result)
+
+
+def _parse_execution_robot(payload: dict[str, Any]) -> ExecutionRobotConfig:
+    path = "execution"
+    _require_exact_keys(
+        payload,
+        {
+            "adapter_id",
+            "model_asset",
+            "tcp_frame",
+            "tcp_site_name",
+            "joint_bindings",
+            "scene_object_body_names",
+        },
+        path,
+    )
+    bindings = []
+    for index, raw in enumerate(_required_list(payload, "joint_bindings", path)):
+        item_path = f"{path}.joint_bindings[{index}]"
+        item = _as_mapping(raw, item_path)
+        _require_exact_keys(
+            item,
+            {"joint_name", "runtime_joint_name", "runtime_actuator_name"},
+            item_path,
+        )
+        bindings.append(
+            RuntimeJointBinding(
+                _required_str(item, "joint_name", item_path),
+                _required_str(item, "runtime_joint_name", item_path),
+                _required_str(item, "runtime_actuator_name", item_path),
+            )
+        )
+    body_names = _required_list(payload, "scene_object_body_names", path)
+    return ExecutionRobotConfig(
+        adapter_id=_required_str(payload, "adapter_id", path),
+        model_asset=_required_str(payload, "model_asset", path),
+        tcp_frame=_required_str(payload, "tcp_frame", path),
+        tcp_site_name=_required_str(payload, "tcp_site_name", path),
+        joint_bindings=tuple(bindings),
+        scene_object_body_names=tuple(
+            _as_str(value, f"{path}.scene_object_body_names[{index}]")
+            for index, value in enumerate(body_names)
+        ),
+    )
+
+
+def _parse_execution_objects(payload: dict[str, Any]) -> tuple[ExecutionObjectConfig, ...]:
+    result = []
+    for object_type, raw in payload.items():
+        object_path = f"objects.{object_type}"
+        item = _as_mapping(raw, object_path)
+        execution = _required_mapping(item, "execution", object_path)
+        path = f"{object_path}.execution"
+        _require_exact_keys(
+            execution,
+            {
+                "runtime_body_name",
+                "runtime_free_joint_name",
+                "runtime_collision_geom_names",
+            },
+            path,
+        )
+        geom_names = _required_list(execution, "runtime_collision_geom_names", path)
+        result.append(
+            ExecutionObjectConfig(
+                object_type=object_type,
+                runtime_body_name=_required_str(execution, "runtime_body_name", path),
+                runtime_free_joint_name=_required_str(
+                    execution, "runtime_free_joint_name", path
+                ),
+                runtime_collision_geom_names=tuple(
+                    _as_str(value, f"{path}.runtime_collision_geom_names[{index}]")
+                    for index, value in enumerate(geom_names)
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _parse_execution_end_effectors(
+    payload: dict[str, Any],
+) -> tuple[ExecutionEndEffectorConfig, ...]:
+    result = []
+    for profile_id, raw in payload.items():
+        item_path = f"end_effectors.{profile_id}"
+        item = _as_mapping(raw, item_path)
+        execution = _required_mapping(item, "execution", item_path)
+        path = f"{item_path}.execution"
+        _require_exact_keys(
+            execution,
+            {"position", "force_limit", "contact_group_geoms"},
+            path,
+        )
+        position = _required_mapping(execution, "position", path)
+        position_path = f"{path}.position"
+        _require_exact_keys(
+            position,
+            {
+                "channel_name",
+                "runtime_actuator_name",
+                "command_scale",
+                "command_offset",
+                "state_joint_names",
+            },
+            position_path,
+        )
+        state_joint_names = _required_list(position, "state_joint_names", position_path)
+        force = _required_mapping(execution, "force_limit", path)
+        force_path = f"{path}.force_limit"
+        _require_exact_keys(
+            force,
+            {"channel_name", "runtime_actuator_name", "command_scale"},
+            force_path,
+        )
+        contact_payload = _required_mapping(execution, "contact_group_geoms", path)
+        contacts: dict[str, tuple[str, ...]] = {}
+        for group, raw_geoms in contact_payload.items():
+            if not isinstance(raw_geoms, list):
+                raise ValueError(f"{path}.contact_group_geoms.{group} must be a list")
+            contacts[group] = tuple(
+                _as_str(value, f"{path}.contact_group_geoms.{group}[{index}]")
+                for index, value in enumerate(raw_geoms)
+            )
+        result.append(
+            ExecutionEndEffectorConfig(
+                profile_id=profile_id,
+                position=ActuatorPositionBinding(
+                    channel_name=_required_str(position, "channel_name", position_path),
+                    runtime_actuator_name=_required_str(
+                        position, "runtime_actuator_name", position_path
+                    ),
+                    command_scale=_required_float(position, "command_scale", position_path),
+                    command_offset=_required_float(position, "command_offset", position_path),
+                    state_joint_names=tuple(
+                        _as_str(value, f"{position_path}.state_joint_names[{index}]")
+                        for index, value in enumerate(state_joint_names)
+                    ),
+                ),
+                force_limit=ActuatorForceLimitBinding(
+                    channel_name=_required_str(force, "channel_name", force_path),
+                    runtime_actuator_name=_required_str(
+                        force, "runtime_actuator_name", force_path
+                    ),
+                    command_scale=_required_float(force, "command_scale", force_path),
+                ),
+                contact_group_geoms=contacts,
+            )
+        )
+    return tuple(result)
+
+
+def _planning_config_hash(
+    robot_payload: dict[str, Any],
+    planning_payload: dict[str, Any],
+    objects_payload: dict[str, Any],
+    end_effectors_payload: dict[str, Any],
+) -> str:
+    objects = _required_mapping(objects_payload, "objects", "objects")
+    end_effectors = _required_mapping(
+        end_effectors_payload, "end_effectors", "end_effectors"
+    )
+    payload = {
+        "robot": _required_mapping(robot_payload, "robot", "robot"),
+        "planning": _required_mapping(planning_payload, "planning", "planning"),
+        "objects": {
+            name: {
+                "planning": _required_mapping(
+                    _as_mapping(value, f"objects.{name}"),
+                    "planning",
+                    f"objects.{name}",
+                )
+            }
+            for name, value in objects.items()
+        },
+        "end_effectors": {
+            name: {
+                "planning": _required_mapping(
+                    _as_mapping(value, f"end_effectors.{name}"),
+                    "planning",
+                    f"end_effectors.{name}",
+                )
+            }
+            for name, value in end_effectors.items()
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def _parse_compact_transform(payload: dict[str, Any], path: str) -> RigidTransform:

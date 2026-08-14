@@ -1,0 +1,19 @@
+execution:
+  adapter_id: mujoco
+  model_asset: examples/mujoco/task2_execution.xml
+  tcp_frame: task2_tool_tcp
+  tcp_site_name: robot_task2_tool_tcp
+  joint_bindings:
+    - {joint_name: joint_1, runtime_joint_name: robot_joint_1, runtime_actuator_name: robot_joint_1}
+    - {joint_name: joint_2, runtime_joint_name: robot_joint_2, runtime_actuator_name: robot_joint_2}
+    - {joint_name: joint_3, runtime_joint_name: robot_joint_3, runtime_actuator_name: robot_joint_3}
+    - {joint_name: joint_4, runtime_joint_name: robot_joint_4, runtime_actuator_name: robot_joint_4}
+    - {joint_name: joint_5, runtime_joint_name: robot_joint_5, runtime_actuator_name: robot_joint_5}
+    - {joint_name: joint_6, runtime_joint_name: robot_joint_6, runtime_actuator_name: robot_joint_6}
+    - {joint_name: joint_7, runtime_joint_name: robot_joint_7, runtime_actuator_name: robot_joint_7}
+    - {joint_name: task2_tool_wrist_pitch, runtime_joint_name: robot_task2_tool_wrist_pitch, runtime_actuator_name: robot_task2_tool_wrist_pitch}
+  scene_object_body_names:
+    - target_marker
+    - target_rivet_gun
+    - target_standard_part
+    - target_tape
