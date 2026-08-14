@@ -220,4 +220,8 @@ __marimo__/
 # Generated pipeline artifacts
 outputs/*
 !outputs/.gitkeep
+
+# Task2 build cache created outside outputs/
+.task2-cache/
+
 MUJOCO_LOG.TXT

@@ -1,0 +1,16 @@
+# The project build script replaces the upstream robot module list while
+# preserving this exact distribution version and its native Environment.
+vamp-planner==0.6.4
+ruckig==0.19.4
+nvidia-curobo==0.8.0
+
+# Native-wheel build requirements. The build script forces one compile job.
+scikit-build-core==1.0.3
+pathspec==1.1.1
+nanobind==2.13.0
+cmake==4.4.2
+ninja==1.13.0
+packaging==26.2
+exceptiongroup==1.3.1; python_version < "3.11"
+tomli==2.4.1; python_version < "3.11"
+typing-extensions==4.15.0; python_version < "3.11"

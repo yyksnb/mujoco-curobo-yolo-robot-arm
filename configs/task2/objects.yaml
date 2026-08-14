@@ -39,6 +39,29 @@ objects:
             contact_margin_m: 0.062260
             opening_margin_m: 0.008000
             force_margin_n: 0.450000
+    planning:
+      attached_geometry:
+        - geometry_id: marker_body_0
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_0, translation_m: [-0.060, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_1
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_1, translation_m: [-0.040, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_2
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_2, translation_m: [-0.020, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_3
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_3, translation_m: [0.0, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_4
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_4, translation_m: [0.020, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_5
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_5, translation_m: [0.040, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_6
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_6, translation_m: [0.060, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.012}
 
   masking_tape:
     targeting:
@@ -83,6 +106,11 @@ objects:
             contact_margin_m: 0.004500
             opening_margin_m: 0.006000
             force_margin_n: 1.250000
+    planning:
+      attached_geometry:
+        - geometry_id: masking_tape_body
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_body, translation_m: [0.0, 0.0, 0.010], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.040}
 
   rivet_gun:
     targeting:
@@ -94,9 +122,9 @@ objects:
             parent_frame: object
             child_frame: tcp_at_grasp
             matrix:
-              - [-0.866025404, 0.0, 0.5, -0.010494798]
-              - [0.0, 1.0, 0.0, 0.017997664]
-              - [-0.5, 0.0, -0.866025404, 0.001004167]
+              - [-1.0, 0.0, 0.0, -0.010]
+              - [0.0, 0.0, 1.0, 0.020]
+              - [0.0, 1.0, 0.0, 0.005]
               - [0.0, 0.0, 0.0, 1.0]
           T_tcp_pregrasp:
             parent_frame: tcp_at_grasp
@@ -110,7 +138,7 @@ objects:
             kind: discrete
             group: C2
             axis: approach_axis_object
-            axis_vector: [0.5, 0.0, -0.866025404]
+            axis_vector: [0.0, 1.0, 0.0]
             values_rad: [0.0, 3.141592654]
           pregrasp_opening_m: 0.084000000
           target_opening_m: 0.011946974
@@ -124,6 +152,56 @@ objects:
             contact_margin_m: 0.017030
             opening_margin_m: 0.052053
             force_margin_n: 12.000000
+    planning:
+      attached_geometry:
+        - geometry_id: rivet_gun_proxy_00
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_00, translation_m: [0.046962383, -0.015460274, 0.013999021], quaternion_wxyz: [0.667637079, -0.232939327, 0.667637079, 0.232939327]}
+          box: {size_m: [0.010771563, 0.006517774, 0.028601745]}
+        - geometry_id: rivet_gun_proxy_01
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_01, translation_m: [0.044685210, 0.022031508, 0.013947413], quaternion_wxyz: [0.707106781, 0.0, 0.707106781, 0.0]}
+          box: {size_m: [0.009720045, 0.009693261, 0.022275648]}
+        - geometry_id: rivet_gun_proxy_02
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_02, translation_m: [-0.011720529, 0.021468050, 0.022789813], quaternion_wxyz: [0.720178921, -0.012851064, 0.693558942, 0.012376050]}
+          box: {size_m: [0.009649039, 0.009827741, 0.040027090]}
+        - geometry_id: rivet_gun_proxy_03
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_03, translation_m: [0.019942909, -0.015429563, 0.013970256], quaternion_wxyz: [0.644492212, 0.290911995, 0.644492212, -0.290911995]}
+          box: {size_m: [0.018360060, 0.027976474, 0.049886832]}
+        - geometry_id: rivet_gun_proxy_04
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_04, translation_m: [-0.045164518, 0.003606533, 0.011935909], quaternion_wxyz: [-0.159541445, 0.920976049, -0.348491642, 0.070023001]}
+          box: {size_m: [0.002436107, 0.014301924, 0.025470372]}
+        - geometry_id: rivet_gun_proxy_05
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_05, translation_m: [0.009084566, 0.006975825, 0.013683850], quaternion_wxyz: [0.588127026, 0.392564136, 0.588127026, -0.392564136]}
+          box: {size_m: [0.009016551, 0.014335712, 0.018000531]}
+        - geometry_id: rivet_gun_proxy_06
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_06, translation_m: [-0.042374534, 0.023659651, 0.014272074], quaternion_wxyz: [0.572252453, 0.571923488, 0.436904192, 0.393122604]}
+          box: {size_m: [0.023161647, 0.024775308, 0.030614477]}
+        - geometry_id: rivet_gun_proxy_07
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_07, translation_m: [0.009225854, 0.012054607, 0.021362118], quaternion_wxyz: [0.422850770, 0.675973027, 0.462482050, -0.387773190]}
+          box: {size_m: [0.011633137, 0.017423362, 0.029644558]}
+        - geometry_id: rivet_gun_proxy_08
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_08, translation_m: [-0.012173676, 0.029147024, 0.013636650], quaternion_wxyz: [0.496634381, 0.487186817, 0.503037735, 0.512792681]}
+          box: {size_m: [0.009639974, 0.026920404, 0.039218877]}
+        - geometry_id: rivet_gun_proxy_09
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_09, translation_m: [0.009184882, 0.011965739, 0.006204244], quaternion_wxyz: [0.441795348, 0.388593766, 0.427677675, -0.686224134]}
+          box: {size_m: [0.011661079, 0.017857014, 0.029795981]}
+        - geometry_id: rivet_gun_proxy_10
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_10, translation_m: [0.005096707, 0.026580175, 0.006170994], quaternion_wxyz: [0.319314575, 0.630902689, 0.630902689, -0.319314575]}
+          box: {size_m: [0.008034103, 0.005913777, 0.017883637]}
+        - geometry_id: rivet_gun_proxy_11
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_11, translation_m: [0.023740359, 0.017348757, 0.013944548], quaternion_wxyz: [0.705836279, 0.705836279, -0.042369171, -0.042369171]}
+          box: {size_m: [0.019532811, 0.029122552, 0.036674626]}
+        - geometry_id: rivet_gun_proxy_12
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_12, translation_m: [-0.041411839, 0.007051999, 0.024789204], quaternion_wxyz: [0.707106781, 0.0, 0.707106781, 0.0]}
+          box: {size_m: [0.001907028, 0.014209362, 0.013695779]}
+        - geometry_id: rivet_gun_proxy_13
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_13, translation_m: [0.008798342, 0.021942192, 0.013945494], quaternion_wxyz: [0.707106781, 0.0, 0.707106781, 0.0]}
+          box: {size_m: [0.006527724, 0.006222579, 0.013319362]}
+        - geometry_id: rivet_gun_proxy_14
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_14, translation_m: [-0.014368724, 0.010508376, 0.013947115], quaternion_wxyz: [0.534037340, 0.534037340, 0.463469653, 0.463469653]}
+          box: {size_m: [0.017753343, 0.026632654, 0.035673028]}
+        - geometry_id: rivet_gun_proxy_15
+          T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_15, translation_m: [-0.013545968, 0.021005736, 0.010708221], quaternion_wxyz: [0.490589361, 0.511345888, 0.518049333, 0.479032723]}
+          box: {size_m: [0.008194848, 0.020551820, 0.036881778]}
 
   standard_part:
     targeting:
@@ -137,7 +215,7 @@ objects:
             matrix:
               - [0.0, 1.0, 0.0, 0.0]
               - [1.0, 0.0, 0.0, 0.004]
-              - [0.0, 0.0, -1.0, 0.000694798]
+              - [0.0, 0.0, -1.0, 0.001694798]
               - [0.0, 0.0, 0.0, 1.0]
           T_tcp_pregrasp:
             parent_frame: tcp_at_grasp
@@ -165,3 +243,8 @@ objects:
             contact_margin_m: 0.003100
             opening_margin_m: 0.008000
             force_margin_n: 0.200000
+    planning:
+      attached_geometry:
+        - geometry_id: standard_part_body
+          T_object_geometry: {parent_frame: object, child_frame: standard_part_body, translation_m: [0.0, 0.0, 0.002695], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
+          sphere: {radius_m: 0.008}

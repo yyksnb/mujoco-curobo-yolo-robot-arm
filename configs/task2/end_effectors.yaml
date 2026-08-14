@@ -7,3 +7,8 @@ end_effectors:
         grip_force_limit_range_n: [0.0, 120.0]
         maximum_closing_speed_m_s: 0.014
         contact_groups: [left_pad, right_pad]
+    planning:
+      actuator_position_channel: parallel_gripper.opening_m
+      actuator_force_limit_channel: parallel_gripper.force_limit_n
+      open_position_m: 0.084
+      contact_groups: [left_pad, right_pad]

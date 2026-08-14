@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from hashlib import sha256
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,65 @@ from .contracts import (
     TargetingDiagnosticsConfig,
     TargetingObjectConfig,
     Vector3,
+    AttachedGeometry,
+    Box,
+    Capsule,
+    CollisionSphereGroup,
+    JointLimits,
+    PlanningConfig,
+    PlanningEndEffectorConfig,
+    PlanningObjectConfig,
+    RobotModel,
+    Sphere,
 )
+
+
+@dataclass(frozen=True)
+class PlanningComposition:
+    robot_model: RobotModel
+    planning_config: PlanningConfig
+    objects: tuple[PlanningObjectConfig, ...]
+    end_effectors: tuple[PlanningEndEffectorConfig, ...]
+
+    def get_object(self, object_type: str) -> PlanningObjectConfig:
+        for item in self.objects:
+            if item.object_type == object_type:
+                return item
+        raise KeyError(f"unknown Planning object_type: {object_type}")
+
+    def get_end_effector(self, profile_id: str) -> PlanningEndEffectorConfig:
+        for item in self.end_effectors:
+            if item.profile_id == profile_id:
+                return item
+        raise KeyError(f"unknown Planning end-effector profile_id: {profile_id}")
+
+
+def load_planning_config(
+    robot_path: str | Path,
+    planning_path: str | Path,
+    objects_path: str | Path,
+    end_effectors_path: str | Path,
+) -> PlanningComposition:
+    paths = tuple(Path(path) for path in (robot_path, planning_path, objects_path, end_effectors_path))
+    robot_payload, planning_payload, objects_payload, end_effectors_payload = (
+        _load_yaml_mapping(path) for path in paths
+    )
+    robot = _parse_robot(_required_mapping(robot_payload, "robot", "robot"))
+    config_hash = sha256(b"".join(path.read_bytes() for path in paths)).hexdigest()
+    planning = _parse_planning(
+        _required_mapping(planning_payload, "planning", "planning"), config_hash
+    )
+    objects = _parse_planning_objects(
+        _required_mapping(objects_payload, "objects", "objects")
+    )
+    end_effectors = _parse_planning_end_effectors(
+        _required_mapping(end_effectors_payload, "end_effectors", "end_effectors")
+    )
+    robot.validate()
+    planning.validate()
+    for item in (*objects, *end_effectors):
+        item.validate()
+    return PlanningComposition(robot, planning, objects, end_effectors)
 
 
 def load_targeting_config(
@@ -50,6 +110,256 @@ def get_end_effector_targeting_config(
         if item.profile_id == profile_id:
             return item
     raise KeyError(f"unknown Targeting end-effector profile_id: {profile_id}")
+
+
+def _parse_robot(payload: dict[str, Any]) -> RobotModel:
+    path = "robot"
+    _require_exact_keys(
+        payload,
+        {
+            "model_id",
+            "base_frame",
+            "tcp_frame",
+            "kinematics_asset",
+            "curobo_config_asset",
+            "vamp_robot_module",
+            "vamp_robot_sphere_count",
+            "vamp_tool_fraction_midpoint",
+            "maximum_gripper_opening_m",
+            "joints",
+            "collision_sphere_groups",
+        },
+        path,
+    )
+    joints = _required_list(payload, "joints", path)
+    names: list[str] = []
+    limits: list[JointLimits] = []
+    defaults: list[float] = []
+    for index, raw in enumerate(joints):
+        joint_path = f"{path}.joints[{index}]"
+        joint = _as_mapping(raw, joint_path)
+        _require_exact_keys(
+            joint,
+            {
+                "name",
+                "position_rad",
+                "velocity_rad_s",
+                "acceleration_rad_s2",
+                "jerk_rad_s3",
+                "default_rad",
+            },
+            joint_path,
+        )
+        position = _required_pair(joint, "position_rad", joint_path)
+        names.append(_required_str(joint, "name", joint_path))
+        limits.append(
+            JointLimits(
+                minimum_position_rad=position[0],
+                maximum_position_rad=position[1],
+                maximum_velocity_rad_s=_required_float(joint, "velocity_rad_s", joint_path),
+                maximum_acceleration_rad_s2=_required_float(joint, "acceleration_rad_s2", joint_path),
+                maximum_jerk_rad_s3=_required_float(joint, "jerk_rad_s3", joint_path),
+            )
+        )
+        defaults.append(_required_float(joint, "default_rad", joint_path))
+    groups: list[CollisionSphereGroup] = []
+    for index, raw in enumerate(_required_list(payload, "collision_sphere_groups", path)):
+        group_path = f"{path}.collision_sphere_groups[{index}]"
+        group = _as_mapping(raw, group_path)
+        _require_exact_keys(
+            group,
+            {
+                "group",
+                "first_sphere",
+                "sphere_count",
+                "translation_per_closed_fraction_m",
+                "sweep_radius_inflation_m",
+            },
+            group_path,
+        )
+        groups.append(
+            CollisionSphereGroup(
+                group=_required_str(group, "group", group_path),
+                first_sphere=_required_int(group, "first_sphere", group_path),
+                sphere_count=_required_int(group, "sphere_count", group_path),
+                translation_per_closed_fraction_m=_parse_vector3(
+                    group, "translation_per_closed_fraction_m", group_path
+                ),
+                sweep_radius_inflation_m=_required_float(
+                    group, "sweep_radius_inflation_m", group_path
+                ),
+            )
+        )
+    return RobotModel(
+        model_id=_required_str(payload, "model_id", path),
+        base_frame=_required_str(payload, "base_frame", path),
+        tcp_frame=_required_str(payload, "tcp_frame", path),
+        joint_names=tuple(names),
+        joint_limits=tuple(limits),
+        default_joint_positions=tuple(defaults),
+        kinematics_asset=_required_str(payload, "kinematics_asset", path),
+        curobo_config_asset=_required_str(payload, "curobo_config_asset", path),
+        vamp_robot_module=_required_str(payload, "vamp_robot_module", path),
+        vamp_robot_sphere_count=_required_int(payload, "vamp_robot_sphere_count", path),
+        vamp_tool_fraction_midpoint=_required_float(
+            payload, "vamp_tool_fraction_midpoint", path
+        ),
+        maximum_gripper_opening_m=_required_float(
+            payload, "maximum_gripper_opening_m", path
+        ),
+        collision_sphere_groups=tuple(groups),
+    )
+
+
+def _parse_planning(payload: dict[str, Any], config_hash: str) -> PlanningConfig:
+    expected = {
+        "vamp_version",
+        "ruckig_version",
+        "ik_backend",
+        "ik_position_tolerance_m",
+        "ik_orientation_tolerance_rad",
+        "ik_solution_count",
+        "ik_seed_count",
+        "cartesian_translation_step_m",
+        "cartesian_rotation_step_rad",
+        "lift_distance_m",
+        "preplace_offset_m",
+        "placement_sample_count",
+        "joint_limit_margin_rad",
+        "vamp_range_rad",
+        "vamp_max_iterations",
+        "vamp_max_samples",
+    }
+    _require_exact_keys(payload, expected, "planning")
+    return PlanningConfig(
+        config_hash=config_hash,
+        vamp_version=_required_str(payload, "vamp_version", "planning"),
+        ruckig_version=_required_str(payload, "ruckig_version", "planning"),
+        ik_backend=_required_str(payload, "ik_backend", "planning"),
+        ik_position_tolerance_m=_required_float(payload, "ik_position_tolerance_m", "planning"),
+        ik_orientation_tolerance_rad=_required_float(payload, "ik_orientation_tolerance_rad", "planning"),
+        ik_solution_count=_required_int(payload, "ik_solution_count", "planning"),
+        ik_seed_count=_required_int(payload, "ik_seed_count", "planning"),
+        cartesian_translation_step_m=_required_float(payload, "cartesian_translation_step_m", "planning"),
+        cartesian_rotation_step_rad=_required_float(payload, "cartesian_rotation_step_rad", "planning"),
+        lift_distance_m=_required_float(payload, "lift_distance_m", "planning"),
+        preplace_offset_m=_required_float(payload, "preplace_offset_m", "planning"),
+        placement_sample_count=_required_int(payload, "placement_sample_count", "planning"),
+        joint_limit_margin_rad=_required_float(payload, "joint_limit_margin_rad", "planning"),
+        vamp_range_rad=_required_float(payload, "vamp_range_rad", "planning"),
+        vamp_max_iterations=_required_int(payload, "vamp_max_iterations", "planning"),
+        vamp_max_samples=_required_int(payload, "vamp_max_samples", "planning"),
+    )
+
+
+def _parse_planning_objects(payload: dict[str, Any]) -> tuple[PlanningObjectConfig, ...]:
+    result = []
+    for object_type, raw in payload.items():
+        object_path = f"objects.{object_type}"
+        item = _as_mapping(raw, object_path)
+        planning = _required_mapping(item, "planning", object_path)
+        _require_exact_keys(planning, {"attached_geometry"}, f"{object_path}.planning")
+        geometries = []
+        for index, geometry_raw in enumerate(
+            _required_list(planning, "attached_geometry", f"{object_path}.planning")
+        ):
+            geometry_path = f"{object_path}.planning.attached_geometry[{index}]"
+            geometry_item = _as_mapping(geometry_raw, geometry_path)
+            shape_keys = set(geometry_item) & {"sphere", "capsule", "box"}
+            if len(shape_keys) != 1:
+                raise ValueError(f"{geometry_path} must contain exactly one supported shape")
+            _require_exact_keys(
+                geometry_item,
+                {"geometry_id", "T_object_geometry", next(iter(shape_keys))},
+                geometry_path,
+            )
+            shape_key = next(iter(shape_keys))
+            shape_payload = _required_mapping(geometry_item, shape_key, geometry_path)
+            if shape_key == "sphere":
+                _require_exact_keys(shape_payload, {"radius_m"}, f"{geometry_path}.sphere")
+                shape = Sphere(_required_float(shape_payload, "radius_m", f"{geometry_path}.sphere"))
+            elif shape_key == "capsule":
+                _require_exact_keys(shape_payload, {"radius_m", "length_m"}, f"{geometry_path}.capsule")
+                shape = Capsule(
+                    _required_float(shape_payload, "radius_m", f"{geometry_path}.capsule"),
+                    _required_float(shape_payload, "length_m", f"{geometry_path}.capsule"),
+                )
+            else:
+                _require_exact_keys(shape_payload, {"size_m"}, f"{geometry_path}.box")
+                shape = Box(_parse_vector3(shape_payload, "size_m", f"{geometry_path}.box"))
+            geometries.append(
+                AttachedGeometry(
+                    geometry_id=_required_str(geometry_item, "geometry_id", geometry_path),
+                    T_object_geometry=_parse_compact_transform(
+                        _required_mapping(geometry_item, "T_object_geometry", geometry_path),
+                        f"{geometry_path}.T_object_geometry",
+                    ),
+                    geometry=shape,
+                )
+            )
+        result.append(PlanningObjectConfig(object_type, tuple(geometries)))
+    return tuple(result)
+
+
+def _parse_planning_end_effectors(
+    payload: dict[str, Any],
+) -> tuple[PlanningEndEffectorConfig, ...]:
+    result = []
+    for profile_id, raw in payload.items():
+        path = f"end_effectors.{profile_id}.planning"
+        item = _as_mapping(raw, f"end_effectors.{profile_id}")
+        planning = _required_mapping(item, "planning", f"end_effectors.{profile_id}")
+        _require_exact_keys(
+            planning,
+            {
+                "actuator_position_channel",
+                "actuator_force_limit_channel",
+                "open_position_m",
+                "contact_groups",
+            },
+            path,
+        )
+        contacts = _required_list(planning, "contact_groups", path)
+        result.append(
+            PlanningEndEffectorConfig(
+                profile_id=profile_id,
+                actuator_position_channel=_required_str(planning, "actuator_position_channel", path),
+                actuator_force_limit_channel=_required_str(planning, "actuator_force_limit_channel", path),
+                open_position_m=_required_float(planning, "open_position_m", path),
+                contact_groups=tuple(_as_str(value, f"{path}.contact_groups") for value in contacts),
+            )
+        )
+    return tuple(result)
+
+
+def _parse_compact_transform(payload: dict[str, Any], path: str) -> RigidTransform:
+    from scipy.spatial.transform import Rotation
+
+    _require_exact_keys(
+        payload,
+        {"parent_frame", "child_frame", "translation_m", "quaternion_wxyz"},
+        path,
+    )
+    translation = _parse_vector3(payload, "translation_m", path)
+    raw_quaternion = _required_list(payload, "quaternion_wxyz", path)
+    if len(raw_quaternion) != 4:
+        raise ValueError(f"{path}.quaternion_wxyz must contain four values")
+    w, x, y, z = tuple(
+        _as_float(value, f"{path}.quaternion_wxyz[{index}]")
+        for index, value in enumerate(raw_quaternion)
+    )
+    rotation = Rotation.from_quat((x, y, z, w)).as_matrix()
+    matrix = tuple(
+        tuple(float(rotation[row, column]) for column in range(3)) + (translation[row],)
+        for row in range(3)
+    ) + ((0.0, 0.0, 0.0, 1.0),)
+    result = RigidTransform(
+        _required_str(payload, "parent_frame", path),
+        _required_str(payload, "child_frame", path),
+        matrix,  # type: ignore[arg-type]
+    )
+    result.validate(label=path)
+    return result
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -308,6 +618,12 @@ def _required_float(payload: dict[str, Any], key: str, path: str) -> float:
 def _required_bool(payload: dict[str, Any], key: str, path: str) -> bool:
     if key not in payload or not isinstance(payload[key], bool):
         raise ValueError(f"{path}.{key} must be a boolean")
+    return payload[key]
+
+
+def _required_int(payload: dict[str, Any], key: str, path: str) -> int:
+    if key not in payload or isinstance(payload[key], bool) or not isinstance(payload[key], int):
+        raise ValueError(f"{path}.{key} must be an integer")
     return payload[key]
 
 
