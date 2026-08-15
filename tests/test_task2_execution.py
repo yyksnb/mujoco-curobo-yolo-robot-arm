@@ -39,6 +39,21 @@ POSITION_CHANNEL = "parallel_gripper.opening_m"
 FORCE_CHANNEL = "parallel_gripper.force_limit_n"
 
 
+def test_reusable_mujoco_assets_do_not_embed_gravity_compensation():
+    import mujoco
+
+    tool_asset = (
+        ROOT
+        / "examples/mujoco/so101_active_wrist_parallel/active_wrist_parallel.xml"
+    )
+    for asset in (
+        tool_asset,
+        ROOT / "examples/mujoco/kinova_gen3/gen3_with_active_wrist_parallel.xml",
+    ):
+        model = mujoco.MjModel.from_xml_path(str(asset))
+        assert not any(float(value) for value in model.body_gravcomp)
+
+
 def _pose(parent: str, child: str, xyz=(0.0, 0.0, 0.0)) -> RigidTransform:
     return RigidTransform(
         parent,
@@ -274,7 +289,7 @@ def test_log_write_failure_does_not_interrupt_planned_controls(tmp_path, monkeyp
     assert adapter.commands[-1].events == ("release",)
 
 
-def test_mujoco_adapter_loads_formal_named_bindings():
+def test_mujoco_adapter_preserves_formal_control_and_gravity_semantics():
     config = load_task2_config(ROOT / "configs/task2/pipeline.yaml")
     profile = config.end_effectors[0]
     robot_model = config.robot_model(profile)
@@ -291,7 +306,7 @@ def test_mujoco_adapter_loads_formal_named_bindings():
         robot_model.default_joint_positions,
         (0.0,) * len(robot_model.joint_names),
         (0.0,) * len(robot_model.joint_names),
-        {POSITION_CHANNEL: 0.02, FORCE_CHANNEL: 0.75},
+        {POSITION_CHANNEL: 0.084, FORCE_CHANNEL: 0.75},
     )
     binding = SceneObjectBinding(
         "center_marker",
@@ -306,6 +321,81 @@ def test_mujoco_adapter_loads_formal_named_bindings():
         assert observation.target_object_state.T_world_body.matrix[2][3] == pytest.approx(0.08)
         assert observation.T_world_tcp.child_frame == robot_model.tcp_frame
 
+        grip_id = adapter._position_actuator_id
+        assert grip_id is not None
+        assert robot_config.joint_velocity_feedforward_scale == pytest.approx(1.0)
+        assert config.mujoco_end_effectors[
+            profile.profile_id
+        ].force_limit.command_scale == pytest.approx(1.0)
+        assert tuple(adapter._model.actuator_ctrlrange[grip_id]) == pytest.approx(
+            (0.0, 0.042)
+        )
+        assert adapter._data.ctrl[grip_id] == pytest.approx(0.042)
+        assert tuple(adapter._model.actuator_forcerange[grip_id]) == pytest.approx(
+            (-0.75, 0.75)
+        )
+        assert observation.actuator_states[POSITION_CHANNEL] == pytest.approx(0.084)
+        moment_start = int(adapter._data.moment_rowadr[grip_id])
+        moment_count = int(adapter._data.moment_rownnz[grip_id])
+        moment_slice = slice(moment_start, moment_start + moment_count)
+        state_joint_ids = tuple(
+            adapter._mujoco.mj_name2id(
+                adapter._model,
+                adapter._mujoco.mjtObj.mjOBJ_JOINT,
+                name,
+            )
+            for name in config.mujoco_end_effectors[
+                profile.profile_id
+            ].position.state_joint_names
+        )
+        state_joint_dofs = tuple(
+            int(adapter._model.jnt_dofadr[joint_id])
+            for joint_id in state_joint_ids
+        )
+        state_joint_qpos = tuple(
+            int(adapter._model.jnt_qposadr[joint_id])
+            for joint_id in state_joint_ids
+        )
+        assert tuple(
+            float(adapter._data.qpos[address]) for address in state_joint_qpos
+        ) == pytest.approx((0.042, 0.042))
+        assert set(adapter._data.moment_colind[moment_slice]) == set(state_joint_dofs)
+        assert tuple(adapter._data.actuator_moment[moment_slice]) == pytest.approx(
+            (0.5, 0.5)
+        )
+        assert adapter._model.actuator_gainprm[grip_id, 0] == pytest.approx(2400.0)
+        assert adapter._model.actuator_biasprm[grip_id, 1] == pytest.approx(-2400.0)
+        assert adapter._model.actuator_biasprm[grip_id, 2] == pytest.approx(-15.0)
+
+        adapter._data.ctrl[grip_id] = 0.0
+        adapter._mujoco.mj_forward(adapter._model, adapter._data)
+        actuator_force = float(adapter._data.actuator_force[grip_id])
+        assert actuator_force == pytest.approx(-0.75)
+        assert tuple(
+            float(adapter._data.qfrc_actuator[dof]) for dof in state_joint_dofs
+        ) == pytest.approx((0.5 * actuator_force, 0.5 * actuator_force))
+        adapter.apply_control(command)
+
+        moving_velocities = [0.0] * len(command.joint_names)
+        moving_velocities[0] = 0.2
+        adapter.apply_control(
+            replace(command, velocities_rad_s=tuple(moving_velocities))
+        )
+        joint_1_actuator = adapter._joint_actuator_ids["joint_1"]
+        gain = float(adapter._model.actuator_gainprm[joint_1_actuator, 0])
+        velocity_bias = float(adapter._model.actuator_biasprm[joint_1_actuator, 2])
+        expected_control = command.positions_rad[0] - (
+            robot_config.joint_velocity_feedforward_scale
+            * velocity_bias
+            * 0.2
+            / gain
+        )
+        assert adapter._data.ctrl[joint_1_actuator] == pytest.approx(expected_control)
+        assert adapter._data.ctrl[joint_1_actuator] != command.positions_rad[0]
+
+        with pytest.raises(ControlInterfaceError, match="vector length"):
+            adapter.apply_control(replace(command, velocities_rad_s=(0.0,)))
+
         core_bodies = (
             "target_marker",
             "target_rivet_gun",
@@ -317,6 +407,105 @@ def test_mujoco_adapter_loads_formal_named_bindings():
             assert adapter._mujoco.mj_name2id(
                 adapter._model, adapter._mujoco.mjtObj.mjOBJ_BODY, name
             ) >= 0
+        compensated_bodies = {
+            adapter._mujoco.mj_id2name(
+                adapter._model,
+                adapter._mujoco.mjtObj.mjOBJ_BODY,
+                body_id,
+            )
+            for body_id, value in enumerate(adapter._model.body_gravcomp)
+            if float(value) == 1.0
+        }
+        assert compensated_bodies == set(
+            robot_config.ideal_unbounded_gravity_compensation_body_names
+        ) == {
+            "robot_base_link",
+            "robot_shoulder_link",
+            "robot_half_arm_1_link",
+            "robot_half_arm_2_link",
+            "robot_forearm_link",
+            "robot_spherical_wrist_1_link",
+            "robot_spherical_wrist_2_link",
+            "robot_bracelet_link",
+            "robot_task2_tool_mount",
+            "robot_task2_tool_wrist_output",
+            "robot_task2_tool_left_jaw",
+            "robot_task2_tool_right_jaw",
+        }
+        static_positions = (0.0, 0.5, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0)
+        static_command = replace(
+            command,
+            positions_rad=static_positions,
+        )
+        for name, value in zip(static_command.joint_names, static_positions):
+            adapter._data.qpos[adapter._joint_qpos_addresses[name]] = value
+        adapter._data.qvel[:] = 0.0
+        adapter.apply_control(static_command)
+        adapter._mujoco.mj_forward(adapter._model, adapter._data)
+        compensated_body_ids = tuple(
+            adapter._mujoco.mj_name2id(
+                adapter._model,
+                adapter._mujoco.mjtObj.mjOBJ_BODY,
+                name,
+            )
+            for name in robot_config.ideal_unbounded_gravity_compensation_body_names
+        )
+        compensation_joint_ids = set()
+        for body_id in compensated_body_ids:
+            current_body_id = body_id
+            while current_body_id != 0:
+                first_joint_id = int(adapter._model.body_jntadr[current_body_id])
+                joint_count = int(adapter._model.body_jntnum[current_body_id])
+                compensation_joint_ids.update(
+                    range(first_joint_id, first_joint_id + joint_count)
+                )
+                current_body_id = int(adapter._model.body_parentid[current_body_id])
+        compensation_joint_names = {
+            adapter._mujoco.mj_id2name(
+                adapter._model,
+                adapter._mujoco.mjtObj.mjOBJ_JOINT,
+                joint_id,
+            )
+            for joint_id in compensation_joint_ids
+        }
+        assert {
+            "robot_task2_tool_left_jaw_joint",
+            "robot_task2_tool_right_jaw_joint",
+        }.issubset(compensation_joint_names)
+        compensation_dofs = tuple(
+            int(adapter._model.jnt_dofadr[joint_id])
+            for joint_id in sorted(compensation_joint_ids)
+        )
+        assert not any(
+            bool(adapter._model.jnt_actgravcomp[joint_id])
+            for joint_id in compensation_joint_ids
+        )
+        assert tuple(
+            float(adapter._data.qfrc_actuator[dof]) for dof in compensation_dofs
+        ) == pytest.approx((0.0,) * len(compensation_dofs), abs=1e-12)
+        assert any(
+            abs(float(adapter._data.qfrc_passive[dof])) > 1e-6
+            for dof in compensation_dofs
+        )
+        for body_id in compensated_body_ids:
+            adapter._model.body_gravcomp[body_id] = 0.0
+        unrelated_body_id = adapter._mujoco.mj_name2id(
+            adapter._model,
+            adapter._mujoco.mjtObj.mjOBJ_BODY,
+            "target_marker",
+        )
+        adapter._model.body_gravcomp[unrelated_body_id] = 0.25
+        left_jaw_joint_id = adapter._mujoco.mj_name2id(
+            adapter._model,
+            adapter._mujoco.mjtObj.mjOBJ_JOINT,
+            "robot_task2_tool_left_jaw_joint",
+        )
+        adapter._model.jnt_actgravcomp[left_jaw_joint_id] = True
+        with pytest.raises(ControlInterfaceError, match="left_jaw_joint"):
+            adapter._apply_ideal_unbounded_gravity_compensation()
+        adapter._model.jnt_actgravcomp[left_jaw_joint_id] = False
+        adapter._apply_ideal_unbounded_gravity_compensation()
+        assert adapter._model.body_gravcomp[unrelated_body_id] == pytest.approx(0.25)
         for object_config in config.mujoco_objects:
             assert adapter._mujoco.mj_name2id(
                 adapter._model,

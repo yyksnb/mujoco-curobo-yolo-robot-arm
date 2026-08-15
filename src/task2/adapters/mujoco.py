@@ -40,12 +40,26 @@ class MuJoCoRobotConfig:
     model_asset: Path
     tcp_frame: str
     tcp_site_name: str
+    joint_velocity_feedforward_scale: float
+    ideal_unbounded_gravity_compensation_body_names: tuple[str, ...]
     joint_bindings: tuple[RuntimeJointBinding, ...]
     scene_object_body_names: tuple[str, ...]
 
     def validate(self) -> None:
         if not self.model_asset.is_file() or not self.tcp_frame or not self.tcp_site_name:
             raise ValueError("MuJoCo model asset and TCP site must be explicit")
+        if (
+            not isfinite(self.joint_velocity_feedforward_scale)
+            or self.joint_velocity_feedforward_scale <= 0.0
+        ):
+            raise ValueError("MuJoCo joint velocity feedforward scale must be positive")
+        gravity_bodies = self.ideal_unbounded_gravity_compensation_body_names
+        if len(gravity_bodies) != len(set(gravity_bodies)) or any(
+            not name.strip() for name in gravity_bodies
+        ):
+            raise ValueError(
+                "MuJoCo ideal unbounded gravity-compensation body names must be unique"
+            )
         if not self.joint_bindings:
             raise ValueError("MuJoCo robot config requires joint bindings")
         names = [item.joint_name for item in self.joint_bindings]
@@ -206,6 +220,16 @@ def parse_mujoco_adapter_config(
             _adapter_path(raw, "model_asset", "MuJoCo adapter profile", base_dir),
             _adapter_string(raw, "tcp_frame", "MuJoCo adapter profile"),
             _adapter_string(raw, "tcp_site_name", "MuJoCo adapter profile"),
+            _adapter_number(
+                raw,
+                "joint_velocity_feedforward_scale",
+                "MuJoCo adapter profile",
+            ),
+            _adapter_strings(
+                raw,
+                "ideal_unbounded_gravity_compensation_body_names",
+                "MuJoCo adapter profile",
+            ),
             tuple(
                 RuntimeJointBinding(
                     _adapter_string(item, "joint_name", "MuJoCo joint binding"),
@@ -359,6 +383,7 @@ class MuJoCoExecutorAdapter:
         self._data = data
         self._base_timestep_s = float(model.opt.timestep)
         try:
+            self._apply_ideal_unbounded_gravity_compensation()
             self._resolve_control_interface(initial_command)
             self._configure_scene(scene_objects, target_object_id)
             self._set_initial_joint_state(initial_command)
@@ -375,6 +400,52 @@ class MuJoCoExecutorAdapter:
             ) from exc
         return self.observe()
 
+    def _apply_ideal_unbounded_gravity_compensation(self) -> None:
+        model, _ = self._runtime()
+        body_ids = tuple(
+            self._named_id(
+                self._mujoco.mjtObj.mjOBJ_BODY,
+                name,
+                "ideal unbounded gravity-compensation body",
+            )
+            for name in self._robot_config.ideal_unbounded_gravity_compensation_body_names
+        )
+        embedded = tuple(
+            self._mujoco.mj_id2name(model, self._mujoco.mjtObj.mjOBJ_BODY, body_id)
+            or f"body[{body_id}]"
+            for body_id in body_ids
+            if float(model.body_gravcomp[body_id]) != 0.0
+        )
+        if embedded:
+            raise ControlInterfaceError(
+                "configured MuJoCo bodies must not embed gravity compensation: "
+                + ", ".join(embedded)
+            )
+        relevant_joint_ids = set()
+        for body_id in body_ids:
+            current_body_id = body_id
+            while current_body_id != 0:
+                first_joint_id = int(model.body_jntadr[current_body_id])
+                joint_count = int(model.body_jntnum[current_body_id])
+                relevant_joint_ids.update(
+                    range(first_joint_id, first_joint_id + joint_count)
+                )
+                current_body_id = int(model.body_parentid[current_body_id])
+        for joint_id in sorted(relevant_joint_ids):
+            if bool(model.jnt_actgravcomp[joint_id]):
+                joint_name = self._mujoco.mj_id2name(
+                    model,
+                    self._mujoco.mjtObj.mjOBJ_JOINT,
+                    joint_id,
+                )
+                raise ControlInterfaceError(
+                    "ideal unbounded gravity compensation cannot use actuator gravity "
+                    f"compensation on {joint_name or f'joint[{joint_id}]'}"
+                )
+        for body_id in body_ids:
+            model.body_gravcomp[body_id] = 1.0
+        self._mujoco.mj_setConst(model, self._data)
+
     def apply_control(self, command: ControlCommand) -> None:
         model, data = self._runtime()
         configured_names = tuple(item.joint_name for item in self._robot_config.joint_bindings)
@@ -382,13 +453,25 @@ class MuJoCoExecutorAdapter:
             raise ControlInterfaceError(
                 "trajectory joint order does not match the MuJoCo runtime binding"
             )
-        if len(command.positions_rad) != len(command.joint_names):
-            raise ControlInterfaceError("trajectory joint command length is invalid")
-        for name, value in zip(command.joint_names, command.positions_rad):
-            if not isfinite(value):
-                raise ControlInterfaceError(f"joint command for {name} is not finite")
+        command_vectors = (
+            command.positions_rad,
+            command.velocities_rad_s,
+            command.accelerations_rad_s2,
+        )
+        if any(len(values) != len(command.joint_names) for values in command_vectors):
+            raise ControlInterfaceError("trajectory joint command vector length is invalid")
+        if any(not isfinite(value) for values in command_vectors for value in values):
+            raise ControlInterfaceError("trajectory joint command vectors must be finite")
+        for name, position, velocity in zip(
+            command.joint_names,
+            command.positions_rad,
+            command.velocities_rad_s,
+        ):
             actuator_id = self._joint_actuator_ids[name]
-            self._set_actuator_control(actuator_id, value)
+            self._set_actuator_control(
+                actuator_id,
+                self._position_servo_control(actuator_id, position, velocity),
+            )
 
         position_binding = self._end_effector_config.position
         force_binding = self._end_effector_config.force_limit
@@ -606,6 +689,27 @@ class MuJoCoExecutorAdapter:
                 )
             value = canonical_value
         data.ctrl[actuator_id] = value
+
+    def _position_servo_control(
+        self,
+        actuator_id: int,
+        position: float,
+        velocity: float,
+    ) -> float:
+        model, _ = self._runtime()
+        gain = float(model.actuator_gainprm[actuator_id, 0])
+        position_bias = float(model.actuator_biasprm[actuator_id, 1])
+        velocity_bias = float(model.actuator_biasprm[actuator_id, 2])
+        if gain <= 0.0 or position_bias != -gain:
+            raise ControlInterfaceError(
+                "MuJoCo joint binding requires an affine position servo"
+            )
+        return position - (
+            self._robot_config.joint_velocity_feedforward_scale
+            * velocity_bias
+            * velocity
+            / gain
+        )
 
     def _observation(self, contacts: tuple[ContactRecord, ...]) -> RuntimeObservation:
         model, data = self._runtime()

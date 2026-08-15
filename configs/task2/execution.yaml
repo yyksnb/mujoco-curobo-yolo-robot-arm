@@ -17,6 +17,20 @@ adapters:
         model_asset: ../../examples/mujoco/task2_execution.xml
         tcp_frame: task2_tool_tcp
         tcp_site_name: robot_task2_tool_tcp
+        joint_velocity_feedforward_scale: 1.0
+        ideal_unbounded_gravity_compensation_body_names:
+          - robot_base_link
+          - robot_shoulder_link
+          - robot_half_arm_1_link
+          - robot_half_arm_2_link
+          - robot_forearm_link
+          - robot_spherical_wrist_1_link
+          - robot_spherical_wrist_2_link
+          - robot_bracelet_link
+          - robot_task2_tool_mount
+          - robot_task2_tool_wrist_output
+          - robot_task2_tool_left_jaw
+          - robot_task2_tool_right_jaw
         joint_bindings:
           - {joint_name: joint_1, runtime_joint_name: robot_joint_1, runtime_actuator_name: robot_joint_1}
           - {joint_name: joint_2, runtime_joint_name: robot_joint_2, runtime_actuator_name: robot_joint_2}
