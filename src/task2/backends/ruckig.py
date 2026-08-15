@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import metadata
-from math import copysign
 from typing import Mapping
 
 from ..contracts import (
@@ -34,6 +33,12 @@ class RuckigConfig:
     def validate(self) -> None:
         if not self.version:
             raise ValueError("Ruckig version must be explicit")
+
+
+class RuckigRouteError(BackendOperationError):
+    def __init__(self, stage: TrajectoryStage, message: str):
+        super().__init__(message)
+        self.stage = stage
 
 
 def parse_ruckig_config(payload: Mapping[str, object]) -> RuckigConfig:
@@ -103,23 +108,37 @@ class RuckigTimeParameterizer:
             parameters.target_position = list(right.positions_rad)
             parameters.target_velocity = list(velocities[index + 1])
             parameters.target_acceleration = [0.0] * dof
-            parameters.max_position = [item.maximum_position_rad for item in self._model.joint_limits]
-            parameters.min_position = [item.minimum_position_rad for item in self._model.joint_limits]
-            parameters.max_velocity = [item.maximum_velocity_rad_s for item in self._model.joint_limits]
-            parameters.max_acceleration = [
-                item.maximum_acceleration_rad_s2 for item in self._model.joint_limits
+            parameters.max_position = [
+                item.maximum_position_rad for item in self._model.joint_limits
             ]
-            parameters.max_jerk = [item.maximum_jerk_rad_s3 for item in self._model.joint_limits]
+            parameters.min_position = [
+                item.minimum_position_rad for item in self._model.joint_limits
+            ]
+            parameters.max_velocity = [
+                item.maximum_velocity_rad_s for item in self._model.joint_limits
+            ]
+            parameters.max_acceleration = [
+                item.maximum_acceleration_rad_s2
+                for item in self._model.joint_limits
+            ]
+            parameters.max_jerk = [
+                item.maximum_jerk_rad_s3 for item in self._model.joint_limits
+            ]
+            parameters.synchronization = self._ruckig.Synchronization.Phase
             if right.minimum_duration_s > 0.0:
                 parameters.minimum_duration = right.minimum_duration_s
             status = generator.calculate(parameters, trajectory)
             if status != self._ruckig.Result.Working:
-                raise BackendOperationError(
-                    f"Ruckig rejected geometric segment {index}: {status}"
+                raise RuckigRouteError(
+                    right.stage,
+                    f"Ruckig rejected geometric segment {index}: {status}",
                 )
             duration = float(trajectory.duration)
             if duration <= 0.0:
-                raise BackendOperationError(f"Ruckig produced a non-positive duration for segment {index}")
+                raise RuckigRouteError(
+                    right.stage,
+                    f"Ruckig produced a non-positive duration for segment {index}",
+                )
             sections = _continuous_sections(trajectory, dof)
             segments.append(
                 TrajectorySegment(
@@ -160,25 +179,34 @@ class RuckigTimeParameterizer:
 
 
 def _waypoint_velocities(
-    waypoints: tuple[GeometricWaypoint, ...], robot_model: RobotModel
+    waypoints: tuple[GeometricWaypoint, ...],
+    robot_model: RobotModel,
 ) -> tuple[tuple[float, ...], ...]:
-    velocities: list[tuple[float, ...]] = []
+    zero = (0.0,) * len(robot_model.joint_names)
+    velocities = []
     for index, waypoint in enumerate(waypoints):
         if index == 0 or index == len(waypoints) - 1 or waypoint.stop:
-            velocities.append((0.0,) * len(robot_model.joint_names))
+            velocities.append(zero)
             continue
-        before = waypoints[index - 1].positions_rad
-        current = waypoint.positions_rad
-        after = waypoints[index + 1].positions_rad
-        values = []
-        for joint_index, limit in enumerate(robot_model.joint_limits):
-            incoming = current[joint_index] - before[joint_index]
-            outgoing = after[joint_index] - current[joint_index]
-            if incoming * outgoing <= 0.0 or abs(incoming) < 1e-10 or abs(outgoing) < 1e-10:
-                values.append(0.0)
-            else:
-                values.append(copysign(0.1 * limit.maximum_velocity_rad_s, incoming))
-        velocities.append(tuple(values))
+        tangent = tuple(
+            after - before
+            for before, after in zip(
+                waypoints[index - 1].positions_rad,
+                waypoints[index + 1].positions_rad,
+            )
+        )
+        moving = tuple(
+            (abs(value), limit.maximum_velocity_rad_s)
+            for value, limit in zip(tangent, robot_model.joint_limits)
+            if abs(value) > 1e-12
+        )
+        if not moving:
+            raise RuckigRouteError(
+                waypoint.stage,
+                f"Ruckig cannot construct a non-stop tangent at waypoint {index}",
+            )
+        scale = min(0.05 * limit / value for value, limit in moving)
+        velocities.append(tuple(scale * value for value in tangent))
     return tuple(velocities)
 
 

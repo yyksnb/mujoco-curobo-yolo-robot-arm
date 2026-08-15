@@ -328,9 +328,16 @@ class PlanningPolicy:
     ik_orientation_tolerance_rad: float
     cartesian_translation_step_m: float
     cartesian_rotation_step_rad: float
+    approach_contact_transition_m: float
     lift_distance_m: float
     preplace_offset_m: float
     joint_limit_margin_rad: float
+    trajectory_validation_joint_step_rad: float
+    trajectory_validation_tcp_translation_step_m: float
+    trajectory_validation_tcp_rotation_step_rad: float
+    trajectory_validation_actuator_position_step_m: float
+    trajectory_validation_swept_point_step_m: float
+    trajectory_validation_max_samples: int
 
     def validate(self) -> None:
         positive_floats = (
@@ -338,12 +345,20 @@ class PlanningPolicy:
             self.ik_orientation_tolerance_rad,
             self.cartesian_translation_step_m,
             self.cartesian_rotation_step_rad,
+            self.approach_contact_transition_m,
             self.lift_distance_m,
             self.preplace_offset_m,
             self.joint_limit_margin_rad,
+            self.trajectory_validation_joint_step_rad,
+            self.trajectory_validation_tcp_translation_step_m,
+            self.trajectory_validation_tcp_rotation_step_rad,
+            self.trajectory_validation_actuator_position_step_m,
+            self.trajectory_validation_swept_point_step_m,
         )
         if not all(isfinite(value) and value > 0.0 for value in positive_floats):
             raise ValueError("Planning distances, tolerances, margins, and periods must be positive")
+        if self.trajectory_validation_max_samples <= 0:
+            raise ValueError("Planning trajectory validation sample budget must be positive")
 
 
 @dataclass(frozen=True)

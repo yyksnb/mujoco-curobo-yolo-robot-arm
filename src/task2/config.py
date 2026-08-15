@@ -472,9 +472,32 @@ def _parse_planning(
         _number(policy_payload, "ik_orientation_tolerance_rad", "policy"),
         _number(policy_payload, "cartesian_translation_step_m", "policy"),
         _number(policy_payload, "cartesian_rotation_step_rad", "policy"),
+        _number(policy_payload, "approach_contact_transition_m", "policy"),
         _number(policy_payload, "lift_distance_m", "policy"),
         _number(policy_payload, "preplace_offset_m", "policy"),
         _number(policy_payload, "joint_limit_margin_rad", "policy"),
+        _number(policy_payload, "trajectory_validation_joint_step_rad", "policy"),
+        _number(
+            policy_payload,
+            "trajectory_validation_tcp_translation_step_m",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "trajectory_validation_tcp_rotation_step_rad",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "trajectory_validation_actuator_position_step_m",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "trajectory_validation_swept_point_step_m",
+            "policy",
+        ),
+        _integer(policy_payload, "trajectory_validation_max_samples", "policy"),
     )
     backends = _mapping(payload, "backends", "planning config")
     if backend_id not in backends:

@@ -9,12 +9,17 @@ import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
 from .backends.errors import BackendOperationError, BackendUnavailableError
-from .backends.ruckig import GeometricWaypoint, RuckigTimeParameterizer
+from .backends.ruckig import (
+    GeometricWaypoint,
+    RuckigRouteError,
+    RuckigTimeParameterizer,
+)
 from .backends.vamp import VampBackend
 from .contracts import (
     GraspCandidate,
     PlacementGoal,
     PlacementGoalKind,
+    PlannedTrajectory,
     PlanningAttempt,
     PlanningErrorCode,
     PlanningRequest,
@@ -22,6 +27,9 @@ from .contracts import (
     RigidTransform,
     RobotState,
     SceneGeometry,
+    TrajectoryKnot,
+    TrajectoryPolynomialSection,
+    TrajectorySegment,
     TrajectoryStage,
 )
 from .contracts.geometry import compose, inverse, reframe
@@ -40,6 +48,12 @@ class _Route:
     waypoints: tuple[GeometricWaypoint, ...]
     events: tuple[tuple[str, TrajectoryStage, int, dict[str, float]], ...]
     T_world_object_goal: RigidTransform
+
+
+@dataclass(frozen=True)
+class _TargetContactAllowance:
+    endpoint: frozenset[str]
+    motion: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -150,37 +164,98 @@ def plan(
             candidate_routes.append((seed, route))
         if not candidate_routes:
             continue
-        selected_seed, route = min(
+        for selected_seed, route in sorted(
             candidate_routes,
             key=lambda item: _route_selection_key(item[1], request, item[0]),
-        )
-        try:
-            trajectory = ruckig.parameterize(route.waypoints, route.events)
-        except BackendUnavailableError as exc:
-            return PlanningResult.failed(
-                PlanningErrorCode.BACKEND_UNAVAILABLE,
-                str(exc),
-                tuple(attempts),
-                _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+        ):
+            parameterization_started = monotonic()
+            try:
+                trajectory = ruckig.parameterize(route.waypoints, route.events)
+            except BackendUnavailableError as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_UNAVAILABLE,
+                    str(exc),
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            except RuckigRouteError as exc:
+                last_failure = _RouteFailure(
+                    PlanningErrorCode.RUCKIG_FAILED,
+                    exc.stage,
+                    str(exc),
+                )
+                attempts.append(
+                    PlanningAttempt(
+                        candidate.candidate_id,
+                        selected_seed,
+                        exc.stage,
+                        monotonic() - parameterization_started,
+                        PlanningErrorCode.RUCKIG_FAILED,
+                        str(exc),
+                    )
+                )
+                continue
+            except BackendOperationError as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.RUCKIG_FAILED,
+                    str(exc),
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            validation_started = monotonic()
+            try:
+                _validate_time_parameterized_trajectory(
+                    request,
+                    candidate,
+                    trajectory,
+                    vamp,
+                    started,
+                )
+            except _RouteFailure as failure:
+                last_failure = failure
+                attempts.append(
+                    PlanningAttempt(
+                        candidate.candidate_id,
+                        selected_seed,
+                        failure.stage,
+                        monotonic() - validation_started,
+                        failure.code,
+                        failure.message,
+                    )
+                )
+                if failure.code is PlanningErrorCode.BUDGET_EXHAUSTED:
+                    return PlanningResult.failed(
+                        failure.code,
+                        failure.message,
+                        tuple(attempts),
+                        _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                    )
+                continue
+            except BackendUnavailableError as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_UNAVAILABLE,
+                    str(exc),
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            except BackendOperationError as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_ERROR,
+                    f"final trajectory validation failed: {exc}",
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            metadata = _metadata(
+                request, vamp.version, ik_solver.version, ruckig.version
             )
-        except BackendOperationError as exc:
-            return PlanningResult.failed(
-                PlanningErrorCode.RUCKIG_FAILED,
-                str(exc),
+            metadata["selected_candidate_id"] = candidate.candidate_id
+            metadata["selected_seed"] = selected_seed
+            return PlanningResult.succeeded(
+                trajectory,
+                route.T_world_object_goal,
                 tuple(attempts),
-                _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                metadata,
             )
-        metadata = _metadata(
-            request, vamp.version, ik_solver.version, ruckig.version
-        )
-        metadata["selected_candidate_id"] = candidate.candidate_id
-        metadata["selected_seed"] = selected_seed
-        return PlanningResult.succeeded(
-            trajectory,
-            route.T_world_object_goal,
-            tuple(attempts),
-            metadata,
-        )
     if len(request.candidates) > len(candidates):
         code = PlanningErrorCode.BUDGET_EXHAUSTED
         message = "Planning candidate budget was exhausted before a complete route was found"
@@ -288,12 +363,23 @@ def _build_route(
         inverse(request.T_world_base),
         reframe(candidate.T_world_tcp, child_frame=request.robot_model.tcp_frame),
     )
-    approach_poses = _interpolate_poses(
+    interpolated_approach = _interpolate_poses(
         pregrasp_pose,
         grasp_pose,
         request.planning_policy.cartesian_translation_step_m,
         request.planning_policy.cartesian_rotation_step_rad,
-    )[1:]
+        required_fractions=_approach_transition_fractions(
+            pregrasp_pose,
+            grasp_pose,
+            request.planning_policy.approach_contact_transition_m,
+        ),
+    )
+    approach_poses = interpolated_approach[1:]
+    approach_contact_allowances = _approach_contact_allowances(
+        interpolated_approach,
+        request.planning_policy.approach_contact_transition_m,
+        frozenset(candidate.expected_contacts),
+    )
     approach_states = _continuous_ik(
         request,
         candidate,
@@ -303,6 +389,7 @@ def _build_route(
         RobotState(request.robot_model.joint_names, pregrasp_path[-1]),
         target_geometries,
         environment_geometries,
+        approach_contact_allowances,
         TrajectoryStage.APPROACH,
         total_started,
         ik_solution_count,
@@ -394,6 +481,7 @@ def _build_route(
         grasp_state,
         (),
         environment_geometries,
+        (),
         TrajectoryStage.LIFT,
         total_started,
         ik_solution_count,
@@ -543,10 +631,13 @@ def _continuous_ik(
     seed_state: RobotState,
     target_geometries: tuple[SceneGeometry, ...],
     environment_geometries: tuple[SceneGeometry, ...],
+    allowed_target_contacts: tuple[_TargetContactAllowance, ...],
     stage: TrajectoryStage,
     total_started: float,
     ik_solution_count: int,
 ) -> tuple[RobotState, ...]:
+    if target_geometries and len(allowed_target_contacts) != len(poses):
+        raise ValueError("target contact allowances must match Cartesian samples")
     states = []
     current = seed_state
     support_departed = stage is not TrajectoryStage.LIFT
@@ -627,22 +718,24 @@ def _continuous_ik(
                 continue
             if target_geometries:
                 opening = candidate.grasp_command.pregrasp_opening_m
+                allowed_contacts = allowed_target_contacts[index]
                 contacts = vamp.semantic_target_contacts(
                     state.positions_rad,
                     target_geometries,
                     opening,
                     request.T_world_base,
                 )
-                if contacts - set(candidate.expected_contacts):
+                if contacts - allowed_contacts.endpoint:
                     continue
                 if _semantic_motion_has_forbidden_contact(
                     current.positions_rad,
                     state.positions_rad,
                     target_geometries,
                     opening,
-                    frozenset(candidate.expected_contacts),
+                    allowed_contacts.motion,
                     vamp,
                     request.T_world_base,
+                    goal_allowed_groups=allowed_contacts.endpoint,
                 ):
                     continue
             selected = state
@@ -772,6 +865,8 @@ def _semantic_motion_has_forbidden_contact(
     allowed_groups: frozenset[str],
     vamp: VampBackend,
     T_world_base: RigidTransform,
+    *,
+    goal_allowed_groups: frozenset[str] | None = None,
 ) -> bool:
     sample_count = max(
         2,
@@ -785,7 +880,12 @@ def _semantic_motion_has_forbidden_contact(
         contacts = vamp.semantic_target_contacts(
             state, geometries, opening_m, T_world_base
         )
-        if contacts - allowed_groups:
+        permitted = (
+            goal_allowed_groups
+            if goal_allowed_groups is not None and index == sample_count
+            else allowed_groups
+        )
+        if contacts - permitted:
             return True
     return False
 
@@ -852,6 +952,528 @@ def _path_has_forbidden_attachment_contact(
     return False
 
 
+def _validate_time_parameterized_trajectory(
+    request: PlanningRequest,
+    candidate: GraspCandidate,
+    trajectory: PlannedTrajectory,
+    vamp: VampBackend,
+    total_started: float,
+) -> None:
+    target_geometries = tuple(
+        item for item in request.scene.geometries if item.object_id == request.target_object_id
+    )
+    environment_geometries = tuple(
+        item
+        for item in request.scene.geometries
+        if item.object_id != request.target_object_id
+    )
+    all_object_ids = tuple(
+        sorted({item.object_id for item in request.scene.geometries})
+    )
+    strict_unloaded_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(request.target_object_id,),
+    )
+    exact_unloaded_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=all_object_ids,
+    )
+    exact_loaded_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=all_object_ids,
+        T_tcp_object=candidate.T_tcp_object,
+        attached_geometry=request.object_config.attached_geometry,
+    )
+    strict_loaded_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(request.target_object_id,),
+        T_tcp_object=candidate.T_tcp_object,
+        attached_geometry=request.object_config.attached_geometry,
+    )
+    stage_environments = {
+        TrajectoryStage.PREGRASP: strict_unloaded_environment,
+        TrajectoryStage.APPROACH: exact_unloaded_environment,
+        TrajectoryStage.GRASP: exact_unloaded_environment,
+        TrajectoryStage.LIFT: exact_loaded_environment,
+        TrajectoryStage.EGRESS: strict_loaded_environment,
+        TrajectoryStage.PLACE: strict_loaded_environment,
+    }
+    opening_channel = request.end_effector_config.actuator_position_channel
+    segment_samples: dict[int, tuple[TrajectoryKnot, ...]] = {}
+    native_stage_elapsed: dict[TrajectoryStage, float] = {}
+    validation_sample_count = 0
+    for stage in TrajectoryStage:
+        native_started = monotonic()
+        native_samples: list[tuple[int, TrajectoryKnot]] = []
+        previous_time_s: float | None = None
+        for segment_index, segment in enumerate(trajectory.segments):
+            if segment.stage is not stage:
+                continue
+            samples = _trajectory_segment_validation_samples(
+                segment,
+                opening_channel,
+                vamp,
+                request,
+                candidate,
+                request.planning_policy.trajectory_validation_max_samples
+                - validation_sample_count,
+            )
+            validation_sample_count += len(samples)
+            segment_samples[segment_index] = samples
+            for sample in samples:
+                if previous_time_s is not None and sample.time_s == previous_time_s:
+                    continue
+                native_samples.append((segment_index, sample))
+                previous_time_s = sample.time_s
+        first_configuration = native_samples[0][1].positions_rad
+        environment = stage_environments[stage]
+        if not vamp.configuration_valid(first_configuration, environment):
+            raise _RouteFailure(
+                PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                stage,
+                f"time-parameterized {stage.value} has an invalid VAMP "
+                f"configuration at t={native_samples[0][1].time_s:.6f}s",
+            )
+        configurations = tuple(
+            sample.positions_rad for _, sample in native_samples
+        )
+        if not vamp.path_valid(configurations, environment):
+            _check_stage_budget(
+                request, monotonic() - native_started, total_started, stage
+            )
+            _raise_native_trajectory_failure(
+                request,
+                stage,
+                native_samples,
+                environment,
+                vamp,
+                native_started,
+                total_started,
+            )
+        elapsed = monotonic() - native_started
+        _check_stage_budget(request, elapsed, total_started, stage)
+        native_stage_elapsed[stage] = elapsed
+
+    expected_contacts = frozenset(candidate.expected_contacts)
+    grasp_pose = compose(
+        inverse(request.T_world_base),
+        reframe(candidate.T_world_tcp, child_frame=request.robot_model.tcp_frame),
+    )
+    grasp_position = np.asarray(grasp_pose.matrix, dtype=np.float64)[:3, 3]
+    support_departed = False
+    final_grasp_contacts = frozenset()
+    stage_started = monotonic()
+    previous_stage: TrajectoryStage | None = None
+    previous_time_s: float | None = None
+    stage_sample_count = 0
+
+    for segment_index, segment in enumerate(trajectory.segments):
+        stage = segment.stage
+        if stage is not previous_stage:
+            if previous_stage is not None:
+                _check_stage_budget(
+                    request,
+                    native_stage_elapsed[previous_stage]
+                    + monotonic()
+                    - stage_started,
+                    total_started,
+                    previous_stage,
+                )
+            stage_started = monotonic()
+            previous_stage = stage
+            previous_time_s = None
+            stage_sample_count = 0
+        samples = segment_samples[segment_index]
+        for sample in samples:
+            if previous_time_s is not None and sample.time_s == previous_time_s:
+                continue
+            configuration = sample.positions_rad
+            opening_m = float(sample.actuator_channels[opening_channel])
+            time_s = sample.time_s
+            if stage in (
+                TrajectoryStage.APPROACH,
+                TrajectoryStage.GRASP,
+                TrajectoryStage.LIFT,
+            ):
+                environment_contacts = vamp.semantic_target_contacts(
+                    configuration,
+                    environment_geometries,
+                    opening_m,
+                    request.T_world_base,
+                )
+                if environment_contacts:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        f"time-parameterized {stage.value} robot contacts the environment "
+                        f"at current opening {opening_m:.6f}m: "
+                        f"{sorted(environment_contacts)!r}",
+                    )
+
+            if stage in (
+                TrajectoryStage.PREGRASP,
+                TrajectoryStage.APPROACH,
+                TrajectoryStage.GRASP,
+            ):
+                target_contacts = vamp.semantic_target_contacts(
+                    configuration,
+                    target_geometries,
+                    opening_m,
+                    request.T_world_base,
+                )
+                allowed_target_contacts = frozenset()
+                if stage is TrajectoryStage.APPROACH:
+                    tcp_position = np.asarray(
+                        vamp.tcp_pose(configuration).matrix, dtype=np.float64
+                    )[:3, 3]
+                    grasp_distance_m = float(
+                        np.linalg.norm(tcp_position - grasp_position)
+                    )
+                    if grasp_distance_m <= (
+                        request.planning_policy.approach_contact_transition_m + 1e-12
+                    ):
+                        allowed_target_contacts = expected_contacts
+                elif stage is TrajectoryStage.GRASP:
+                    allowed_target_contacts = expected_contacts
+                    final_grasp_contacts = target_contacts
+                forbidden = target_contacts - allowed_target_contacts
+                if forbidden:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        f"time-parameterized {stage.value} has forbidden target contacts "
+                        f"at current opening {opening_m:.6f}m"
+                        + (
+                            f" and grasp distance {grasp_distance_m:.6f}m"
+                            if stage is TrajectoryStage.APPROACH
+                            else ""
+                        )
+                        + f": {sorted(forbidden)!r}",
+                    )
+
+            if stage is TrajectoryStage.LIFT:
+                attachment_contacts = vamp.semantic_attachment_contacts(
+                    configuration,
+                    candidate.T_tcp_object,
+                    request.object_config.attached_geometry,
+                    environment_geometries,
+                    request.T_world_base,
+                )
+                forbidden_attachment = attachment_contacts - {
+                    request.source_support_group
+                }
+                if forbidden_attachment:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        "time-parameterized LIFT attached object has forbidden "
+                        f"contacts: {sorted(forbidden_attachment)!r}",
+                    )
+                on_support = request.source_support_group in attachment_contacts
+                if support_departed and on_support:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        "time-parameterized LIFT attached object recontacts the "
+                        "declared source support",
+                    )
+                if not on_support:
+                    support_departed = True
+            previous_time_s = time_s
+            if stage_sample_count % 16 == 0:
+                _check_stage_budget(
+                    request,
+                    native_stage_elapsed[stage] + monotonic() - stage_started,
+                    total_started,
+                    stage,
+                )
+            stage_sample_count += 1
+
+    if previous_stage is not None:
+        _check_stage_budget(
+            request,
+            native_stage_elapsed[previous_stage] + monotonic() - stage_started,
+            total_started,
+            previous_stage,
+        )
+
+    if not expected_contacts.issubset(final_grasp_contacts):
+        raise _RouteFailure(
+            PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+            TrajectoryStage.GRASP,
+            f"time-parameterized GRASP final contacts {sorted(final_grasp_contacts)!r} "
+            f"do not include {sorted(expected_contacts)!r}",
+        )
+    if not support_departed:
+        raise _RouteFailure(
+            PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+            TrajectoryStage.LIFT,
+            "time-parameterized LIFT attached object did not depart the declared source support",
+        )
+
+
+def _raise_native_trajectory_failure(
+    request: PlanningRequest,
+    stage: TrajectoryStage,
+    samples: list[tuple[int, TrajectoryKnot]],
+    environment,
+    vamp: VampBackend,
+    stage_started: float,
+    total_started: float,
+) -> None:
+    previous_configuration: tuple[float, ...] | None = None
+    for sample_index, (segment_index, sample) in enumerate(samples):
+        configuration = sample.positions_rad
+        if previous_configuration is None:
+            if not vamp.configuration_valid(configuration, environment):
+                raise _RouteFailure(
+                    PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                    stage,
+                    f"time-parameterized {stage.value} has an invalid VAMP "
+                    f"configuration at t={sample.time_s:.6f}s",
+                )
+        elif not vamp.motion_valid(
+            previous_configuration, configuration, environment
+        ):
+            raise _RouteFailure(
+                PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                stage,
+                f"time-parameterized {stage.value} has invalid native robot "
+                f"motion in segment {segment_index} before "
+                f"t={sample.time_s:.6f}s",
+            )
+        previous_configuration = configuration
+        if sample_index % 16 == 0:
+            _check_stage_budget(
+                request, monotonic() - stage_started, total_started, stage
+            )
+    raise _RouteFailure(
+        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+        stage,
+        f"time-parameterized {stage.value} failed native path validation over "
+        "configured-resolution samples",
+    )
+
+
+def _trajectory_segment_validation_samples(
+    segment: TrajectorySegment,
+    opening_channel: str,
+    vamp: VampBackend,
+    request: PlanningRequest,
+    candidate: GraspCandidate,
+    maximum_sample_count: int,
+) -> tuple[TrajectoryKnot, ...]:
+    policy = request.planning_policy
+    if maximum_sample_count < 2:
+        raise _RouteFailure(
+            PlanningErrorCode.BUDGET_EXHAUSTED,
+            segment.stage,
+            "time-parameterized trajectory validation exceeded its configured "
+            "sample budget",
+        )
+    opening_rate = abs(
+        float(segment.end_actuator_channels[opening_channel])
+        - float(segment.start_actuator_channels[opening_channel])
+    ) / segment.duration_s
+    sample_times: set[float] = set()
+    for section in segment.sections:
+        maximum_joint_speed = _maximum_section_joint_speed(section)
+        maximum_normalized_rate = max(
+            maximum_joint_speed / policy.trajectory_validation_joint_step_rad,
+            opening_rate
+            / policy.trajectory_validation_actuator_position_step_m,
+        )
+        section_sample_count = max(
+            1, int(ceil(maximum_normalized_rate * section.duration_s))
+        )
+        for index in range(section_sample_count + 1):
+            sample_times.add(
+                section.start_time_s
+                + section.duration_s * index / section_sample_count
+            )
+        if len(sample_times) > maximum_sample_count:
+            raise _RouteFailure(
+                PlanningErrorCode.BUDGET_EXHAUSTED,
+                segment.stage,
+                "time-parameterized trajectory validation exceeded its configured "
+                "sample budget",
+            )
+    if segment.stage in (
+        TrajectoryStage.APPROACH,
+        TrajectoryStage.GRASP,
+        TrajectoryStage.LIFT,
+    ):
+        sample_times = _refine_trajectory_times_by_swept_motion(
+            segment,
+            sample_times,
+            opening_channel,
+            vamp,
+            request,
+            candidate,
+            maximum_sample_count,
+        )
+    return tuple(segment.sample(time_s) for time_s in sorted(sample_times))
+
+
+def _refine_trajectory_times_by_swept_motion(
+    segment: TrajectorySegment,
+    sample_times: set[float],
+    opening_channel: str,
+    vamp: VampBackend,
+    request: PlanningRequest,
+    candidate: GraspCandidate,
+    maximum_sample_count: int,
+) -> set[float]:
+    policy = request.planning_policy
+    motion_samples: dict[
+        float, tuple[np.ndarray, Rotation, np.ndarray, np.ndarray]
+    ] = {}
+
+    def motion_sample(
+        time_s: float,
+    ) -> tuple[np.ndarray, Rotation, np.ndarray, np.ndarray]:
+        if time_s not in motion_samples:
+            knot = segment.sample(time_s)
+            configuration = knot.positions_rad
+            opening_m = float(knot.actuator_channels[opening_channel])
+            tcp_matrix = np.asarray(
+                vamp.tcp_pose(configuration).matrix, dtype=np.float64
+            )
+            robot_centers = np.asarray(
+                vamp.semantic_robot_sphere_centers(configuration, opening_m),
+                dtype=np.float64,
+            ).reshape((-1, 3))
+            attached_centers = np.empty((0, 3), dtype=np.float64)
+            if segment.stage is TrajectoryStage.LIFT:
+                attached_centers = np.asarray(
+                    vamp.semantic_attachment_sphere_centers(
+                        configuration,
+                        candidate.T_tcp_object,
+                        request.object_config.attached_geometry,
+                    ),
+                    dtype=np.float64,
+                ).reshape((-1, 3))
+            motion_samples[time_s] = (
+                tcp_matrix[:3, 3],
+                Rotation.from_matrix(tcp_matrix[:3, :3]),
+                robot_centers,
+                attached_centers,
+            )
+        return motion_samples[time_s]
+
+    while True:
+        additions = set()
+        ordered = sorted(sample_times)
+        for left_time, right_time in zip(ordered, ordered[1:]):
+            midpoint_time = 0.5 * (left_time + right_time)
+            if midpoint_time in (left_time, right_time):
+                left = motion_sample(left_time)
+                right = motion_sample(right_time)
+                endpoint_translation = float(np.linalg.norm(right[0] - left[0]))
+                endpoint_rotation = float(
+                    (left[1].inv() * right[1]).magnitude()
+                )
+                endpoint_robot_sweep = _maximum_point_sweep(
+                    left[2], left[2], right[2]
+                )
+                endpoint_attachment_sweep = _maximum_point_sweep(
+                    left[3], left[3], right[3]
+                )
+                if (
+                    endpoint_translation
+                    > policy.trajectory_validation_tcp_translation_step_m
+                    or endpoint_rotation
+                    > policy.trajectory_validation_tcp_rotation_step_rad
+                    or endpoint_robot_sweep
+                    > policy.trajectory_validation_swept_point_step_m
+                    or endpoint_attachment_sweep
+                    > policy.trajectory_validation_swept_point_step_m
+                ):
+                    raise BackendOperationError(
+                        f"could not refine time-parameterized {segment.stage.value} "
+                        "validation interval: endpoint TCP translation "
+                        f"{endpoint_translation:.9g}m, rotation "
+                        f"{endpoint_rotation:.9g}rad, robot sphere sweep "
+                        f"{endpoint_robot_sweep:.9g}m, attachment sweep "
+                        f"{endpoint_attachment_sweep:.9g}m"
+                    )
+                continue
+            left = motion_sample(left_time)
+            midpoint = motion_sample(midpoint_time)
+            right = motion_sample(right_time)
+            tcp_translation_sweep = float(
+                np.linalg.norm(midpoint[0] - left[0])
+                + np.linalg.norm(right[0] - midpoint[0])
+            )
+            tcp_rotation_sweep = float(
+                (left[1].inv() * midpoint[1]).magnitude()
+                + (midpoint[1].inv() * right[1]).magnitude()
+            )
+            robot_sweep = _maximum_point_sweep(left[2], midpoint[2], right[2])
+            attachment_sweep = _maximum_point_sweep(
+                left[3], midpoint[3], right[3]
+            )
+            if (
+                tcp_translation_sweep
+                > policy.trajectory_validation_tcp_translation_step_m
+                or tcp_rotation_sweep
+                > policy.trajectory_validation_tcp_rotation_step_rad
+                or robot_sweep
+                > policy.trajectory_validation_swept_point_step_m
+                or attachment_sweep
+                > policy.trajectory_validation_swept_point_step_m
+            ):
+                additions.add(midpoint_time)
+        if not additions:
+            return sample_times
+        if len(sample_times) + len(additions) > maximum_sample_count:
+            raise _RouteFailure(
+                PlanningErrorCode.BUDGET_EXHAUSTED,
+                segment.stage,
+                "time-parameterized trajectory validation exceeded its configured "
+                "sample budget",
+            )
+        sample_times.update(additions)
+
+
+def _maximum_point_sweep(
+    left: np.ndarray,
+    midpoint: np.ndarray,
+    right: np.ndarray,
+) -> float:
+    if left.shape != midpoint.shape or midpoint.shape != right.shape:
+        raise BackendOperationError(
+            "VAMP semantic collision sphere count changed during trajectory validation"
+        )
+    if left.size == 0:
+        return 0.0
+    return float(
+        np.max(
+            np.linalg.norm(midpoint - left, axis=1)
+            + np.linalg.norm(right - midpoint, axis=1)
+        )
+    )
+
+
+def _maximum_section_joint_speed(section: TrajectoryPolynomialSection) -> float:
+    maximum = 0.0
+    for _, c1, c2, c3 in section.position_coefficients:
+        times = [0.0, section.duration_s]
+        if abs(c3) > 1e-15:
+            extremum = -c2 / (3.0 * c3)
+            if 0.0 < extremum < section.duration_s:
+                times.append(extremum)
+        maximum = max(
+            maximum,
+            *(abs(c1 + time_s * (2.0 * c2 + time_s * 3.0 * c3)) for time_s in times),
+        )
+    return maximum
+
+
 def _has_joint_margin(state: RobotState, request: PlanningRequest) -> bool:
     margin = request.planning_policy.joint_limit_margin_rad
     return all(
@@ -865,6 +1487,8 @@ def _interpolate_poses(
     goal: RigidTransform,
     translation_step_m: float,
     rotation_step_rad: float,
+    *,
+    required_fractions: tuple[float, ...] = (),
 ) -> tuple[RigidTransform, ...]:
     if start.parent_frame != goal.parent_frame or start.child_frame != goal.child_frame:
         raise ValueError("Cartesian interpolation requires matching frames")
@@ -874,7 +1498,13 @@ def _interpolate_poses(
     rotations = Rotation.from_matrix(np.stack((start_matrix[:3, :3], goal_matrix[:3, :3])))
     angle = float((rotations[0].inv() * rotations[1]).magnitude())
     count = max(1, int(ceil(max(distance / translation_step_m, angle / rotation_step_rad))))
-    fractions = np.linspace(0.0, 1.0, count + 1)
+    if any(not 0.0 < fraction < 1.0 for fraction in required_fractions):
+        raise ValueError("required Cartesian interpolation fractions must lie in (0, 1)")
+    fractions = np.unique(
+        np.concatenate(
+            (np.linspace(0.0, 1.0, count + 1), np.asarray(required_fractions))
+        )
+    )
     slerp = Slerp((0.0, 1.0), rotations)
     result = []
     for fraction, rotation in zip(fractions, slerp(fractions).as_matrix()):
@@ -888,6 +1518,44 @@ def _interpolate_poses(
         ) + ((0.0, 0.0, 0.0, 1.0),)
         result.append(RigidTransform(start.parent_frame, start.child_frame, matrix))  # type: ignore[arg-type]
     return tuple(result)
+
+
+def _approach_transition_fractions(
+    start: RigidTransform,
+    goal: RigidTransform,
+    transition_distance_m: float,
+) -> tuple[float, ...]:
+    start_position = np.asarray(start.matrix, dtype=np.float64)[:3, 3]
+    goal_position = np.asarray(goal.matrix, dtype=np.float64)[:3, 3]
+    distance = float(np.linalg.norm(goal_position - start_position))
+    if distance <= transition_distance_m + 1e-12:
+        return ()
+    return (1.0 - transition_distance_m / distance,)
+
+
+def _approach_contact_allowances(
+    poses: tuple[RigidTransform, ...],
+    transition_distance_m: float,
+    expected_contacts: frozenset[str],
+) -> tuple[_TargetContactAllowance, ...]:
+    goal_position = np.asarray(poses[-1].matrix, dtype=np.float64)[:3, 3]
+    allowances = []
+    for segment_start, segment_end in zip(poses, poses[1:]):
+        start_position = np.asarray(segment_start.matrix, dtype=np.float64)[:3, 3]
+        end_position = np.asarray(segment_end.matrix, dtype=np.float64)[:3, 3]
+        start_remaining = float(np.linalg.norm(goal_position - start_position))
+        end_remaining = float(np.linalg.norm(goal_position - end_position))
+        allowances.append(
+            _TargetContactAllowance(
+                expected_contacts
+                if end_remaining <= transition_distance_m + 1e-12
+                else frozenset(),
+                expected_contacts
+                if start_remaining <= transition_distance_m + 1e-12
+                else frozenset(),
+            )
+        )
+    return tuple(allowances)
 
 
 def _translate_world_z(pose: RigidTransform, distance_m: float) -> RigidTransform:
@@ -1000,7 +1668,14 @@ def _metadata(
             "total_timeout_s": request.budgets.total_timeout_s,
         },
         "parameters": {
+            "trajectory_collision_validation": "configured_resolution_sampling",
             "cartesian_translation_step_m": request.planning_policy.cartesian_translation_step_m,
             "cartesian_rotation_step_rad": request.planning_policy.cartesian_rotation_step_rad,
+            "trajectory_validation_joint_step_rad": request.planning_policy.trajectory_validation_joint_step_rad,
+            "trajectory_validation_tcp_translation_step_m": request.planning_policy.trajectory_validation_tcp_translation_step_m,
+            "trajectory_validation_tcp_rotation_step_rad": request.planning_policy.trajectory_validation_tcp_rotation_step_rad,
+            "trajectory_validation_actuator_position_step_m": request.planning_policy.trajectory_validation_actuator_position_step_m,
+            "trajectory_validation_swept_point_step_m": request.planning_policy.trajectory_validation_swept_point_step_m,
+            "trajectory_validation_max_samples": request.planning_policy.trajectory_validation_max_samples,
         },
     }

@@ -213,10 +213,22 @@ collision_spheres:
     # about 1.05 mm.  This radius gives that physical mesh surface 1 mm margin.
     radius: 0.044
   - center:
-    - -0.01647
-    - -0.02316
-    - -0.104102
+    - -0.01418
+    - -0.020505
+    - -0.102609
+    # Reposition the broad proxy to remove its empty-space tank overlap. The
+    # following local sphere conservatively restores the displaced mesh cover.
     radius: 0.034511
+  - center:
+    - -0.0208371
+    - -0.00614625
+    - -0.13297255
+    # Offline surface calibration over the formal STL: a 128-subdivision
+    # barycentric lattice plus its 0.253 mm fill-distance bound covers the
+    # complete portion of the original proxy envelope displaced by the move,
+    # with a further 0.5 mm calibration margin. VAMP adds the planner and
+    # numeric buffers separately.
+    radius: 0.00951
   spherical_wrist_2_link:
   - center:
     - 0.003118
