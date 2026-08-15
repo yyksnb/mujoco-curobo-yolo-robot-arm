@@ -476,6 +476,26 @@ def _parse_planning(
         _number(policy_payload, "lift_distance_m", "policy"),
         _number(policy_payload, "preplace_offset_m", "policy"),
         _number(policy_payload, "joint_limit_margin_rad", "policy"),
+        _number(
+            policy_payload,
+            "payload_tcp_max_angular_velocity_rad_s",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "payload_tcp_max_translation_velocity_m_s",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "payload_tcp_max_translation_acceleration_m_s2",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "payload_motion_validation_time_step_s",
+            "policy",
+        ),
         _number(policy_payload, "trajectory_validation_joint_step_rad", "policy"),
         _number(
             policy_payload,

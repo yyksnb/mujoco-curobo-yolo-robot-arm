@@ -332,6 +332,10 @@ class PlanningPolicy:
     lift_distance_m: float
     preplace_offset_m: float
     joint_limit_margin_rad: float
+    payload_tcp_max_angular_velocity_rad_s: float
+    payload_tcp_max_translation_velocity_m_s: float
+    payload_tcp_max_translation_acceleration_m_s2: float
+    payload_motion_validation_time_step_s: float
     trajectory_validation_joint_step_rad: float
     trajectory_validation_tcp_translation_step_m: float
     trajectory_validation_tcp_rotation_step_rad: float
@@ -349,6 +353,10 @@ class PlanningPolicy:
             self.lift_distance_m,
             self.preplace_offset_m,
             self.joint_limit_margin_rad,
+            self.payload_tcp_max_angular_velocity_rad_s,
+            self.payload_tcp_max_translation_velocity_m_s,
+            self.payload_tcp_max_translation_acceleration_m_s2,
+            self.payload_motion_validation_time_step_s,
             self.trajectory_validation_joint_step_rad,
             self.trajectory_validation_tcp_translation_step_m,
             self.trajectory_validation_tcp_rotation_step_rad,

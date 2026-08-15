@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from task2 import plan, target
-from task2.backends.errors import BackendUnavailableError
+from task2.backends.errors import BackendOperationError, BackendUnavailableError
 from task2.backends.ruckig import RuckigRouteError, RuckigTimeParameterizer
 from task2.backends.vamp import (
     VampPlan,
@@ -73,10 +73,19 @@ class _FakeVamp:
         )
 
     def tcp_pose(self, configuration):
-        return _pose(
+        angle = configuration[0]
+        cosine = float(np.cos(angle))
+        sine = float(np.sin(angle))
+        xyz = tuple(value * 10.0 for value in configuration[:3])
+        return RigidTransform(
             self.model.base_frame,
             self.model.tcp_frame,
-            tuple(value * 10.0 for value in configuration[:3]),
+            (
+                (cosine, -sine, 0.0, xyz[0]),
+                (sine, cosine, 0.0, xyz[1]),
+                (0.0, 0.0, 1.0, xyz[2]),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
         )
 
     def semantic_robot_sphere_centers(self, configuration, opening_m):
@@ -210,6 +219,48 @@ class _FirstRouteRejectingRuckig:
         return self._delegate.parameterize(waypoints, events)
 
 
+class _ScaleIgnoringRuckig:
+    def __init__(self, delegate):
+        self._delegate = delegate
+        self.version = delegate.version
+
+    def parameterize(self, waypoints, events):
+        return self._delegate.parameterize(
+            tuple(replace(item, motion_scale=1.0) for item in waypoints),
+            events,
+        )
+
+
+class _PayloadSamplingVamp(_FakeVamp):
+    def __init__(self, robot_model, *, clock=None, fail_fk=False):
+        super().__init__(robot_model)
+        self.payload_sampling = False
+        self.clock = clock
+        self.fail_fk = fail_fk
+
+    def tcp_pose(self, configuration):
+        if self.payload_sampling:
+            if self.clock is not None:
+                self.clock[0] += 0.01
+            if self.fail_fk:
+                raise BackendOperationError("VAMP FK failed during payload sampling")
+        return super().tcp_pose(configuration)
+
+
+class _PayloadSamplingRuckig:
+    def __init__(self, delegate, vamp):
+        self._delegate = delegate
+        self._vamp = vamp
+        self.version = delegate.version
+        self.trajectories = []
+
+    def parameterize(self, waypoints, events):
+        trajectory = self._delegate.parameterize(waypoints, events)
+        self.trajectories.append(trajectory)
+        self._vamp.payload_sampling = True
+        return trajectory
+
+
 def _pose(parent: str, child: str, xyz=(0.0, 0.0, 0.0)) -> RigidTransform:
     return RigidTransform(
         parent,
@@ -312,6 +363,36 @@ def _fake_dependencies() -> PlanningDependencies:
         lambda robot_model: RuckigTimeParameterizer(robot_model, backend.ruckig),
         backend.ik_solution_count,
         backend.placement_sample_count,
+    )
+
+
+def _maximum_payload_q0_speed(trajectory, time_step_s: float) -> float:
+    times = []
+    positions = []
+    payload_stages = {
+        TrajectoryStage.LIFT,
+        TrajectoryStage.EGRESS,
+        TrajectoryStage.PLACE,
+    }
+    for segment in trajectory.segments:
+        if segment.stage not in payload_stages:
+            continue
+        sample_count = max(2, int(np.ceil(segment.duration_s / time_step_s)))
+        for index in range(sample_count + 1):
+            local_time_s = segment.duration_s * index / sample_count
+            time_s = segment.start_time_s + local_time_s
+            if times and abs(time_s - times[-1]) <= 1e-12:
+                continue
+            times.append(time_s)
+            positions.append(segment.sample(local_time_s).positions_rad[0])
+    return max(
+        abs(right - left) / (right_time - left_time)
+        for left, right, left_time, right_time in zip(
+            positions,
+            positions[1:],
+            times,
+            times[1:],
+        )
     )
 
 
@@ -497,6 +578,13 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         (42, (0.287652, -0.005146, 0.399621), 0.010515),
     )
     assert CONFIG.planning_policy.approach_contact_transition_m == 0.01
+    assert CONFIG.planning_policy.payload_tcp_max_angular_velocity_rad_s == 0.44
+    assert CONFIG.planning_policy.payload_tcp_max_translation_velocity_m_s == 0.20
+    assert (
+        CONFIG.planning_policy.payload_tcp_max_translation_acceleration_m_s2
+        == 2.00
+    )
+    assert CONFIG.planning_policy.payload_motion_validation_time_step_s == 0.01
     assert CONFIG.planning_policy.trajectory_validation_joint_step_rad == 0.01
     assert (
         CONFIG.planning_policy.trajectory_validation_tcp_translation_step_m
@@ -526,12 +614,190 @@ def test_plan_continues_after_a_geometric_route_ruckig_rejection() -> None:
     result = plan(request, dependencies=dependencies)
 
     assert result.success, result.message
-    assert rejecting.calls == 2
+    assert rejecting.calls >= 2
     assert any(
         attempt.error_code is PlanningErrorCode.RUCKIG_FAILED
         and attempt.stage is TrajectoryStage.PREGRASP
         for attempt in result.attempts
     )
+
+
+def test_plan_rejects_payload_motion_when_retiming_does_not_enforce_limit() -> None:
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    request = _request()
+    request = replace(
+        request,
+        candidates=(request.candidates[0],),
+        planning_policy=replace(
+            request.planning_policy,
+            payload_tcp_max_angular_velocity_rad_s=0.0001,
+            payload_tcp_max_translation_velocity_m_s=100.0,
+            payload_tcp_max_translation_acceleration_m_s2=100.0,
+        ),
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_ruckig=lambda robot_model: _ScaleIgnoringRuckig(
+            RuckigTimeParameterizer(robot_model, backend.ruckig)
+        ),
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert not result.success
+    assert result.error_code is PlanningErrorCode.RUCKIG_FAILED
+    assert result.attempts[-1].stage in (
+        TrajectoryStage.LIFT,
+        TrajectoryStage.EGRESS,
+        TrajectoryStage.PLACE,
+    )
+    assert "payload TCP angular velocity" in result.attempts[-1].reason
+
+
+def test_real_ruckig_retimes_payload_motion_and_preserves_trajectory_contract() -> None:
+    baseline_request = _request()
+    baseline_request = replace(
+        baseline_request,
+        candidates=(baseline_request.candidates[0],),
+        planning_policy=replace(
+            baseline_request.planning_policy,
+            payload_tcp_max_angular_velocity_rad_s=1000.0,
+            payload_tcp_max_translation_velocity_m_s=1000.0,
+            payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+    )
+    baseline = plan(baseline_request, dependencies=_fake_dependencies())
+    assert baseline.success, baseline.message
+    assert baseline.trajectory is not None
+    time_step_s = baseline_request.planning_policy.payload_motion_validation_time_step_s
+    baseline_speed = _maximum_payload_q0_speed(baseline.trajectory, time_step_s)
+    angular_limit = 0.5 * baseline_speed
+
+    request = replace(
+        baseline_request,
+        planning_policy=replace(
+            baseline_request.planning_policy,
+            payload_tcp_max_angular_velocity_rad_s=angular_limit,
+        ),
+    )
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    vamp = _PayloadSamplingVamp(request.robot_model)
+    recording_ruckig = _PayloadSamplingRuckig(
+        RuckigTimeParameterizer(request.robot_model, backend.ruckig),
+        vamp,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+        create_ruckig=lambda robot_model: recording_ruckig,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    assert len(recording_ruckig.trajectories) >= 2
+    assert (
+        _maximum_payload_q0_speed(recording_ruckig.trajectories[0], time_step_s)
+        > angular_limit
+    )
+    assert _maximum_payload_q0_speed(result.trajectory, time_step_s) <= (
+        angular_limit * (1.0 + 1e-4) + 1e-9
+    )
+    assert tuple(phase.stage for phase in result.trajectory.phases) == tuple(
+        TrajectoryStage
+    )
+    assert tuple(event.event for event in result.trajectory.events) == (
+        "grip",
+        "release",
+    )
+    grasp_phase = next(
+        phase
+        for phase in result.trajectory.phases
+        if phase.stage is TrajectoryStage.GRASP
+    )
+    place_phase = next(
+        phase
+        for phase in result.trajectory.phases
+        if phase.stage is TrajectoryStage.PLACE
+    )
+    stopped_knots = set(range(grasp_phase.first_knot, grasp_phase.last_knot + 1))
+    stopped_knots.update((0, place_phase.last_knot))
+    for index, knot in enumerate(result.trajectory.knots):
+        if index in stopped_knots:
+            assert knot.velocities_rad_s == pytest.approx(
+                (0.0,) * len(request.robot_model.joint_names)
+            )
+        else:
+            assert any(abs(value) > 0.0 for value in knot.velocities_rad_s)
+    for left, right in zip(
+        result.trajectory.segments,
+        result.trajectory.segments[1:],
+    ):
+        boundary = result.trajectory.knots[left.end_knot]
+        assert left.end_knot == right.start_knot
+        for sample in (left.sample(left.duration_s), right.sample(0.0)):
+            assert sample.positions_rad == pytest.approx(boundary.positions_rad)
+            assert sample.velocities_rad_s == pytest.approx(boundary.velocities_rad_s)
+            assert sample.accelerations_rad_s2 == pytest.approx(
+                boundary.accelerations_rad_s2
+            )
+
+
+def test_payload_fk_failure_is_backend_error_not_ruckig_failure() -> None:
+    request = _request()
+    request = replace(request, candidates=(request.candidates[0],))
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    vamp = _PayloadSamplingVamp(request.robot_model, fail_fk=True)
+    gated_ruckig = _PayloadSamplingRuckig(
+        RuckigTimeParameterizer(request.robot_model, backend.ruckig),
+        vamp,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+        create_ruckig=lambda robot_model: gated_ruckig,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert not result.success
+    assert result.error_code is PlanningErrorCode.BACKEND_ERROR
+    assert "payload motion backend error" in result.message
+    assert "VAMP FK failed" in result.message
+
+
+def test_payload_retiming_checks_total_budget_during_fk_sampling(monkeypatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("task2.planning.monotonic", lambda: clock[0])
+    request = _request()
+    request = replace(
+        request,
+        candidates=(request.candidates[0],),
+        budgets=PlanningBudgets(1, 1, 0.05, 0.05),
+    )
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    vamp = _PayloadSamplingVamp(request.robot_model, clock=clock)
+    gated_ruckig = _PayloadSamplingRuckig(
+        RuckigTimeParameterizer(request.robot_model, backend.ruckig),
+        vamp,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+        create_ruckig=lambda robot_model: gated_ruckig,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert not result.success
+    assert result.error_code is PlanningErrorCode.BUDGET_EXHAUSTED
+    assert result.attempts[-1].stage in (
+        TrajectoryStage.LIFT,
+        TrajectoryStage.EGRESS,
+        TrajectoryStage.PLACE,
+    )
+    assert "total time budget" in result.message
 
 
 def test_convex_hull_semantic_collision_uses_exact_surface() -> None:

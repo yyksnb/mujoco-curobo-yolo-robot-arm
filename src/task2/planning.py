@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from math import ceil, cos, pi, sin
+from dataclasses import dataclass, replace
+from math import ceil, cos, pi, sin, sqrt
 from time import monotonic
 from typing import Callable
 
@@ -22,6 +22,7 @@ from .contracts import (
     PlannedTrajectory,
     PlanningAttempt,
     PlanningErrorCode,
+    PlanningPolicy,
     PlanningRequest,
     PlanningResult,
     RigidTransform,
@@ -54,6 +55,21 @@ class _Route:
 class _TargetContactAllowance:
     endpoint: frozenset[str]
     motion: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _PayloadMotionMetrics:
+    maximum_angular_velocity_rad_s: float
+    maximum_translation_velocity_m_s: float
+    maximum_translation_acceleration_m_s2: float
+    angular_velocity_stage: TrajectoryStage
+    translation_velocity_stage: TrajectoryStage
+    translation_acceleration_stage: TrajectoryStage
+
+
+_PAYLOAD_STAGES = frozenset(
+    (TrajectoryStage.LIFT, TrajectoryStage.EGRESS, TrajectoryStage.PLACE)
+)
 
 
 @dataclass(frozen=True)
@@ -197,8 +213,122 @@ def plan(
                 continue
             except BackendOperationError as exc:
                 return PlanningResult.failed(
-                    PlanningErrorCode.RUCKIG_FAILED,
+                    PlanningErrorCode.BACKEND_ERROR,
+                    f"Ruckig backend error: {exc}",
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            except (RuntimeError, TypeError, ValueError, OSError) as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_ERROR,
+                    f"Ruckig backend error: {exc}",
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+
+            try:
+                trajectory = _retime_payload_motion(
+                    request,
+                    route,
+                    trajectory,
+                    vamp,
+                    ruckig,
+                    started,
+                )
+            except _PayloadMotionSamplingError as exc:
+                failure = _RouteFailure(
+                    PlanningErrorCode.BUDGET_EXHAUSTED,
+                    exc.stage,
+                    exc.message,
+                )
+                attempts.append(
+                    PlanningAttempt(
+                        candidate.candidate_id,
+                        selected_seed,
+                        exc.stage,
+                        monotonic() - parameterization_started,
+                        failure.code,
+                        failure.message,
+                    )
+                )
+                return PlanningResult.failed(
+                    failure.code,
+                    failure.message,
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            except _RouteFailure as failure:
+                last_failure = failure
+                attempts.append(
+                    PlanningAttempt(
+                        candidate.candidate_id,
+                        selected_seed,
+                        failure.stage,
+                        monotonic() - parameterization_started,
+                        failure.code,
+                        failure.message,
+                    )
+                )
+                if failure.code is PlanningErrorCode.BUDGET_EXHAUSTED:
+                    return PlanningResult.failed(
+                        failure.code,
+                        failure.message,
+                        tuple(attempts),
+                        _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                    )
+                continue
+            except BackendUnavailableError as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_UNAVAILABLE,
                     str(exc),
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            except _PayloadMotionLimitError as exc:
+                last_failure = _RouteFailure(
+                    PlanningErrorCode.RUCKIG_FAILED,
+                    exc.stage,
+                    exc.message,
+                )
+                attempts.append(
+                    PlanningAttempt(
+                        candidate.candidate_id,
+                        selected_seed,
+                        exc.stage,
+                        monotonic() - parameterization_started,
+                        PlanningErrorCode.RUCKIG_FAILED,
+                        exc.message,
+                    )
+                )
+                continue
+            except RuckigRouteError as exc:
+                last_failure = _RouteFailure(
+                    PlanningErrorCode.RUCKIG_FAILED,
+                    exc.stage,
+                    str(exc),
+                )
+                attempts.append(
+                    PlanningAttempt(
+                        candidate.candidate_id,
+                        selected_seed,
+                        exc.stage,
+                        monotonic() - parameterization_started,
+                        PlanningErrorCode.RUCKIG_FAILED,
+                        str(exc),
+                    )
+                )
+                continue
+            except BackendOperationError as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_ERROR,
+                    f"payload motion backend error: {exc}",
+                    tuple(attempts),
+                    _metadata(request, vamp.version, ik_solver.version, ruckig.version),
+                )
+            except (RuntimeError, TypeError, ValueError, OSError) as exc:
+                return PlanningResult.failed(
+                    PlanningErrorCode.BACKEND_ERROR,
+                    f"payload motion backend error: {exc}",
                     tuple(attempts),
                     _metadata(request, vamp.version, ik_solver.version, ruckig.version),
                 )
@@ -310,55 +440,6 @@ def _build_route(
         TrajectoryStage.PREGRASP,
         ik_solution_count,
     )
-    free_environment = vamp.environment(
-        request.scene,
-        T_world_base=request.T_world_base,
-        excluded_object_ids=(request.target_object_id,),
-    )
-    pregrasp_path = None
-    pregrasp_elapsed = 0.0
-    for solution in pregrasp_solutions:
-        if not _has_joint_margin(solution, request):
-            continue
-        stage_started = monotonic()
-        try:
-            planned = vamp.plan(initial, solution.positions_rad, free_environment, seed=seed)
-        except BackendOperationError:
-            continue
-        pregrasp_elapsed = monotonic() - stage_started
-        _check_stage_budget(request, pregrasp_elapsed, total_started, TrajectoryStage.PREGRASP)
-        if _path_has_forbidden_target_contact(
-            planned.path,
-            target_geometries,
-            candidate.grasp_command.pregrasp_opening_m,
-            vamp,
-            request.T_world_base,
-        ):
-            continue
-        pregrasp_path = planned.path
-        break
-    if pregrasp_path is None:
-        raise _RouteFailure(
-            PlanningErrorCode.VAMP_SEARCH_FAILED,
-            TrajectoryStage.PREGRASP,
-            "VAMP found no collision-valid PREGRASP route for this candidate and seed",
-        )
-    attempts.append(
-        PlanningAttempt(
-            candidate.candidate_id,
-            seed,
-            TrajectoryStage.PREGRASP,
-            pregrasp_elapsed,
-            None,
-            "VAMP PREGRASP succeeded",
-        )
-    )
-    waypoints.extend(
-        GeometricWaypoint(TrajectoryStage.PREGRASP, point, dict(channels))
-        for point in pregrasp_path
-    )
-    del free_environment
-
     grasp_pose = compose(
         inverse(request.T_world_base),
         reframe(candidate.T_world_tcp, child_frame=request.robot_model.tcp_frame),
@@ -380,20 +461,107 @@ def _build_route(
         request.planning_policy.approach_contact_transition_m,
         frozenset(candidate.expected_contacts),
     )
-    approach_states = _continuous_ik(
-        request,
-        candidate,
-        ik_solver,
-        vamp,
-        tuple(approach_poses),
-        RobotState(request.robot_model.joint_names, pregrasp_path[-1]),
-        target_geometries,
-        environment_geometries,
-        approach_contact_allowances,
-        TrajectoryStage.APPROACH,
-        total_started,
-        ik_solution_count,
+    free_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(request.target_object_id,),
     )
+    pregrasp_path = None
+    pregrasp_elapsed = 0.0
+    approach_states = None
+    approach_elapsed = 0.0
+    approach_failure: _RouteFailure | None = None
+    for solution in pregrasp_solutions:
+        if not _has_joint_margin(solution, request):
+            continue
+        stage_started = monotonic()
+        try:
+            planned = vamp.plan(initial, solution.positions_rad, free_environment, seed=seed)
+        except BackendOperationError:
+            pregrasp_elapsed += monotonic() - stage_started
+            _check_stage_budget(
+                request,
+                pregrasp_elapsed,
+                total_started,
+                TrajectoryStage.PREGRASP,
+            )
+            continue
+        pregrasp_elapsed += monotonic() - stage_started
+        _check_stage_budget(request, pregrasp_elapsed, total_started, TrajectoryStage.PREGRASP)
+        if _path_has_forbidden_target_contact(
+            planned.path,
+            target_geometries,
+            candidate.grasp_command.pregrasp_opening_m,
+            vamp,
+            request.T_world_base,
+        ):
+            continue
+        approach_started = monotonic()
+        try:
+            selected_approach = _continuous_ik(
+                request,
+                candidate,
+                ik_solver,
+                vamp,
+                tuple(approach_poses),
+                RobotState(request.robot_model.joint_names, planned.path[-1]),
+                target_geometries,
+                environment_geometries,
+                approach_contact_allowances,
+                TrajectoryStage.APPROACH,
+                total_started,
+                ik_solution_count,
+            )
+        except _RouteFailure as failure:
+            approach_elapsed += monotonic() - approach_started
+            _check_stage_budget(
+                request,
+                approach_elapsed,
+                total_started,
+                TrajectoryStage.APPROACH,
+            )
+            if failure.code in (
+                PlanningErrorCode.IK_CANDIDATES_EXHAUSTED,
+                PlanningErrorCode.CONTINUOUS_IK_FAILED,
+                PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+            ):
+                approach_failure = failure
+                continue
+            raise
+        approach_elapsed += monotonic() - approach_started
+        _check_stage_budget(
+            request,
+            approach_elapsed,
+            total_started,
+            TrajectoryStage.APPROACH,
+        )
+        pregrasp_path = planned.path
+        approach_states = selected_approach
+        break
+    if pregrasp_path is None:
+        if approach_failure is not None:
+            raise approach_failure
+        raise _RouteFailure(
+            PlanningErrorCode.VAMP_SEARCH_FAILED,
+            TrajectoryStage.PREGRASP,
+            "VAMP found no collision-valid PREGRASP route for this candidate and seed",
+        )
+    attempts.append(
+        PlanningAttempt(
+            candidate.candidate_id,
+            seed,
+            TrajectoryStage.PREGRASP,
+            pregrasp_elapsed,
+            None,
+            "VAMP PREGRASP succeeded",
+        )
+    )
+    waypoints.extend(
+        GeometricWaypoint(TrajectoryStage.PREGRASP, point, dict(channels))
+        for point in pregrasp_path
+    )
+    del free_environment
+    assert approach_states is not None
     for index, state in enumerate(approach_states):
         waypoints.append(
             GeometricWaypoint(
@@ -952,6 +1120,227 @@ def _path_has_forbidden_attachment_contact(
     return False
 
 
+def _retime_payload_motion(
+    request: PlanningRequest,
+    route: _Route,
+    trajectory: PlannedTrajectory,
+    vamp: VampBackend,
+    ruckig: RuckigTimeParameterizer,
+    total_started: float,
+) -> PlannedTrajectory:
+    policy = request.planning_policy
+    stage_scales: dict[TrajectoryStage, float] = {}
+    for stage in _PAYLOAD_STAGES:
+        _check_total_budget(request, total_started, stage)
+        metrics = _payload_motion_metrics(
+            request,
+            trajectory,
+            vamp,
+            total_started,
+            included_stages=frozenset((stage,)),
+        )
+        stage_scales[stage] = _payload_motion_scale(policy, metrics)
+    if all(scale >= 1.0 for scale in stage_scales.values()):
+        return trajectory
+
+    result = trajectory
+    for _ in range(3):
+        limiting_stage = min(stage_scales, key=stage_scales.__getitem__)
+        _check_total_budget(request, total_started, limiting_stage)
+        scaled_waypoints = tuple(
+            replace(
+                waypoint,
+                motion_scale=min(
+                    waypoint.motion_scale,
+                    stage_scales[waypoint.stage],
+                ),
+            )
+            if waypoint.stage in _PAYLOAD_STAGES
+            else waypoint
+            for waypoint in route.waypoints
+        )
+        result = ruckig.parameterize(scaled_waypoints, route.events)
+        _check_total_budget(request, total_started, limiting_stage)
+        corrections = {}
+        for stage in _PAYLOAD_STAGES:
+            metrics = _payload_motion_metrics(
+                request,
+                result,
+                vamp,
+                total_started,
+                included_stages=frozenset((stage,)),
+            )
+            corrections[stage] = _payload_motion_scale(policy, metrics)
+        if all(correction >= 1.0 for correction in corrections.values()):
+            break
+        for stage, correction in corrections.items():
+            stage_scales[stage] *= correction
+
+    scaled_metrics = _payload_motion_metrics(
+        request,
+        result,
+        vamp,
+        total_started,
+    )
+    violation = _payload_motion_violation(request, scaled_metrics)
+    if violation is not None:
+        stage, message = violation
+        raise _PayloadMotionLimitError(stage, message)
+    return result
+
+
+def _payload_motion_scale(
+    policy: PlanningPolicy,
+    metrics: _PayloadMotionMetrics,
+) -> float:
+    return min(
+        1.0,
+        policy.payload_tcp_max_angular_velocity_rad_s
+        / max(metrics.maximum_angular_velocity_rad_s, 1e-12),
+        policy.payload_tcp_max_translation_velocity_m_s
+        / max(metrics.maximum_translation_velocity_m_s, 1e-12),
+        sqrt(
+            policy.payload_tcp_max_translation_acceleration_m_s2
+            / max(metrics.maximum_translation_acceleration_m_s2, 1e-12)
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _PayloadMotionSamplingError(Exception):
+    stage: TrajectoryStage
+    message: str
+
+
+@dataclass(frozen=True)
+class _PayloadMotionLimitError(Exception):
+    stage: TrajectoryStage
+    message: str
+
+
+def _payload_motion_metrics(
+    request: PlanningRequest,
+    trajectory: PlannedTrajectory,
+    vamp: VampBackend,
+    total_started: float,
+    *,
+    included_stages: frozenset[TrajectoryStage] = _PAYLOAD_STAGES,
+) -> _PayloadMotionMetrics:
+    time_step_s = request.planning_policy.payload_motion_validation_time_step_s
+    maximum_samples = request.planning_policy.trajectory_validation_max_samples
+    times: list[float] = []
+    sample_stages: list[TrajectoryStage] = []
+    positions: list[np.ndarray] = []
+    rotations: list[Rotation] = []
+    for segment in trajectory.segments:
+        if segment.stage not in included_stages:
+            continue
+        _check_total_budget(request, total_started, segment.stage)
+        sample_count = max(2, int(ceil(segment.duration_s / time_step_s)))
+        for index in range(sample_count + 1):
+            local_time_s = (
+                segment.duration_s
+                if index == sample_count
+                else segment.duration_s * index / sample_count
+            )
+            time_s = segment.start_time_s + local_time_s
+            if times and abs(time_s - times[-1]) <= 1e-12:
+                continue
+            if len(times) >= maximum_samples:
+                raise _PayloadMotionSamplingError(
+                    segment.stage,
+                    "payload motion validation exceeded its configured sample budget",
+                )
+            if len(times) % 16 == 0:
+                _check_total_budget(request, total_started, segment.stage)
+            sample = segment.sample(local_time_s)
+            tcp = np.asarray(vamp.tcp_pose(sample.positions_rad).matrix, dtype=np.float64)
+            times.append(time_s)
+            sample_stages.append(segment.stage)
+            positions.append(tcp[:3, 3])
+            rotations.append(Rotation.from_matrix(tcp[:3, :3]))
+        _check_total_budget(request, total_started, segment.stage)
+    if len(times) < 3:
+        stage = sample_stages[-1] if sample_stages else TrajectoryStage.LIFT
+        raise _PayloadMotionSamplingError(
+            stage,
+            "payload motion validation requires at least three loaded trajectory samples",
+        )
+
+    sample_times = np.asarray(times, dtype=np.float64)
+    time_deltas = np.diff(sample_times)
+    if np.any(time_deltas <= 0.0):
+        raise BackendOperationError("payload motion validation times are not increasing")
+    tcp_positions = np.asarray(positions, dtype=np.float64)
+    linear_velocities = np.diff(tcp_positions, axis=0) / time_deltas[:, None]
+    translation_speeds = np.linalg.norm(linear_velocities, axis=1)
+    angular_speeds = np.asarray(
+        [
+            (left.inv() * right).magnitude() / time_delta
+            for left, right, time_delta in zip(
+                rotations,
+                rotations[1:],
+                time_deltas,
+            )
+        ],
+        dtype=np.float64,
+    )
+    acceleration_time_deltas = 0.5 * (time_deltas[:-1] + time_deltas[1:])
+    translation_accelerations = np.linalg.norm(
+        np.diff(linear_velocities, axis=0) / acceleration_time_deltas[:, None],
+        axis=1,
+    )
+    angular_index = int(np.argmax(angular_speeds))
+    translation_index = int(np.argmax(translation_speeds))
+    acceleration_index = int(np.argmax(translation_accelerations))
+    return _PayloadMotionMetrics(
+        float(angular_speeds[angular_index]),
+        float(translation_speeds[translation_index]),
+        float(translation_accelerations[acceleration_index]),
+        sample_stages[angular_index + 1],
+        sample_stages[translation_index + 1],
+        sample_stages[acceleration_index + 1],
+    )
+
+
+def _payload_motion_violation(
+    request: PlanningRequest,
+    metrics: _PayloadMotionMetrics,
+) -> tuple[TrajectoryStage, str] | None:
+    policy = request.planning_policy
+    checks = (
+        (
+            metrics.maximum_angular_velocity_rad_s,
+            policy.payload_tcp_max_angular_velocity_rad_s,
+            metrics.angular_velocity_stage,
+            "TCP angular velocity",
+            "rad/s",
+        ),
+        (
+            metrics.maximum_translation_velocity_m_s,
+            policy.payload_tcp_max_translation_velocity_m_s,
+            metrics.translation_velocity_stage,
+            "TCP translation velocity",
+            "m/s",
+        ),
+        (
+            metrics.maximum_translation_acceleration_m_s2,
+            policy.payload_tcp_max_translation_acceleration_m_s2,
+            metrics.translation_acceleration_stage,
+            "TCP translation acceleration",
+            "m/s^2",
+        ),
+    )
+    for actual, limit, stage, label, unit in checks:
+        if actual > limit * (1.0 + 1e-4) + 1e-9:
+            return (
+                stage,
+                f"time-parameterized payload {label} {actual:.9g}{unit} "
+                f"exceeds configured limit {limit:.9g}{unit}",
+            )
+    return None
+
+
 def _validate_time_parameterized_trajectory(
     request: PlanningRequest,
     candidate: GraspCandidate,
@@ -1214,6 +1603,23 @@ def _validate_time_parameterized_trajectory(
             TrajectoryStage.LIFT,
             "time-parameterized LIFT attached object did not depart the declared source support",
         )
+    try:
+        payload_metrics = _payload_motion_metrics(
+            request,
+            trajectory,
+            vamp,
+            total_started,
+        )
+    except _PayloadMotionSamplingError as exc:
+        raise _RouteFailure(
+            PlanningErrorCode.BUDGET_EXHAUSTED,
+            exc.stage,
+            exc.message,
+        ) from exc
+    payload_violation = _payload_motion_violation(request, payload_metrics)
+    if payload_violation is not None:
+        stage, message = payload_violation
+        raise _RouteFailure(PlanningErrorCode.RUCKIG_FAILED, stage, message)
 
 
 def _raise_native_trajectory_failure(
@@ -1306,6 +1712,8 @@ def _trajectory_segment_validation_samples(
         TrajectoryStage.APPROACH,
         TrajectoryStage.GRASP,
         TrajectoryStage.LIFT,
+        TrajectoryStage.EGRESS,
+        TrajectoryStage.PLACE,
     ):
         sample_times = _refine_trajectory_times_by_swept_motion(
             segment,
@@ -1348,7 +1756,7 @@ def _refine_trajectory_times_by_swept_motion(
                 dtype=np.float64,
             ).reshape((-1, 3))
             attached_centers = np.empty((0, 3), dtype=np.float64)
-            if segment.stage is TrajectoryStage.LIFT:
+            if segment.stage in _PAYLOAD_STAGES:
                 attached_centers = np.asarray(
                     vamp.semantic_attachment_sphere_centers(
                         configuration,
@@ -1640,6 +2048,14 @@ def _check_stage_budget(
             stage,
             f"{stage.value} exceeded its explicit time budget",
         )
+    _check_total_budget(request, total_started, stage)
+
+
+def _check_total_budget(
+    request: PlanningRequest,
+    total_started: float,
+    stage: TrajectoryStage,
+) -> None:
     if monotonic() - total_started > request.budgets.total_timeout_s:
         raise _RouteFailure(
             PlanningErrorCode.BUDGET_EXHAUSTED,
@@ -1671,6 +2087,10 @@ def _metadata(
             "trajectory_collision_validation": "configured_resolution_sampling",
             "cartesian_translation_step_m": request.planning_policy.cartesian_translation_step_m,
             "cartesian_rotation_step_rad": request.planning_policy.cartesian_rotation_step_rad,
+            "payload_tcp_max_angular_velocity_rad_s": request.planning_policy.payload_tcp_max_angular_velocity_rad_s,
+            "payload_tcp_max_translation_velocity_m_s": request.planning_policy.payload_tcp_max_translation_velocity_m_s,
+            "payload_tcp_max_translation_acceleration_m_s2": request.planning_policy.payload_tcp_max_translation_acceleration_m_s2,
+            "payload_motion_validation_time_step_s": request.planning_policy.payload_motion_validation_time_step_s,
             "trajectory_validation_joint_step_rad": request.planning_policy.trajectory_validation_joint_step_rad,
             "trajectory_validation_tcp_translation_step_m": request.planning_policy.trajectory_validation_tcp_translation_step_m,
             "trajectory_validation_tcp_rotation_step_rad": request.planning_policy.trajectory_validation_tcp_rotation_step_rad,

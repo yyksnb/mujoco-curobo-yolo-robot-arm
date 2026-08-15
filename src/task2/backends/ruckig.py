@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import metadata
+from math import isfinite
 from typing import Mapping
 
 from ..contracts import (
@@ -24,6 +25,7 @@ class GeometricWaypoint:
     actuator_channels: dict[str, float]
     stop: bool = False
     minimum_duration_s: float = 0.0
+    motion_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,11 @@ class RuckigTimeParameterizer:
         dof = len(self._model.joint_names)
         if any(len(item.positions_rad) != dof for item in waypoints):
             raise BackendOperationError("geometric waypoint size does not match RobotModel")
+        if any(
+            not isfinite(item.motion_scale) or not 0.0 < item.motion_scale <= 1.0
+            for item in waypoints
+        ):
+            raise BackendOperationError("geometric waypoint motion scales must lie in (0, 1]")
         velocities = _waypoint_velocities(waypoints, self._model)
         knots: list[TrajectoryKnot] = [
             TrajectoryKnot(
@@ -102,6 +109,7 @@ class RuckigTimeParameterizer:
             generator = self._ruckig.Ruckig(dof)
             parameters = self._ruckig.InputParameter(dof)
             trajectory = self._ruckig.Trajectory(dof)
+            motion_scale = right.motion_scale
             parameters.current_position = list(left.positions_rad)
             parameters.current_velocity = list(velocities[index])
             parameters.current_acceleration = [0.0] * dof
@@ -115,14 +123,16 @@ class RuckigTimeParameterizer:
                 item.minimum_position_rad for item in self._model.joint_limits
             ]
             parameters.max_velocity = [
-                item.maximum_velocity_rad_s for item in self._model.joint_limits
+                motion_scale * item.maximum_velocity_rad_s
+                for item in self._model.joint_limits
             ]
             parameters.max_acceleration = [
-                item.maximum_acceleration_rad_s2
+                motion_scale**2 * item.maximum_acceleration_rad_s2
                 for item in self._model.joint_limits
             ]
             parameters.max_jerk = [
-                item.maximum_jerk_rad_s3 for item in self._model.joint_limits
+                motion_scale**3 * item.maximum_jerk_rad_s3
+                for item in self._model.joint_limits
             ]
             parameters.synchronization = self._ruckig.Synchronization.Phase
             if right.minimum_duration_s > 0.0:
@@ -205,7 +215,13 @@ def _waypoint_velocities(
                 waypoint.stage,
                 f"Ruckig cannot construct a non-stop tangent at waypoint {index}",
             )
-        scale = min(0.05 * limit / value for value, limit in moving)
+        boundary_motion_scale = min(
+            waypoint.motion_scale,
+            waypoints[index + 1].motion_scale,
+        )
+        scale = boundary_motion_scale * min(
+            0.05 * limit / value for value, limit in moving
+        )
         velocities.append(tuple(scale * value for value in tangent))
     return tuple(velocities)
 
