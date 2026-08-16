@@ -119,7 +119,8 @@ def test_standard_part_mid_pos10_template_contract() -> None:
     ) == pytest.approx(0.0, abs=1e-9)
 
     assert yaw_zero.grasp_command.target_opening_m == pytest.approx(0.002501621)
-    assert yaw_zero.grasp_command.grip_force_limit_n == pytest.approx(0.30)
+    assert yaw_zero.grasp_command.grip_force_limit_n == pytest.approx(4.0)
+    assert yaw_zero.diagnostics.force_margin_n == pytest.approx(3.90)
 
 
 def test_continuous_yaw_is_lower_inclusive_upper_exclusive() -> None:
