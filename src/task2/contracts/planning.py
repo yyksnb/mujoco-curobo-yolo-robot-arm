@@ -244,11 +244,17 @@ class PlacementGoalKind(str, Enum):
     CIRCLE = "circle"
 
 
+class PlacementOrientationConstraint(str, Enum):
+    EXACT = "exact"
+    FREE = "free"
+
+
 @dataclass(frozen=True)
 class PlacementGoal:
     goal_id: str
     kind: PlacementGoalKind
     T_world_tcp: RigidTransform
+    orientation_constraint: PlacementOrientationConstraint
     size_m: tuple[float, float] | None = None
     radius_m: float | None = None
     height_range_m: tuple[float, float] = (0.0, 0.0)
@@ -256,6 +262,10 @@ class PlacementGoal:
     def validate(self, world_frame: str, tcp_frame: str) -> None:
         if not self.goal_id:
             raise ValueError("placement goal ID must be non-empty")
+        if not isinstance(
+            self.orientation_constraint, PlacementOrientationConstraint
+        ):
+            raise ValueError("placement orientation constraint must be explicit")
         self.T_world_tcp.validate(label="placement goal pose")
         if self.T_world_tcp.parent_frame != world_frame or self.T_world_tcp.child_frame != tcp_frame:
             raise ValueError("placement goal pose frames do not match request frames")

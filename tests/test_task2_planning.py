@@ -4,6 +4,7 @@ from dataclasses import replace
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -26,6 +27,7 @@ from task2.contracts import (
     ConvexHull,
     PlacementGoal,
     PlacementGoalKind,
+    PlacementOrientationConstraint,
     PlanningBudgets,
     PlanningErrorCode,
     PlanningRequest,
@@ -38,7 +40,7 @@ from task2.contracts import (
     TrajectoryStage,
 )
 from task2.ik import IKResult, IKSolution
-from task2.planning import PlanningDependencies
+from task2.planning import PlanningDependencies, _sampled_orientation_deviation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +116,39 @@ class _FakeVamp:
         return frozenset()
 
 
+class _FixedOrientationVamp(_FakeVamp):
+    def __init__(self, robot_model, rotation):
+        super().__init__(robot_model)
+        self.rotation = np.asarray(rotation, dtype=np.float64)
+
+    def tcp_pose(self, configuration):
+        pose = super().tcp_pose(configuration)
+        matrix = np.asarray(pose.matrix, dtype=np.float64)
+        matrix[:3, :3] = self.rotation
+        return RigidTransform(
+            pose.parent_frame,
+            pose.child_frame,
+            tuple(tuple(float(value) for value in row) for row in matrix),
+        )
+
+
+class _InteriorRotationVamp(_FakeVamp):
+    def tcp_pose(self, configuration):
+        angle = 1.5 * float(np.sin(np.pi * configuration[0]))
+        cosine = float(np.cos(angle))
+        sine = float(np.sin(angle))
+        return RigidTransform(
+            self.model.base_frame,
+            self.model.tcp_frame,
+            (
+                (cosine, -sine, 0.0, 0.0),
+                (sine, cosine, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        )
+
+
 class _FakeIK:
     version = "0.8.0"
 
@@ -128,6 +163,16 @@ class _FakeIK:
         values[2] = 0.1 * matrix[2][3]
         state = RobotState(self.model.joint_names, tuple(values))
         return IKResult((IKSolution(state, 0.0, 0.0),), None, "fake IK succeeded")
+
+
+class _RecordingIK(_FakeIK):
+    def __init__(self, robot_model):
+        super().__init__(robot_model)
+        self.targets = []
+
+    def solve(self, targets, seed_states, constraints):
+        self.targets.extend(targets)
+        return super().solve(targets, seed_states, constraints)
 
 
 class _ApproachContactVamp(_FakeVamp):
@@ -348,6 +393,7 @@ def _request(object_type: str = "marker") -> PlanningRequest:
             "outside",
             PlacementGoalKind.EXACT,
             placement,
+            PlacementOrientationConstraint.EXACT,
         ),
         CONFIG.planning_object(object_type),
         PROFILE.planning,
@@ -477,6 +523,103 @@ def test_plan_preserves_six_phases_named_channels_and_stops() -> None:
             assert sample.accelerations_rad_s2 == pytest.approx(
                 boundary.accelerations_rad_s2
             )
+
+
+def test_exact_placement_orientation_is_strictly_used_for_place_ik() -> None:
+    request = _request()
+    recorder = _RecordingIK(request.robot_model)
+    dependencies = replace(
+        _fake_dependencies(),
+        create_ik=lambda robot_model, random_seed: recorder,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    place_target = np.asarray(recorder.targets[-1].matrix, dtype=np.float64)
+    exact_target = np.asarray(
+        request.placement_goal.T_world_tcp.matrix, dtype=np.float64
+    )
+    grasp_target = np.asarray(
+        request.candidates[0].T_world_tcp.matrix, dtype=np.float64
+    )
+    assert place_target[:3, :3] == pytest.approx(exact_target[:3, :3])
+    assert not np.allclose(place_target[:3, :3], grasp_target[:3, :3])
+
+
+def test_orientation_free_placement_preserves_grasp_orientation_and_continuity() -> None:
+    baseline = _request()
+    request = replace(
+        baseline,
+        placement_goal=replace(
+            baseline.placement_goal,
+            orientation_constraint=PlacementOrientationConstraint.FREE,
+        ),
+    )
+    recorder = _RecordingIK(request.robot_model)
+    fixed_vamp = _FixedOrientationVamp(
+        request.robot_model,
+        np.asarray(request.candidates[0].T_world_tcp.matrix, dtype=np.float64)[
+            :3, :3
+        ],
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: fixed_vamp,
+        create_ik=lambda robot_model, random_seed: recorder,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    place_target = np.asarray(recorder.targets[-1].matrix, dtype=np.float64)
+    grasp_target = np.asarray(
+        request.candidates[0].T_world_tcp.matrix, dtype=np.float64
+    )
+    assert place_target[:3, :3] == pytest.approx(grasp_target[:3, :3])
+    assert place_target[:3, 3] == pytest.approx(
+        np.asarray(request.placement_goal.T_world_tcp.matrix, dtype=np.float64)[
+            :3, 3
+        ]
+    )
+    assert tuple(phase.stage for phase in result.trajectory.phases) == tuple(
+        TrajectoryStage
+    )
+    for left, right in zip(
+        result.trajectory.segments,
+        result.trajectory.segments[1:],
+    ):
+        boundary = result.trajectory.knots[left.end_knot]
+        assert left.end_knot == right.start_knot
+        assert left.sample(left.duration_s).velocities_rad_s == pytest.approx(
+            boundary.velocities_rad_s
+        )
+        assert right.sample(0.0).velocities_rad_s == pytest.approx(
+            boundary.velocities_rad_s
+        )
+
+
+def test_orientation_preference_cost_samples_between_vamp_knots() -> None:
+    request = _request()
+    vamp = _InteriorRotationVamp(request.robot_model)
+    start = (0.0,) * len(request.robot_model.joint_names)
+    goal = (1.0,) + start[1:]
+    preferred = vamp.tcp_pose(start)
+    started = monotonic()
+
+    metrics = _sampled_orientation_deviation(
+        (start, goal),
+        preferred,
+        vamp,
+        request,
+        TrajectoryStage.EGRESS,
+        started,
+        started,
+    )
+
+    assert metrics.maximum_deviation_rad == pytest.approx(1.5)
+    assert metrics.sample_count > 2
 
 
 def test_plan_rejects_invalid_native_motion_after_time_parameterization() -> None:

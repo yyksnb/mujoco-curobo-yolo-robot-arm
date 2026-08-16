@@ -27,6 +27,7 @@ from .contracts.planning import (
     ConvexHull,
     PlacementGoal,
     PlacementGoalKind,
+    PlacementOrientationConstraint,
     PlannedTrajectory,
     PlanningAttempt,
     PlanningErrorCode,
@@ -388,6 +389,7 @@ def _placement_to_dict(value: PlacementGoal) -> dict[str, object]:
     return {
         "goal_id": value.goal_id,
         "kind": value.kind.value,
+        "orientation_constraint": value.orientation_constraint.value,
         "T_world_tcp": value.T_world_tcp.to_dict(),
         "size_m": list(value.size_m) if value.size_m is not None else None,
         "radius_m": value.radius_m,
@@ -403,6 +405,7 @@ def _placement_from_dict(value: dict[str, Any]) -> PlacementGoal:
         _string(value, "goal_id"),
         PlacementGoalKind(_string(value, "kind")),
         _transform_from_dict(_mapping(value, "T_world_tcp")),
+        PlacementOrientationConstraint(_string(value, "orientation_constraint")),
         tuple(float(item) for item in _as_list(size, "size_m")) if size is not None else None,
         float(radius) if radius is not None else None,
         (float(height[0]), float(height[1])),

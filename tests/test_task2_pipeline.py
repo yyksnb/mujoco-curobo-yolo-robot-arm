@@ -4,6 +4,8 @@ from dataclasses import replace
 import json
 from pathlib import Path
 
+import pytest
+
 from task2 import Task2Pipeline
 from task2.artifacts import Task2Artifacts
 from task2.config import load_task2_config
@@ -15,6 +17,7 @@ from task2.contracts import (
     ExecutionStatus,
     PlacementGoal,
     PlacementGoalKind,
+    PlacementOrientationConstraint,
     PlannedTrajectory,
     PlanningResult,
     RigidTransform,
@@ -88,6 +91,7 @@ def _request(request_id: str = "pipeline_contract") -> Task2Request:
             "place",
             PlacementGoalKind.EXACT,
             _pose("world", PROFILE.tcp_frame, (0.6, 0.0, 0.6)),
+            PlacementOrientationConstraint.EXACT,
         ),
         7,
     )
@@ -215,6 +219,45 @@ def test_pipeline_hands_off_only_through_formal_artifacts(tmp_path: Path) -> Non
     execution = json.loads((run_dir / "execution/result.json").read_text())
     assert execution["execution_status"] == "completed"
     assert not execution["dynamics_diagnostics"]["success"]
+
+
+def test_request_artifact_round_trip_preserves_free_placement_orientation(
+    tmp_path: Path,
+) -> None:
+    baseline = _request("free_placement_artifact")
+    request = replace(
+        baseline,
+        placement_goal=replace(
+            baseline.placement_goal,
+            orientation_constraint=PlacementOrientationConstraint.FREE,
+        ),
+    )
+    artifacts = Task2Artifacts(tmp_path, request.request_id)
+
+    artifacts.write_request(request)
+
+    persisted = artifacts.read_request()
+    assert (
+        persisted.placement_goal.orientation_constraint
+        is PlacementOrientationConstraint.FREE
+    )
+    payload = json.loads((artifacts.run_dir / "request.json").read_text())
+    assert payload["placement_goal"]["orientation_constraint"] == "free"
+
+
+def test_request_artifact_rejects_missing_placement_orientation(
+    tmp_path: Path,
+) -> None:
+    request = _request("missing_placement_orientation")
+    artifacts = Task2Artifacts(tmp_path, request.request_id)
+    artifacts.write_request(request)
+    path = artifacts.run_dir / "request.json"
+    payload = json.loads(path.read_text())
+    del payload["placement_goal"]["orientation_constraint"]
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="orientation_constraint"):
+        artifacts.read_request()
 
 
 def test_cli_steps_resume_from_formal_artifacts(tmp_path: Path) -> None:
