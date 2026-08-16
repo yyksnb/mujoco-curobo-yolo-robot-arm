@@ -4,9 +4,11 @@ from dataclasses import replace
 import subprocess
 import sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
+import yaml
 
 from task2 import plan, target
 from task2.backends.errors import BackendOperationError, BackendUnavailableError
@@ -567,15 +569,29 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
     assert vamp.dynamic_domain is False
     assert vamp.robot_sphere_count == 432
     assert tuple(
-        (group.group, group.first_sphere, group.sphere_count)
+        (
+            group.group,
+            group.first_sphere,
+            group.sphere_count,
+            group.translation_per_closed_fraction_m,
+            group.sweep_radius_inflation_m,
+        )
         for group in vamp.collision_sphere_groups
-    ) == (("left_pad", 176, 128), ("right_pad", 304, 128))
+    ) == (
+        ("left_pad", 176, 128, (0.0, 0.042, 0.0), 0.021),
+        ("right_pad", 304, 128, (0.0, -0.042, 0.0), 0.021),
+    )
     assert tuple(
         (item.sphere_index, item.center_at_default_m, item.radius_m)
         for item in vamp.collision_sphere_calibrations
     ) == (
+        (27, (0.21516, 0.001, 0.539479), 0.036648),
         (41, (0.27569, -0.019505, 0.428311), 0.035516),
         (42, (0.287652, -0.005146, 0.399621), 0.010515),
+        (176, (0.643443, -0.008751, 0.405724), 0.026419),
+        (303, (0.668818, 0.005874, 0.411724), 0.024911),
+        (304, (0.643443, -0.008751, 0.461724), 0.026419),
+        (431, (0.668818, 0.005874, 0.455724), 0.024911),
     )
     assert CONFIG.planning_policy.approach_contact_transition_m == 0.01
     assert CONFIG.planning_policy.payload_tcp_max_angular_velocity_rad_s == 0.44
@@ -594,6 +610,166 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
     assert CONFIG.planning_policy.trajectory_validation_actuator_position_step_m == 0.001
     assert CONFIG.planning_policy.trajectory_validation_swept_point_step_m == 0.002
     assert CONFIG.planning_policy.trajectory_validation_max_samples == 20000
+
+
+def test_forearm_proxy_sphere_is_not_shrunk_and_tracks_the_formal_distal_surface() -> None:
+    spheres = yaml.safe_load(
+        (ROOT / "configs/curobo/gen3/task2_active_wrist_parallel_spheres.yml").read_text()
+    )["collision_spheres"]["forearm_link"]
+    calibrated = spheres[1]
+    center = np.asarray(calibrated["center"], dtype=np.float64)
+    radius = float(calibrated["radius"])
+
+    mesh_path = ROOT / "examples/mujoco/kinova_gen3/assets/forearm_link.stl"
+    payload = mesh_path.read_bytes()
+    triangle_count = int.from_bytes(payload[80:84], "little")
+    records = np.frombuffer(
+        payload,
+        dtype=np.dtype(
+            [
+                ("normal", "<f4", (3,)),
+                ("vertices", "<f4", (3, 3)),
+                ("attribute", "<u2"),
+            ]
+        ),
+        count=triangle_count,
+        offset=84,
+    )
+    vertices = np.asarray(records["vertices"], dtype=np.float64).reshape((-1, 3))
+    distal = vertices[vertices[:, 1] < -0.21]
+
+    assert radius == pytest.approx(0.035643)
+    assert center[1] - radius == pytest.approx(vertices[:, 1].min(), abs=1e-7)
+    assert center[[0, 2]] == pytest.approx(distal[:, [0, 2]].mean(axis=0), abs=1e-7)
+
+
+def test_pad_collision_spheres_cover_tapered_mujoco_envelope_without_old_box_air() -> None:
+    model = ET.parse(
+        ROOT / "examples/mujoco/so101_active_wrist_parallel/active_wrist_parallel.xml"
+    ).getroot()
+    mesh = model.find("./asset/mesh[@name='pad_collision_envelope']")
+    tcp = model.find(".//site[@name='tcp']")
+    assert mesh is not None and tcp is not None
+    mesh_vertices = np.asarray(
+        [float(value) for value in mesh.attrib["vertex"].split()], dtype=np.float64
+    ).reshape((-1, 3))
+    mesh_faces = np.asarray(
+        [int(value) for value in mesh.attrib["face"].split()], dtype=np.int64
+    ).reshape((-1, 3))
+    tcp_position = np.asarray(
+        [float(value) for value in tcp.attrib["pos"].split()], dtype=np.float64
+    )
+    quaternion = np.asarray(
+        [float(value) for value in tcp.attrib["quat"].split()], dtype=np.float64
+    )
+    quaternion /= np.linalg.norm(quaternion)
+    w, x, y, z = quaternion
+    tcp_rotation = np.asarray(
+        (
+            (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+            (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+            (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+        ),
+        dtype=np.float64,
+    )
+    spheres = yaml.safe_load(
+        (ROOT / "configs/curobo/gen3/task2_active_wrist_parallel_spheres.yml").read_text()
+    )["collision_spheres"]
+    groups = (
+        ("left_jaw", "task2_tool_left_pad_collision", 1.0),
+        ("right_jaw", "task2_tool_right_pad_collision", -1.0),
+    )
+    for body_name, sphere_link, closed_direction in groups:
+        body = model.find(f".//body[@name='{body_name}']")
+        assert body is not None
+        joint = body.find("joint")
+        assert joint is not None
+        body_position = np.asarray(
+            [float(value) for value in body.attrib["pos"].split()], dtype=np.float64
+        )
+        joint_axis = np.asarray(
+            [float(value) for value in joint.attrib["axis"].split()], dtype=np.float64
+        )
+        joint_range = [float(value) for value in joint.attrib["range"].split()]
+        open_vertices = (
+            body_position + joint_axis * joint_range[1] + mesh_vertices - tcp_position
+        ) @ tcp_rotation
+        surface_points = []
+        for face in mesh_faces:
+            triangle = open_vertices[face]
+            for first_weight in range(6):
+                for second_weight in range(6 - first_weight):
+                    weights = np.asarray(
+                        (
+                            first_weight,
+                            second_weight,
+                            5 - first_weight - second_weight,
+                        ),
+                        dtype=np.float64,
+                    ) / 5.0
+                    surface_points.append(weights @ triangle)
+        surface_points = np.asarray(surface_points)
+        pad_spheres = spheres[sphere_link]
+        assert len(pad_spheres) == 128
+        centers = np.asarray([item["center"] for item in pad_spheres], dtype=np.float64)
+        radii = np.asarray([item["radius"] for item in pad_spheres], dtype=np.float64)
+
+        z_edges = np.linspace(open_vertices[:, 2].min(), open_vertices[:, 2].max(), 9)
+        y_edges = np.linspace(open_vertices[:, 1].min(), open_vertices[:, 1].max(), 5)
+        if closed_direction < 0.0:
+            y_edges = y_edges[::-1]
+        u_edges = np.linspace(-1.0, 1.0, 5)
+        z_min, z_max = z_edges[0], z_edges[-1]
+        width_min = np.max(
+            np.abs(open_vertices[np.isclose(open_vertices[:, 2], z_min), 0])
+        )
+        width_max = np.max(
+            np.abs(open_vertices[np.isclose(open_vertices[:, 2], z_max), 0])
+        )
+        expected = []
+        for z_low, z_high in zip(z_edges, z_edges[1:]):
+            for y_low, y_high in zip(y_edges, y_edges[1:]):
+                for u_low, u_high in zip(u_edges, u_edges[1:]):
+                    cell = np.asarray(
+                        [
+                            (
+                                u_value
+                                * (
+                                    width_min
+                                    + (width_max - width_min)
+                                    * (z_value - z_min)
+                                    / (z_max - z_min)
+                                ),
+                                y_value,
+                                z_value,
+                            )
+                            for z_value in (z_low, z_high)
+                            for y_value in (y_low, y_high)
+                            for u_value in (u_low, u_high)
+                        ]
+                    )
+                    center = cell.mean(axis=0)
+                    expected.append((center, np.linalg.norm(cell - center, axis=1).max()))
+        assert np.allclose(centers, [item[0] for item in expected], atol=1e-12)
+        assert np.all(radii >= np.asarray([item[1] for item in expected]) - 1e-12)
+
+        for closed_fraction in (0.0, 0.5, 1.0):
+            shift = np.asarray((0.0, closed_direction * 0.042 * closed_fraction, 0.0))
+            shifted_surface = surface_points + shift
+            shifted_centers = centers + shift
+            distances = np.linalg.norm(
+                shifted_surface[:, None, :] - shifted_centers[None, :, :], axis=2
+            )
+            assert np.all(np.min(distances - radii[None, :], axis=1) <= 1e-12)
+
+        tip_z = open_vertices[:, 2].max()
+        pad_center_y = 0.5 * (open_vertices[:, 1].min() + open_vertices[:, 1].max())
+        for old_box_x in (-0.008, 0.008):
+            old_box_probe = np.asarray((old_box_x, pad_center_y, tip_z))
+            clearance = np.min(
+                np.linalg.norm(centers - old_box_probe, axis=1) - radii - 0.001005
+            )
+            assert clearance > 0.0001
 
 
 def test_plan_continues_after_a_geometric_route_ruckig_rejection() -> None:

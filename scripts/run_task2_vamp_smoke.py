@@ -32,6 +32,18 @@ def main() -> int:
         raise SystemExit(
             "patched VAMP collision sphere count does not match the formal RobotModel"
         )
+    for calibration in vamp_profile.collision_sphere_calibrations:
+        sphere = collision_spheres[calibration.sphere_index]
+        actual_center = (float(sphere.x), float(sphere.y), float(sphere.z))
+        if max(
+            abs(actual - expected)
+            for actual, expected in zip(
+                actual_center, calibration.center_at_default_m
+            )
+        ) > 1e-6 or abs(float(sphere.r) - calibration.radius_m) > 1e-6:
+            raise SystemExit(
+                "patched VAMP collision sphere calibration does not match Planning YAML"
+            )
     for group in vamp_profile.collision_sphere_groups:
         first = group.first_sphere
         last = first + group.sphere_count

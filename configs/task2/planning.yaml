@@ -32,8 +32,13 @@ backends:
           - {group: left_pad, first_sphere: 176, sphere_count: 128, translation_per_closed_fraction_m: [0.0, 0.042, 0.0], sweep_radius_inflation_m: 0.021}
           - {group: right_pad, first_sphere: 304, sphere_count: 128, translation_per_closed_fraction_m: [0.0, -0.042, 0.0], sweep_radius_inflation_m: 0.021}
         collision_sphere_calibrations:
+          - {sphere_index: 27, center_at_default_m: [0.215160, 0.001000, 0.539479], radius_m: 0.036648}
           - {sphere_index: 41, center_at_default_m: [0.275690, -0.019505, 0.428311], radius_m: 0.035516}
           - {sphere_index: 42, center_at_default_m: [0.287652, -0.005146, 0.399621], radius_m: 0.010515}
+          - {sphere_index: 176, center_at_default_m: [0.643443, -0.008751, 0.405724], radius_m: 0.026419}
+          - {sphere_index: 303, center_at_default_m: [0.668818, 0.005874, 0.411724], radius_m: 0.024911}
+          - {sphere_index: 304, center_at_default_m: [0.643443, -0.008751, 0.461724], radius_m: 0.026419}
+          - {sphere_index: 431, center_at_default_m: [0.668818, 0.005874, 0.455724], radius_m: 0.024911}
     vamp:
       version: 0.6.4
       range_rad: 0.5
