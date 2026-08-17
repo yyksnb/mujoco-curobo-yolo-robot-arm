@@ -40,7 +40,10 @@ from task2.contracts import (
     TrajectoryStage,
 )
 from task2.ik import IKResult, IKSolution
-from task2.planning import PlanningDependencies, _sampled_orientation_deviation
+from task2.planning import (
+    PlanningDependencies,
+    _sampled_orientation_deviation,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -130,6 +133,50 @@ class _FixedOrientationVamp(_FakeVamp):
             pose.child_frame,
             tuple(tuple(float(value) for value in row) for row in matrix),
         )
+
+
+class _ReturnedKnotVamp(_FixedOrientationVamp):
+    def __init__(self, robot_model, rotation):
+        super().__init__(robot_model, rotation)
+        self.loaded_midpoints = []
+
+    def plan(self, start, goal, environment, *, seed):
+        if environment.get("attached_geometry") and start != goal:
+            midpoint = tuple(
+                0.5 * (left + right) + (0.02 if index == 3 else 0.0)
+                for index, (left, right) in enumerate(zip(start, goal))
+            )
+            self.loaded_midpoints.append(midpoint)
+            return VampPlan((tuple(start), midpoint, tuple(goal)), 0.001, 1)
+        return super().plan(start, goal, environment, seed=seed)
+
+
+class _SeedRouteVamp(_FixedOrientationVamp):
+    def __init__(self, robot_model, rotation, detour_seed):
+        super().__init__(robot_model, rotation)
+        self.detour_seed = detour_seed
+        self.detour_midpoints = []
+        self.direct_midpoints = []
+
+    def plan(self, start, goal, environment, *, seed):
+        if environment.get("attached_geometry") and start != goal:
+            midpoint = tuple(
+                0.5 * (left + right) for left, right in zip(start, goal)
+            )
+            if seed == self.detour_seed:
+                midpoint = tuple(
+                    value + (0.3 if index == 0 else 0.0)
+                    for index, value in enumerate(midpoint)
+                )
+                self.detour_midpoints.append(midpoint)
+            else:
+                midpoint = tuple(
+                    value + (0.6 if index == 3 else 0.0)
+                    for index, value in enumerate(midpoint)
+                )
+                self.direct_midpoints.append(midpoint)
+            return VampPlan((tuple(start), midpoint, tuple(goal)), 0.001, 1)
+        return super().plan(start, goal, environment, seed=seed)
 
 
 class _InteriorRotationVamp(_FakeVamp):
@@ -601,7 +648,15 @@ def test_orientation_free_placement_preserves_grasp_orientation_and_continuity()
 
 
 def test_orientation_preference_cost_samples_between_vamp_knots() -> None:
-    request = _request()
+    baseline = _request()
+    request = replace(
+        baseline,
+        planning_policy=replace(
+            baseline.planning_policy,
+            trajectory_validation_joint_step_rad=1.0,
+            trajectory_validation_tcp_rotation_step_rad=0.1,
+        ),
+    )
     vamp = _InteriorRotationVamp(request.robot_model)
     start = (0.0,) * len(request.robot_model.joint_names)
     goal = (1.0,) + start[1:]
@@ -619,7 +674,96 @@ def test_orientation_preference_cost_samples_between_vamp_knots() -> None:
     )
 
     assert metrics.maximum_deviation_rad == pytest.approx(1.5)
-    assert metrics.sample_count > 2
+    assert metrics.cumulative_rotation_rad > 2.9
+    assert metrics.sample_count > 3
+
+
+def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> None:
+    baseline = _request()
+    candidate = baseline.candidates[0]
+    request = replace(
+        baseline,
+        candidates=(candidate,),
+        placement_goal=replace(
+            baseline.placement_goal,
+            orientation_constraint=PlacementOrientationConstraint.FREE,
+        ),
+        planning_policy=replace(
+            baseline.planning_policy,
+            cartesian_translation_step_m=1.0,
+            payload_tcp_max_angular_velocity_rad_s=1000.0,
+            payload_tcp_max_translation_velocity_m_s=1000.0,
+            payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+        budgets=PlanningBudgets(1, 2, 5.0, 20.0),
+    )
+    vamp = _SeedRouteVamp(
+        request.robot_model,
+        np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
+        request.random_seed,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    assert result.metadata["selected_seed"] == request.random_seed + 1
+    selected_loaded_knots = tuple(
+        knot.positions_rad
+        for knot in result.trajectory.knots
+        if knot.stage in (TrajectoryStage.EGRESS, TrajectoryStage.PLACE)
+    )
+    assert vamp.detour_midpoints
+    assert vamp.direct_midpoints
+    assert any(point in selected_loaded_knots for point in vamp.direct_midpoints)
+    assert not any(point in selected_loaded_knots for point in vamp.detour_midpoints)
+
+
+def test_orientation_free_route_preserves_vamp_returned_knots_for_ruckig() -> None:
+    baseline = _request()
+    candidate = baseline.candidates[0]
+    request = replace(
+        baseline,
+        candidates=(candidate,),
+        placement_goal=replace(
+            baseline.placement_goal,
+            orientation_constraint=PlacementOrientationConstraint.FREE,
+        ),
+        planning_policy=replace(
+            baseline.planning_policy,
+            payload_tcp_max_angular_velocity_rad_s=1000.0,
+            payload_tcp_max_translation_velocity_m_s=1000.0,
+            payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+    )
+    vamp = _ReturnedKnotVamp(
+        request.robot_model,
+        np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    loaded_knots = tuple(
+        knot.positions_rad
+        for knot in result.trajectory.knots
+        if knot.stage in (TrajectoryStage.EGRESS, TrajectoryStage.PLACE)
+    )
+    assert vamp.loaded_midpoints
+    assert any(
+        midpoint == knot
+        for midpoint in vamp.loaded_midpoints
+        for knot in loaded_knots
+    )
 
 
 def test_plan_rejects_invalid_native_motion_after_time_parameterization() -> None:
@@ -1061,6 +1205,170 @@ def test_real_ruckig_retimes_payload_motion_and_preserves_trajectory_contract() 
             assert sample.accelerations_rad_s2 == pytest.approx(
                 boundary.accelerations_rad_s2
             )
+
+
+def test_orientation_free_region_uses_nearest_goal_with_minimal_place_motion() -> None:
+    baseline = _request()
+    request = replace(
+        baseline,
+        placement_goal=PlacementGoal(
+            "outside_region",
+            PlacementGoalKind.RECTANGLE,
+            baseline.placement_goal.T_world_tcp,
+            PlacementOrientationConstraint.FREE,
+            size_m=(0.1, 0.1),
+            height_range_m=(0.0, baseline.planning_policy.preplace_offset_m),
+        ),
+    )
+    fixed_vamp = _FixedOrientationVamp(
+        request.robot_model,
+        np.asarray(request.candidates[0].T_world_tcp.matrix, dtype=np.float64)[
+            :3, :3
+        ],
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: fixed_vamp,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    trajectory = result.trajectory
+    assert tuple(phase.stage for phase in trajectory.phases) == tuple(TrajectoryStage)
+    place = next(
+        phase for phase in trajectory.phases if phase.stage is TrajectoryStage.PLACE
+    )
+    start = np.asarray(trajectory.knots[place.first_knot].positions_rad)
+    end = np.asarray(trajectory.knots[place.last_knot].positions_rad)
+    assert np.max(np.abs(end - start)) <= (
+        request.planning_policy.trajectory_validation_joint_step_rad + 1e-12
+    )
+    world_tcp = np.asarray(
+        fixed_vamp.tcp_pose(tuple(end)).matrix,
+        dtype=np.float64,
+    )
+    goal_position = np.asarray(
+        request.placement_goal.T_world_tcp.matrix,
+        dtype=np.float64,
+    )[:3, 3]
+    assert world_tcp[:3, 3] == pytest.approx(
+        goal_position
+        + np.asarray((0.0, 0.0, request.planning_policy.preplace_offset_m))
+    )
+    assert trajectory.knots[place.last_knot].velocities_rad_s == pytest.approx(
+        (0.0,) * len(request.robot_model.joint_names)
+    )
+
+
+def test_orientation_free_region_skips_zero_motion_sample_without_timing_leak() -> None:
+    baseline = _request()
+    candidate = baseline.candidates[0]
+    placement_anchor = replace(
+        candidate.T_world_tcp,
+        child_frame=baseline.robot_model.tcp_frame,
+    )
+    request = replace(
+        baseline,
+        placement_goal=PlacementGoal(
+            "already_reached_region",
+            PlacementGoalKind.RECTANGLE,
+            placement_anchor,
+            PlacementOrientationConstraint.FREE,
+            size_m=(0.1, 0.1),
+            height_range_m=(0.0, baseline.planning_policy.preplace_offset_m),
+        ),
+        planning_policy=replace(
+            baseline.planning_policy,
+            payload_tcp_max_angular_velocity_rad_s=1000.0,
+            payload_tcp_max_translation_velocity_m_s=1000.0,
+            payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+    )
+    fixed_vamp = _FixedOrientationVamp(
+        request.robot_model,
+        np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: fixed_vamp,
+    )
+
+    slower_validation_request = replace(
+        request,
+        planning_policy=replace(
+            request.planning_policy,
+            payload_motion_validation_time_step_s=2.0
+            * request.planning_policy.payload_motion_validation_time_step_s,
+        ),
+    )
+
+    results = tuple(
+        plan(item, dependencies=dependencies)
+        for item in (request, slower_validation_request)
+    )
+
+    assert all(result.success for result in results), tuple(
+        result.message for result in results
+    )
+    trajectories = tuple(result.trajectory for result in results)
+    assert all(trajectory is not None for trajectory in trajectories)
+    first, second = trajectories
+    assert first is not None and second is not None
+    assert first.knots[-1].time_s == pytest.approx(second.knots[-1].time_s)
+    for result, trajectory in zip(results, (first, second)):
+        assert tuple(phase.stage for phase in trajectory.phases) == tuple(
+            TrajectoryStage
+        )
+        lift = next(
+            phase for phase in trajectory.phases if phase.stage is TrajectoryStage.LIFT
+        )
+        egress = next(
+            phase for phase in trajectory.phases if phase.stage is TrajectoryStage.EGRESS
+        )
+        place = next(
+            phase for phase in trajectory.phases if phase.stage is TrajectoryStage.PLACE
+        )
+        assert any(
+            abs(value) > 0.0
+            for value in trajectory.knots[lift.last_knot].velocities_rad_s
+        )
+        assert any(
+            abs(value) > 0.0
+            for value in trajectory.knots[egress.last_knot].velocities_rad_s
+        )
+        assert trajectory.knots[place.first_knot].positions_rad != pytest.approx(
+            trajectory.knots[place.last_knot].positions_rad
+        )
+        assert trajectory.knots[place.last_knot].velocities_rad_s == pytest.approx(
+            (0.0,) * len(request.robot_model.joint_names)
+        )
+        release = next(
+            event for event in trajectory.events if event.event == "release"
+        )
+        assert release.time_s == pytest.approx(place.end_time_s)
+        assert any(
+            attempt.error_code is PlanningErrorCode.RUCKIG_FAILED
+            and attempt.stage is TrajectoryStage.PLACE
+            and "zero-motion PLACE sample" in attempt.reason
+            for attempt in result.attempts
+        )
+
+    terminal = plan(
+        replace(request, candidates=(candidate,)),
+        dependencies=replace(dependencies, placement_sample_count=1),
+    )
+    assert not terminal.success
+    assert terminal.error_code is PlanningErrorCode.RUCKIG_FAILED
+    zero_motion_attempts = tuple(
+        attempt
+        for attempt in terminal.attempts
+        if attempt.error_code is PlanningErrorCode.RUCKIG_FAILED
+        and attempt.stage is TrajectoryStage.PLACE
+        and "zero-motion PLACE sample" in attempt.reason
+    )
+    assert len(zero_motion_attempts) == 1
 
 
 def test_payload_fk_failure_is_backend_error_not_ruckig_failure() -> None:

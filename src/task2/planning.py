@@ -43,6 +43,7 @@ class _RouteFailure(Exception):
     code: PlanningErrorCode
     stage: TrajectoryStage
     message: str
+    attempt_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,8 @@ class _Route:
     events: tuple[tuple[str, TrajectoryStage, int, dict[str, float]], ...]
     T_world_object_goal: RigidTransform
     orientation_preference_cost_rad: float
+    payload_cumulative_translation_m: float = 0.0
+    payload_cumulative_rotation_rad: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,8 @@ class _PayloadMotionMetrics:
 @dataclass(frozen=True)
 class _OrientationPathMetrics:
     maximum_deviation_rad: float
+    cumulative_translation_m: float
+    cumulative_rotation_rad: float
     sample_count: int
 
 
@@ -153,16 +158,17 @@ def plan(
                 )
             except _RouteFailure as failure:
                 last_failure = failure
-                attempts.append(
-                    PlanningAttempt(
-                        candidate.candidate_id,
-                        seed,
-                        failure.stage,
-                        monotonic() - attempt_started,
-                        failure.code,
-                        failure.message,
+                if not failure.attempt_recorded:
+                    attempts.append(
+                        PlanningAttempt(
+                            candidate.candidate_id,
+                            seed,
+                            failure.stage,
+                            monotonic() - attempt_started,
+                            failure.code,
+                            failure.message,
+                        )
                     )
-                )
                 continue
             except BackendUnavailableError as exc:
                 return PlanningResult.failed(
@@ -672,18 +678,34 @@ def _build_route(
         T_tcp_object=candidate.T_tcp_object,
         attached_geometry=request.object_config.attached_geometry,
     )
+    regional_preplace_pose: RigidTransform | None = None
+    if request.placement_goal.kind is not PlacementGoalKind.EXACT:
+        regional_preplace_pose = _translate_world_z(
+            _resolve_placement_orientation(
+                request.placement_goal,
+                request.placement_goal.T_world_tcp,
+                candidate.T_world_tcp,
+            ),
+            request.planning_policy.preplace_offset_m,
+        )
     placement_failure: _RouteFailure | None = None
     for sampled_placement_pose in _sample_placements(
-        request.placement_goal, placement_sample_count
+        request.placement_goal,
+        placement_sample_count,
+        reference_pose=regional_preplace_pose,
     ):
         world_placement_pose = _resolve_placement_orientation(
             request.placement_goal,
             sampled_placement_pose,
             candidate.T_world_tcp,
         )
-        world_preplace_pose = _translate_world_z(
-            world_placement_pose,
-            request.planning_policy.preplace_offset_m,
+        world_preplace_pose = (
+            regional_preplace_pose
+            if regional_preplace_pose is not None
+            else _translate_world_z(
+                world_placement_pose,
+                request.planning_policy.preplace_offset_m,
+            )
         )
         preplace_pose = compose(inverse(request.T_world_base), world_preplace_pose)
         placement_pose = compose(inverse(request.T_world_base), world_placement_pose)
@@ -713,10 +735,7 @@ def _build_route(
                         else lift_states[-1].positions_rad
                     )
                     try:
-                        (
-                            candidate_egress,
-                            egress_orientation_cost,
-                        ) = _orientation_preferred_vamp_stage(
+                        candidate_egress, _ = _orientation_preferred_vamp_stage(
                             request,
                             ik_solver,
                             vamp,
@@ -731,24 +750,56 @@ def _build_route(
                             total_started,
                             ik_solution_count,
                         )
-                        (
-                            candidate_place,
-                            place_orientation_cost,
-                        ) = _orientation_preferred_vamp_stage(
-                            request,
-                            ik_solver,
-                            vamp,
-                            candidate_egress[-1],
-                            placement_pose,
-                            grasp_pose,
-                            strict_loaded_environment,
-                            candidate.candidate_id,
-                            seed,
-                            TrajectoryStage.PLACE,
-                            attempts,
-                            total_started,
-                            ik_solution_count,
-                        )
+                        if _same_position(
+                            world_preplace_pose,
+                            world_placement_pose,
+                        ):
+                            split_path = _split_final_path_motion(
+                                candidate_egress,
+                                request.planning_policy.trajectory_validation_joint_step_rad,
+                            )
+                            if split_path is None:
+                                failure = _RouteFailure(
+                                    PlanningErrorCode.RUCKIG_FAILED,
+                                    TrajectoryStage.PLACE,
+                                    "zero-motion PLACE sample cannot form the required "
+                                    "positive-duration trajectory segment",
+                                    attempt_recorded=True,
+                                )
+                                attempts.append(
+                                    PlanningAttempt(
+                                        candidate.candidate_id,
+                                        seed,
+                                        failure.stage,
+                                        monotonic() - free_search_started,
+                                        failure.code,
+                                        failure.message,
+                                    )
+                                )
+                                _check_stage_budget(
+                                    request,
+                                    monotonic() - free_search_started,
+                                    total_started,
+                                    TrajectoryStage.PLACE,
+                                )
+                                raise failure
+                            candidate_egress, candidate_place = split_path
+                        else:
+                            candidate_place, _ = _orientation_preferred_vamp_stage(
+                                request,
+                                ik_solver,
+                                vamp,
+                                candidate_egress[-1],
+                                placement_pose,
+                                grasp_pose,
+                                strict_loaded_environment,
+                                candidate.candidate_id,
+                                seed,
+                                TrajectoryStage.PLACE,
+                                attempts,
+                                total_started,
+                                ik_solution_count,
+                            )
                         if _path_has_forbidden_attachment_contact(
                             candidate_egress,
                             request,
@@ -768,15 +819,30 @@ def _build_route(
                         if failure.code is PlanningErrorCode.BUDGET_EXHAUSTED:
                             raise
                         continue
-                    orientation_cost = max(
-                        egress_orientation_cost,
-                        place_orientation_cost,
+                    payload_path = (
+                        grasp_state.positions_rad,
+                        *(state.positions_rad for state in lift_states),
+                        *(state.positions_rad for state in extra_lift_states),
+                        *candidate_egress[1:],
+                        *candidate_place[1:],
+                    )
+                    payload_metrics = _sampled_orientation_deviation(
+                        payload_path,
+                        grasp_pose,
+                        vamp,
+                        request,
+                        TrajectoryStage.EGRESS,
+                        free_search_started,
+                        total_started,
                     )
                     free_routes.append(
                         (
-                            orientation_cost,
-                            _joint_path_length(candidate_egress)
-                            + _joint_path_length(candidate_place),
+                            _path_quality_key(
+                                payload_metrics,
+                                _joint_path_length(payload_path),
+                                endpoint_index,
+                            ),
+                            payload_metrics,
                             endpoint_index,
                             extra_lift_states,
                             candidate_egress,
@@ -798,13 +864,16 @@ def _build_route(
                         "no orientation-free LIFT endpoint produced a valid route",
                     )
                 (
-                    orientation_preference_cost,
                     _,
+                    selected_payload_metrics,
                     _,
                     selected_extra_lift_states,
                     egress_plan,
                     place_plan,
-                ) = min(free_routes, key=lambda item: item[:3])
+                ) = min(free_routes, key=lambda item: item[0])
+                orientation_preference_cost = (
+                    selected_payload_metrics.maximum_deviation_rad
+                )
             else:
                 selected_extra_lift_states = ()
                 egress_start = lift_states[-1].positions_rad
@@ -853,6 +922,12 @@ def _build_route(
                     total_started,
                 )
                 orientation_preference_cost = 0.0
+                selected_payload_metrics = _OrientationPathMetrics(
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                )
             if _path_has_forbidden_attachment_contact(
                 egress_plan,
                 request,
@@ -922,6 +997,8 @@ def _build_route(
             ),
             T_world_object,
             orientation_preference_cost,
+            selected_payload_metrics.cumulative_translation_m,
+            selected_payload_metrics.cumulative_rotation_rad,
         )
     if placement_failure is not None:
         raise placement_failure
@@ -1265,31 +1342,27 @@ def _orientation_preferred_vamp_stage(
                 stage,
             )
             continue
-        simplified = _shortcut_vamp_path(path, vamp, environment)
-        variants = (("raw", path),)
-        if simplified != path:
-            variants += (("shortcut", simplified),)
-        for variant_index, (variant, candidate_path) in enumerate(variants):
-            metrics = _sampled_orientation_deviation(
-                candidate_path,
-                preferred_orientation,
-                vamp,
-                request,
-                stage,
-                started,
-                total_started,
-            )
-            routes.append(
-                (
-                    metrics.maximum_deviation_rad,
-                    _joint_path_length(candidate_path),
+        metrics = _sampled_orientation_deviation(
+            path,
+            preferred_orientation,
+            vamp,
+            request,
+            stage,
+            started,
+            total_started,
+        )
+        routes.append(
+            (
+                _path_quality_key(
+                    metrics,
+                    _joint_path_length(path),
                     solution_index,
-                    variant_index,
-                    metrics.sample_count,
-                    variant,
-                    candidate_path,
-                )
+                ),
+                metrics,
+                solution_index,
+                path,
             )
+        )
         _check_stage_budget(
             request,
             monotonic() - started,
@@ -1309,16 +1382,13 @@ def _orientation_preferred_vamp_stage(
             f"no collision-valid IK solution for {stage.value}",
         )
     (
-        orientation_cost,
         _,
+        metrics,
         solution_index,
-        _,
-        sample_count,
-        variant,
         path,
     ) = min(
         routes,
-        key=lambda item: item[:4],
+        key=lambda item: item[0],
     )
     elapsed = monotonic() - started
     attempts.append(
@@ -1329,34 +1399,15 @@ def _orientation_preferred_vamp_stage(
             elapsed,
             None,
             f"VAMP {stage.value} selected IK solution {solution_index} "
-            f"{variant} path with "
-            f"sampled maximum TCP orientation deviation "
-            f"{orientation_cost:.9g}rad over {sample_count} FK samples",
+            "returned path with "
+            "sampled TCP path quality: maximum orientation deviation "
+            f"{metrics.maximum_deviation_rad:.9g}rad, cumulative rotation "
+            f"{metrics.cumulative_rotation_rad:.9g}rad, cumulative translation "
+            f"{metrics.cumulative_translation_m:.9g}m over "
+            f"{metrics.sample_count} FK samples",
         )
     )
-    return path, orientation_cost
-
-
-def _shortcut_vamp_path(
-    path: tuple[tuple[float, ...], ...],
-    vamp: VampBackend,
-    environment,
-) -> tuple[tuple[float, ...], ...]:
-    if len(path) <= 2:
-        return path
-    result = [path[0]]
-    start_index = 0
-    while start_index < len(path) - 1:
-        for goal_index in range(len(path) - 1, start_index, -1):
-            if vamp.motion_valid(path[start_index], path[goal_index], environment):
-                result.append(path[goal_index])
-                start_index = goal_index
-                break
-        else:
-            raise BackendOperationError(
-                "VAMP path contains no valid forward motion from a returned knot"
-            )
-    return tuple(result)
+    return path, _orientation_path_cost(metrics)
 
 
 def _sampled_orientation_deviation(
@@ -1374,13 +1425,15 @@ def _sampled_orientation_deviation(
         np.asarray(preferred_orientation.matrix, dtype=np.float64)[:3, :3]
     )
     policy = request.planning_policy
-    rotations: dict[tuple[float, ...], Rotation] = {}
+    poses: dict[tuple[float, ...], tuple[np.ndarray, Rotation]] = {}
     maximum_deviation = 0.0
 
-    def rotation_at(configuration: tuple[float, ...]) -> Rotation:
+    def pose_at(
+        configuration: tuple[float, ...],
+    ) -> tuple[np.ndarray, Rotation]:
         nonlocal maximum_deviation
-        if configuration not in rotations:
-            if len(rotations) >= policy.trajectory_validation_max_samples:
+        if configuration not in poses:
+            if len(poses) >= policy.trajectory_validation_max_samples:
                 raise _RouteFailure(
                     PlanningErrorCode.BUDGET_EXHAUSTED,
                     stage,
@@ -1392,22 +1445,45 @@ def _sampled_orientation_deviation(
                 dtype=np.float64,
             )
             rotation = Rotation.from_matrix(matrix[:3, :3])
-            rotations[configuration] = rotation
+            poses[configuration] = (matrix[:3, 3], rotation)
             maximum_deviation = max(
                 maximum_deviation,
                 float((reference.inv() * rotation).magnitude()),
             )
-            if len(rotations) % 16 == 0:
+            if len(poses) % 16 == 0:
                 _check_stage_budget(
                     request,
                     monotonic() - stage_started,
                     total_started,
                     stage,
                 )
-        return rotations[configuration]
+        return poses[configuration]
 
-    intervals: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
-    rotation_at(path[0])
+    def refine_interval(
+        left: tuple[float, ...],
+        right: tuple[float, ...],
+    ) -> tuple[tuple[float, ...], ...]:
+        midpoint = tuple(
+            0.5 * (left_value + right_value)
+            for left_value, right_value in zip(left, right)
+        )
+        if midpoint == left or midpoint == right:
+            return (left, right)
+        left_rotation = pose_at(left)[1]
+        midpoint_rotation = pose_at(midpoint)[1]
+        right_rotation = pose_at(right)[1]
+        rotation_sweep = float(
+            (left_rotation.inv() * midpoint_rotation).magnitude()
+            + (midpoint_rotation.inv() * right_rotation).magnitude()
+        )
+        if rotation_sweep > policy.trajectory_validation_tcp_rotation_step_rad:
+            left_samples = refine_interval(left, midpoint)
+            right_samples = refine_interval(midpoint, right)
+            return (*left_samples[:-1], *right_samples)
+        return (left, midpoint, right)
+
+    pose_at(path[0])
+    ordered_configurations = [path[0]]
     for left, right in zip(path, path[1:]):
         left_values = np.asarray(left, dtype=np.float64)
         right_values = np.asarray(right, dtype=np.float64)
@@ -1427,28 +1503,10 @@ def _sampled_orientation_deviation(
                     for value in left_values
                     + fraction * (right_values - left_values)
                 )
-            rotation_at(current)
-            intervals.append((previous, current))
+            pose_at(current)
+            refined = refine_interval(previous, current)
+            ordered_configurations.extend(refined[1:])
             previous = current
-
-    while intervals:
-        left, right = intervals.pop()
-        midpoint = tuple(
-            0.5 * (left_value + right_value)
-            for left_value, right_value in zip(left, right)
-        )
-        if midpoint == left or midpoint == right:
-            continue
-        left_rotation = rotation_at(left)
-        midpoint_rotation = rotation_at(midpoint)
-        right_rotation = rotation_at(right)
-        rotation_sweep = float(
-            (left_rotation.inv() * midpoint_rotation).magnitude()
-            + (midpoint_rotation.inv() * right_rotation).magnitude()
-        )
-        if rotation_sweep > policy.trajectory_validation_tcp_rotation_step_rad:
-            intervals.append((midpoint, right))
-            intervals.append((left, midpoint))
 
     _check_stage_budget(
         request,
@@ -1456,7 +1514,41 @@ def _sampled_orientation_deviation(
         total_started,
         stage,
     )
-    return _OrientationPathMetrics(maximum_deviation, len(rotations))
+    ordered_poses = tuple(
+        pose_at(configuration) for configuration in ordered_configurations
+    )
+    cumulative_translation = sum(
+        float(np.linalg.norm(right[0] - left[0]))
+        for left, right in zip(ordered_poses, ordered_poses[1:])
+    )
+    cumulative_rotation = sum(
+        float((left[1].inv() * right[1]).magnitude())
+        for left, right in zip(ordered_poses, ordered_poses[1:])
+    )
+    return _OrientationPathMetrics(
+        maximum_deviation,
+        cumulative_translation,
+        cumulative_rotation,
+        len(ordered_poses),
+    )
+
+
+def _orientation_path_cost(metrics: _OrientationPathMetrics) -> float:
+    return metrics.maximum_deviation_rad + metrics.cumulative_rotation_rad
+
+
+def _path_quality_key(
+    metrics: _OrientationPathMetrics,
+    joint_path_length: float,
+    tie_breaker: int,
+) -> tuple[float, float, float, float, int]:
+    return (
+        _orientation_path_cost(metrics),
+        metrics.cumulative_translation_m,
+        metrics.maximum_deviation_rad,
+        joint_path_length,
+        tie_breaker,
+    )
 
 
 def _joint_path_length(path: tuple[tuple[float, ...], ...]) -> float:
@@ -2432,7 +2524,12 @@ def _translate_world_z(pose: RigidTransform, distance_m: float) -> RigidTransfor
     return RigidTransform(pose.parent_frame, pose.child_frame, tuple(tuple(row) for row in matrix))  # type: ignore[arg-type]
 
 
-def _sample_placements(goal: PlacementGoal, count: int) -> tuple[RigidTransform, ...]:
+def _sample_placements(
+    goal: PlacementGoal,
+    count: int,
+    *,
+    reference_pose: RigidTransform | None = None,
+) -> tuple[RigidTransform, ...]:
     if goal.kind is PlacementGoalKind.EXACT:
         return (goal.T_world_tcp,)
     offsets = [(0.0, 0.0, 0.5 * sum(goal.height_range_m))]
@@ -2462,7 +2559,90 @@ def _sample_placements(goal: PlacementGoal, count: int) -> tuple[RigidTransform,
                 tuple(tuple(row) for row in matrix),  # type: ignore[arg-type]
             )
         )
-    return tuple(results)
+    if reference_pose is None:
+        return tuple(results)
+
+    projected = _project_pose_to_placement_region(goal, reference_pose)
+    ordered = [projected]
+    ordered.extend(
+        sorted(
+            results,
+            key=lambda pose: _translation_distance(pose, reference_pose),
+        )
+    )
+    unique = []
+    for pose in ordered:
+        if any(_same_position(pose, existing) for existing in unique):
+            continue
+        unique.append(pose)
+        if len(unique) == count:
+            break
+    return tuple(unique)
+
+
+def _project_pose_to_placement_region(
+    goal: PlacementGoal,
+    reference_pose: RigidTransform,
+) -> RigidTransform:
+    goal_matrix = np.asarray(goal.T_world_tcp.matrix, dtype=np.float64)
+    reference_position = np.asarray(reference_pose.matrix, dtype=np.float64)[:3, 3]
+    anchor = goal_matrix[:3, 3]
+    offset = reference_position - anchor
+    if goal.kind is PlacementGoalKind.RECTANGLE:
+        width, depth = goal.size_m  # type: ignore[misc]
+        offset[0] = np.clip(offset[0], -0.5 * width, 0.5 * width)
+        offset[1] = np.clip(offset[1], -0.5 * depth, 0.5 * depth)
+    elif goal.kind is PlacementGoalKind.CIRCLE:
+        radius = goal.radius_m  # type: ignore[assignment]
+        radial_distance = float(np.linalg.norm(offset[:2]))
+        if radial_distance > radius:
+            offset[:2] *= radius / radial_distance
+    else:
+        raise ValueError("placement projection requires a regional goal")
+    offset[2] = np.clip(offset[2], *goal.height_range_m)
+    matrix = [list(row) for row in goal.T_world_tcp.matrix]
+    for index, value in enumerate(anchor + offset):
+        matrix[index][3] = float(value)
+    return RigidTransform(
+        goal.T_world_tcp.parent_frame,
+        goal.T_world_tcp.child_frame,
+        tuple(tuple(row) for row in matrix),  # type: ignore[arg-type]
+    )
+
+
+def _translation_distance(left: RigidTransform, right: RigidTransform) -> float:
+    left_position = np.asarray(left.matrix, dtype=np.float64)[:3, 3]
+    right_position = np.asarray(right.matrix, dtype=np.float64)[:3, 3]
+    return float(np.linalg.norm(right_position - left_position))
+
+
+def _same_position(left: RigidTransform, right: RigidTransform) -> bool:
+    return _translation_distance(left, right) <= 1e-12
+
+
+def _split_final_path_motion(
+    path: tuple[tuple[float, ...], ...],
+    maximum_joint_step_rad: float,
+) -> (
+    tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]
+    | None
+):
+    compact = [path[0]] if path else []
+    for point in path[1:]:
+        if point != compact[-1]:
+            compact.append(point)
+    if not compact:
+        raise BackendOperationError("VAMP regional placement route is empty")
+    if len(compact) == 1:
+        return None
+    left = np.asarray(compact[-2], dtype=np.float64)
+    right = np.asarray(compact[-1], dtype=np.float64)
+    maximum_delta = float(np.max(np.abs(right - left)))
+    fraction = min(0.5, maximum_joint_step_rad / maximum_delta)
+    split = tuple(float(value) for value in right - fraction * (right - left))
+    egress = tuple(compact[:-1]) + (split,)
+    place = (split, tuple(compact[-1]))
+    return egress, place
 
 
 def _resolve_placement_orientation(
@@ -2519,7 +2699,15 @@ def _route_selection_key(
         request.placement_goal.orientation_constraint
         is PlacementOrientationConstraint.FREE
     ):
-        return route.orientation_preference_cost_rad, length, -minimum_margin, seed
+        return (
+            route.orientation_preference_cost_rad
+            + route.payload_cumulative_rotation_rad,
+            route.payload_cumulative_translation_m,
+            route.orientation_preference_cost_rad,
+            length,
+            -minimum_margin,
+            seed,
+        )
     return length, -minimum_margin, seed
 
 
