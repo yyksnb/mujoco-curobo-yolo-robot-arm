@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from math import isfinite
+from math import floor, isfinite, pi, tau
 from typing import Mapping
 
 from .geometry import RigidTransform, Vector3
@@ -38,6 +38,7 @@ class JointLimits:
     maximum_velocity_rad_s: float
     maximum_acceleration_rad_s2: float
     maximum_jerk_rad_s3: float
+    continuous: bool = False
 
     def validate(self, joint_name: str) -> None:
         values = (
@@ -53,6 +54,10 @@ class JointLimits:
             raise ValueError(f"position limits for {joint_name} must be increasing")
         if min(values[2:]) <= 0.0:
             raise ValueError(f"dynamic limits for {joint_name} must be positive")
+
+    @property
+    def position_bounded(self) -> bool:
+        return not self.continuous
 
 
 @dataclass(frozen=True)
@@ -79,8 +84,32 @@ class RobotModel:
             self.joint_names, self.joint_limits, self.default_joint_positions
         ):
             limits.validate(name)
-            if not limits.minimum_position_rad <= value <= limits.maximum_position_rad:
+            if limits.position_bounded and not (
+                limits.minimum_position_rad <= value <= limits.maximum_position_rad
+            ):
                 raise ValueError(f"RobotModel default position for {name} is outside limits")
+
+    def unwrap_positions(
+        self,
+        positions_rad: tuple[float, ...],
+        reference_rad: tuple[float, ...],
+    ) -> tuple[float, ...]:
+        if len(positions_rad) != len(self.joint_names) or len(reference_rad) != len(
+            self.joint_names
+        ):
+            raise ValueError("continuous joint unwrapping must match RobotModel order")
+        if not all(isfinite(value) for value in positions_rad + reference_rad):
+            raise ValueError("continuous joint unwrapping requires finite positions")
+        return tuple(
+            reference
+            + (value - reference)
+            - tau * floor((value - reference + pi) / tau)
+            if limits.continuous
+            else value
+            for value, reference, limits in zip(
+                positions_rad, reference_rad, self.joint_limits
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -98,7 +127,9 @@ class RobotState:
         for name, value, limits in zip(
             self.joint_names, self.positions_rad, robot_model.joint_limits
         ):
-            if not limits.minimum_position_rad <= value <= limits.maximum_position_rad:
+            if limits.position_bounded and not (
+                limits.minimum_position_rad <= value <= limits.maximum_position_rad
+            ):
                 raise ValueError(f"robot state position for {name} is outside limits")
 
 
@@ -454,6 +485,14 @@ class PlanningRequest:
             raise ValueError("Planning candidates and object config must name one object type")
         if any(candidate.end_effector_profile_id != self.end_effector_config.profile_id for candidate in self.candidates):
             raise ValueError("Planning candidates and end-effector config must use one profile")
+        declared_contact_groups = set(self.end_effector_config.contact_groups)
+        if any(
+            set(candidate.expected_contacts) - declared_contact_groups
+            for candidate in self.candidates
+        ):
+            raise ValueError(
+                "Planning candidate contacts must be declared by the end-effector config"
+            )
 
 
 @dataclass(frozen=True)

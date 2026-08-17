@@ -436,6 +436,16 @@ def _build_route(
         for item in request.scene.geometries
         if item.object_id != request.target_object_id
     )
+    support_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group == request.source_support_group
+    )
+    non_support_environment_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group != request.source_support_group
+    )
     channels = {
         request.end_effector_config.actuator_position_channel: candidate.grasp_command.pregrasp_opening_m,
         request.end_effector_config.actuator_force_limit_channel: candidate.grasp_command.grip_force_limit_n,
@@ -604,6 +614,29 @@ def _build_route(
             TrajectoryStage.GRASP,
             f"GRASP contacts {sorted(contacts)!r} do not include every "
             f"candidate-declared contact {sorted(candidate.expected_contacts)!r}",
+        )
+    non_support_contacts = vamp.semantic_target_contacts(
+        grasp_state.positions_rad,
+        non_support_environment_geometries,
+        candidate.grasp_command.target_opening_m,
+        request.T_world_base,
+    )
+    support_contacts = vamp.semantic_target_contacts(
+        grasp_state.positions_rad,
+        support_geometries,
+        candidate.grasp_command.target_opening_m,
+        request.T_world_base,
+    )
+    forbidden_support_contacts = support_contacts - set(
+        request.end_effector_config.contact_groups
+    )
+    if non_support_contacts or forbidden_support_contacts:
+        raise _RouteFailure(
+            PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+            TrajectoryStage.GRASP,
+            "GRASP has forbidden robot/environment contacts: "
+            f"non_support={sorted(non_support_contacts)!r}, "
+            f"source_support={sorted(forbidden_support_contacts)!r}",
         )
     channels = {
         request.end_effector_config.actuator_position_channel: candidate.grasp_command.target_opening_m,
@@ -1040,6 +1073,16 @@ def _continuous_ik(
         T_tcp_object=candidate.T_tcp_object if stage is TrajectoryStage.LIFT else None,
         attached_geometry=request.object_config.attached_geometry if stage is TrajectoryStage.LIFT else (),
     )
+    support_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group == request.source_support_group
+    )
+    non_support_environment_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group != request.source_support_group
+    )
     started = monotonic()
     for index, pose in enumerate(poses):
         solutions = _solve_ik(
@@ -1055,38 +1098,35 @@ def _continuous_ik(
                 if stage is TrajectoryStage.APPROACH
                 else candidate.grasp_command.target_opening_m
             )
-            if exact_environment_geometries and vamp.semantic_target_contacts(
-                state.positions_rad,
-                exact_environment_geometries,
-                exact_opening,
-                request.T_world_base,
+            if (
+                stage is not TrajectoryStage.LIFT
+                and exact_environment_geometries
+                and vamp.semantic_target_contacts(
+                    state.positions_rad,
+                    exact_environment_geometries,
+                    exact_opening,
+                    request.T_world_base,
+                )
             ):
                 continue
-            if exact_environment_geometries and _semantic_motion_has_forbidden_contact(
-                current.positions_rad,
-                state.positions_rad,
-                exact_environment_geometries,
-                exact_opening,
-                frozenset(),
-                vamp,
-                request.T_world_base,
+            if (
+                stage is not TrajectoryStage.LIFT
+                and exact_environment_geometries
+                and _semantic_motion_has_forbidden_contact(
+                    current.positions_rad,
+                    state.positions_rad,
+                    exact_environment_geometries,
+                    exact_opening,
+                    frozenset(),
+                    vamp,
+                    request.T_world_base,
+                )
             ):
                 continue
             environment = strict_environment
             next_support_departed = support_departed
             if stage is TrajectoryStage.LIFT:
-                attachment_contacts = vamp.semantic_attachment_contacts(
-                    state.positions_rad,
-                    candidate.T_tcp_object,
-                    request.object_config.attached_geometry,
-                    environment_geometries,
-                    request.T_world_base,
-                )
-                if attachment_contacts - {request.source_support_group}:
-                    continue
-                if support_departed and request.source_support_group in attachment_contacts:
-                    continue
-                next_support_departed = _attachment_motion_is_valid(
+                next_support_departed = _lift_departure_motion_is_valid(
                     current.positions_rad,
                     state.positions_rad,
                     support_departed,
@@ -1094,11 +1134,11 @@ def _continuous_ik(
                     candidate,
                     vamp,
                     environment_geometries,
+                    support_geometries,
+                    non_support_environment_geometries,
                 )
                 if next_support_departed is None:
                     continue
-                if request.source_support_group not in attachment_contacts:
-                    next_support_departed = True
             if not vamp.configuration_valid(state.positions_rad, environment):
                 continue
             if not vamp.motion_valid(current.positions_rad, state.positions_rad, environment):
@@ -1173,7 +1213,30 @@ def _solve_ik(
         validate_ik_result(result, request.robot_model)
     except ValueError as exc:
         raise _RouteFailure(PlanningErrorCode.BACKEND_ERROR, stage, str(exc)) from exc
-    return tuple(item.state for item in result.solutions)
+    aligned = tuple(
+        RobotState(
+            request.robot_model.joint_names,
+            request.robot_model.unwrap_positions(
+                item.state.positions_rad, seed_state.positions_rad
+            ),
+        )
+        for item in result.solutions
+    )
+    return tuple(
+        state
+        for _, state in sorted(
+            enumerate(aligned),
+            key=lambda item: (
+                float(
+                    np.linalg.norm(
+                        np.asarray(item[1].positions_rad)
+                        - np.asarray(seed_state.positions_rad)
+                    )
+                ),
+                item[0],
+            ),
+        )
+    )
 
 
 def _first_valid_ik(
@@ -1610,7 +1673,7 @@ def _semantic_motion_has_forbidden_contact(
     return False
 
 
-def _attachment_motion_is_valid(
+def _lift_departure_motion_is_valid(
     start: tuple[float, ...],
     goal: tuple[float, ...],
     support_departed: bool,
@@ -1618,6 +1681,8 @@ def _attachment_motion_is_valid(
     candidate: GraspCandidate,
     vamp: VampBackend,
     environment_geometries: tuple[SceneGeometry, ...],
+    support_geometries: tuple[SceneGeometry, ...],
+    non_support_environment_geometries: tuple[SceneGeometry, ...],
 ) -> bool | None:
     sample_count = max(
         2,
@@ -1641,8 +1706,28 @@ def _attachment_motion_is_valid(
         on_support = request.source_support_group in contacts
         if departed and on_support:
             return None
-        if not on_support:
-            departed = True
+        next_departed = departed or not on_support
+        if vamp.semantic_target_contacts(
+            state,
+            non_support_environment_geometries,
+            candidate.grasp_command.target_opening_m,
+            request.T_world_base,
+        ):
+            return None
+        support_contacts = vamp.semantic_target_contacts(
+            state,
+            support_geometries,
+            candidate.grasp_command.target_opening_m,
+            request.T_world_base,
+        )
+        permitted_support_contacts = (
+            frozenset(request.end_effector_config.contact_groups)
+            if not next_departed
+            else frozenset()
+        )
+        if support_contacts - permitted_support_contacts:
+            return None
+        departed = next_departed
     return departed
 
 
@@ -1908,6 +1993,16 @@ def _validate_time_parameterized_trajectory(
         for item in request.scene.geometries
         if item.object_id != request.target_object_id
     )
+    support_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group == request.source_support_group
+    )
+    non_support_environment_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group != request.source_support_group
+    )
     all_object_ids = tuple(
         sorted({item.object_id for item in request.scene.geometries})
     )
@@ -2035,11 +2130,7 @@ def _validate_time_parameterized_trajectory(
             configuration = sample.positions_rad
             opening_m = float(sample.actuator_channels[opening_channel])
             time_s = sample.time_s
-            if stage in (
-                TrajectoryStage.APPROACH,
-                TrajectoryStage.GRASP,
-                TrajectoryStage.LIFT,
-            ):
+            if stage is TrajectoryStage.APPROACH:
                 environment_contacts = vamp.semantic_target_contacts(
                     configuration,
                     environment_geometries,
@@ -2053,6 +2144,21 @@ def _validate_time_parameterized_trajectory(
                         f"time-parameterized {stage.value} robot contacts the environment "
                         f"at current opening {opening_m:.6f}m: "
                         f"{sorted(environment_contacts)!r}",
+                    )
+            elif stage in (TrajectoryStage.GRASP, TrajectoryStage.LIFT):
+                non_support_contacts = vamp.semantic_target_contacts(
+                    configuration,
+                    non_support_environment_geometries,
+                    opening_m,
+                    request.T_world_base,
+                )
+                if non_support_contacts:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        f"time-parameterized {stage.value} robot contacts a "
+                        "non-support environment geometry at current opening "
+                        f"{opening_m:.6f}m: {sorted(non_support_contacts)!r}",
                     )
 
             if stage in (
@@ -2122,8 +2228,46 @@ def _validate_time_parameterized_trajectory(
                         "time-parameterized LIFT attached object recontacts the "
                         "declared source support",
                     )
-                if not on_support:
-                    support_departed = True
+                next_support_departed = support_departed or not on_support
+                support_contacts = vamp.semantic_target_contacts(
+                    configuration,
+                    support_geometries,
+                    opening_m,
+                    request.T_world_base,
+                )
+                permitted_support_contacts = (
+                    frozenset(request.end_effector_config.contact_groups)
+                    if not next_support_departed
+                    else frozenset()
+                )
+                forbidden_support_contacts = (
+                    support_contacts - permitted_support_contacts
+                )
+                if forbidden_support_contacts:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        "time-parameterized LIFT has forbidden robot/source-support "
+                        f"contacts: {sorted(forbidden_support_contacts)!r}",
+                    )
+                support_departed = next_support_departed
+            elif stage is TrajectoryStage.GRASP:
+                support_contacts = vamp.semantic_target_contacts(
+                    configuration,
+                    support_geometries,
+                    opening_m,
+                    request.T_world_base,
+                )
+                forbidden_support_contacts = support_contacts - frozenset(
+                    request.end_effector_config.contact_groups
+                )
+                if forbidden_support_contacts:
+                    raise _RouteFailure(
+                        PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                        stage,
+                        "time-parameterized GRASP has forbidden robot/source-support "
+                        f"contacts: {sorted(forbidden_support_contacts)!r}",
+                    )
             previous_time_s = time_s
             if stage_sample_count % 16 == 0:
                 _check_stage_budget(
@@ -2437,7 +2581,10 @@ def _maximum_section_joint_speed(section: TrajectoryPolynomialSection) -> float:
 def _has_joint_margin(state: RobotState, request: PlanningRequest) -> bool:
     margin = request.planning_policy.joint_limit_margin_rad
     return all(
-        limits.minimum_position_rad + margin <= value <= limits.maximum_position_rad - margin
+        not limits.position_bounded
+        or limits.minimum_position_rad + margin
+        <= value
+        <= limits.maximum_position_rad - margin
         for value, limits in zip(state.positions_rad, request.robot_model.joint_limits)
     )
 
@@ -2688,12 +2835,16 @@ def _route_selection_key(
         for left, right in zip(positions, positions[1:])
     )
     minimum_margin = min(
-        min(
-            value - limits.minimum_position_rad,
-            limits.maximum_position_rad - value,
-        )
-        for position in positions
-        for value, limits in zip(position, request.robot_model.joint_limits)
+        (
+            min(
+                value - limits.minimum_position_rad,
+                limits.maximum_position_rad - value,
+            )
+            for position in positions
+            for value, limits in zip(position, request.robot_model.joint_limits)
+            if limits.position_bounded
+        ),
+        default=float("inf"),
     )
     if (
         request.placement_goal.orientation_constraint

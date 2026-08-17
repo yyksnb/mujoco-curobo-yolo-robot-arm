@@ -212,6 +212,76 @@ class _FakeIK:
         return IKResult((IKSolution(state, 0.0, 0.0),), None, "fake IK succeeded")
 
 
+class _WrappedContinuousIK(_FakeIK):
+    def solve(self, targets, seed_states, constraints):
+        result = super().solve(targets, seed_states, constraints)
+        solutions = []
+        for solution in result.solutions:
+            values = list(solution.state.positions_rad)
+            values[0] = -np.pi + 0.01
+            solutions.append(
+                IKSolution(
+                    RobotState(self.model.joint_names, tuple(values)),
+                    solution.position_error_m,
+                    solution.orientation_error_rad,
+                )
+            )
+        return IKResult(tuple(solutions), result.error_code, result.message)
+
+
+class _SourceSupportVamp(_FakeVamp):
+    def __init__(self, robot_model, *, support_groups=("left_pad", "right_pad")):
+        super().__init__(robot_model)
+        self.support_groups = frozenset(support_groups)
+        self.grasp_joint_z = None
+        self.inject_post_departure_contact = False
+
+    def semantic_target_contacts(
+        self, configuration, geometries, opening_m, T_world_base
+    ):
+        groups = {item.collision_group for item in geometries}
+        if "target" in groups:
+            return super().semantic_target_contacts(
+                configuration, geometries, opening_m, T_world_base
+            )
+        if "source_support" not in groups or opening_m >= 0.02:
+            return frozenset()
+        if self.grasp_joint_z is None:
+            self.grasp_joint_z = configuration[2]
+        if (
+            self.inject_post_departure_contact
+            or configuration[2] <= self.grasp_joint_z + 0.004
+        ):
+            return self.support_groups
+        return frozenset()
+
+    def semantic_attachment_contacts(
+        self,
+        configuration,
+        T_tcp_object,
+        attached_geometry,
+        scene_geometries,
+        T_world_base,
+    ):
+        if self.grasp_joint_z is None:
+            return frozenset()
+        if configuration[2] <= self.grasp_joint_z + 0.004:
+            return frozenset(("source_support",))
+        return frozenset()
+
+
+class _PostRuckigContactInjector:
+    def __init__(self, delegate, vamp):
+        self._delegate = delegate
+        self._vamp = vamp
+        self.version = delegate.version
+
+    def parameterize(self, *args, **kwargs):
+        trajectory = self._delegate.parameterize(*args, **kwargs)
+        self._vamp.inject_post_departure_contact = True
+        return trajectory
+
+
 class _RecordingIK(_FakeIK):
     def __init__(self, robot_model):
         super().__init__(robot_model)
@@ -1540,6 +1610,84 @@ def test_importing_public_task2_does_not_load_native_backends() -> None:
         cwd=ROOT,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_public_plan_unwraps_continuous_joint_across_pi() -> None:
+    request = _request()
+    initial_positions = list(request.initial_state.positions_rad)
+    initial_positions[0] = np.pi - 0.01
+    request = replace(
+        request,
+        candidates=(request.candidates[0],),
+        initial_state=RobotState(
+            request.robot_model.joint_names, tuple(initial_positions)
+        ),
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_ik=lambda robot_model, random_seed: _WrappedContinuousIK(
+            robot_model
+        ),
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    joint_positions = tuple(
+        knot.positions_rad[0] for knot in result.trajectory.knots
+    )
+    assert any(value > np.pi for value in joint_positions)
+    assert max(
+        abs(right - left) for left, right in zip(joint_positions, joint_positions[1:])
+    ) < 0.1
+
+
+@pytest.mark.parametrize(
+    ("support_groups", "post_ruckig_contact", "expected_success"),
+    (
+        (("left_pad", "right_pad"), False, True),
+        (("wrist",), False, False),
+        (("left_pad", "right_pad"), True, False),
+    ),
+)
+def test_source_support_contact_is_pad_only_and_ends_on_departure(
+    support_groups, post_ruckig_contact, expected_success
+) -> None:
+    baseline = _request()
+    request = replace(baseline, candidates=(baseline.candidates[0],))
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    vamp = _SourceSupportVamp(
+        request.robot_model, support_groups=support_groups
+    )
+    base_ruckig = RuckigTimeParameterizer(request.robot_model, backend.ruckig)
+    ruckig = (
+        _PostRuckigContactInjector(base_ruckig, vamp)
+        if post_ruckig_contact
+        else base_ruckig
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+        create_ruckig=lambda robot_model: ruckig,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success is expected_success
+    if expected_success:
+        assert result.trajectory is not None
+        assert tuple(phase.stage for phase in result.trajectory.phases) == tuple(
+            TrajectoryStage
+        )
+    else:
+        assert result.error_code is PlanningErrorCode.STAGE_COLLISION_VIOLATION
+        assert result.attempts[-1].stage in (
+            TrajectoryStage.GRASP,
+            TrajectoryStage.LIFT,
+        )
+        if post_ruckig_contact:
+            assert "time-parameterized LIFT" in result.attempts[-1].reason
 
 
 def test_standard_part_real_quick_planning_regression() -> None:

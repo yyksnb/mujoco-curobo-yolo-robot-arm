@@ -22,7 +22,7 @@ struct Gen3So101ActiveWrist
     static constexpr float max_bounding_radius_mobile = 0.14465369284152985;
     static constexpr std::array<float, 3> base_position = { 0.0, 0.0, 0.15643000602722168 };
     static constexpr std::size_t resolution = 64;
-    static constexpr bool euclidean = true;
+    static constexpr bool euclidean = false;
 
     static constexpr std::array<std::string_view, dimension> joint_names = {"joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7", "task2_tool_wrist_pitch"};
     static constexpr const char *end_effector = "task2_tool_tcp";
@@ -67,6 +67,16 @@ struct Gen3So101ActiveWrist
 
     static inline void descale_configuration(Configuration& q) noexcept
     {
+        auto values = q.to_array();
+        values[0] = s_a[0] + ((values[0] - s_a[0]) -
+                    s_m[0] * std::floor((values[0] - s_a[0]) / s_m[0]));
+        values[2] = s_a[2] + ((values[2] - s_a[2]) -
+                    s_m[2] * std::floor((values[2] - s_a[2]) / s_m[2]));
+        values[4] = s_a[4] + ((values[4] - s_a[4]) -
+                    s_m[4] * std::floor((values[4] - s_a[4]) / s_m[4]));
+        values[6] = s_a[6] + ((values[6] - s_a[6]) -
+                    s_m[6] * std::floor((values[6] - s_a[6]) / s_m[6]));
+        q = Configuration(values);
         q = (q - Configuration(s_a)) * Configuration(d_m);
     }
 
@@ -87,7 +97,13 @@ q[7] = -1.6580628156661987 + (q[7] * 3.3161256313323975);
     template <std::size_t rake>
     static inline void descale_configuration_block(ConfigurationBlock<rake> & q) noexcept
     {
-        q[0] = 0.15915493667125702 * (q[0] - -3.1415927410125732);
+        const FloatVector<rake, 1> period(6.2831854820251465F);
+        const FloatVector<rake, 1> lower(-3.1415927410125732F);
+        q[0] = lower + ((q[0] - lower) - period * ((q[0] - lower) / period).floor());
+        q[2] = lower + ((q[2] - lower) - period * ((q[2] - lower) / period).floor());
+        q[4] = lower + ((q[4] - lower) - period * ((q[4] - lower) / period).floor());
+        q[6] = lower + ((q[6] - lower) - period * ((q[6] - lower) / period).floor());
+q[0] = 0.15915493667125702 * (q[0] - -3.1415927410125732);
 q[1] = 0.22224895656108856 * (q[1] - -2.2497293949127197);
 q[2] = 0.15915493667125702 * (q[2] - -3.1415927410125732);
 q[3] = 0.193828746676445 * (q[3] - -2.579596519470215);
@@ -113,33 +129,62 @@ q[7] = 0.3015567362308502 * (q[7] - -1.6580628156661987);
 
     static inline auto in_bounds(const Configuration &x) -> bool
     {
-        return (x <= Configuration(upper_bound)).all() and (x >= Configuration(lower_bound)).all();
+        const auto q = x.to_array();
+        return std::isfinite(q[0]) and std::isfinite(q[1]) and std::isfinite(q[2]) and
+               std::isfinite(q[3]) and std::isfinite(q[4]) and std::isfinite(q[5]) and
+               std::isfinite(q[6]) and std::isfinite(q[7]) and
+               q[1] >= lower_bound[1] and q[1] <= upper_bound[1] and
+               q[3] >= lower_bound[3] and q[3] <= upper_bound[3] and
+               q[5] >= lower_bound[5] and q[5] <= upper_bound[5] and
+               q[7] >= lower_bound[7] and q[7] <= upper_bound[7];
     }
 
     static inline auto sample(const Sample &x_in) -> Configuration
     {
-
-        // Euclidean fast path: same affine map as scale_configuration,
-        // operating on the packed FloatVector in one SIMD step. Sample and
-        // Configuration alias to the same FloatVector type when Euclidean.
         Configuration q = x_in;
         scale_configuration(q);
         return q;
-
     }
 
     static inline auto distance(const Configuration &a_in, const Configuration &b_in) -> float
     {
-
-        return a_in.distance(b_in);
-
+        const auto a = a_in.to_array();
+        const auto b = b_in.to_array();
+        constexpr float two_pi = 6.2831853071795864769F;
+        constexpr float pi = 3.1415926535897932385F;
+        const auto d0 = b[0] - a[0] - two_pi * std::floor((b[0] - a[0] + pi) / two_pi);
+        const auto d1 = b[1] - a[1];
+        const auto d2 = b[2] - a[2] - two_pi * std::floor((b[2] - a[2] + pi) / two_pi);
+        const auto d3 = b[3] - a[3];
+        const auto d4 = b[4] - a[4] - two_pi * std::floor((b[4] - a[4] + pi) / two_pi);
+        const auto d5 = b[5] - a[5];
+        const auto d6 = b[6] - a[6] - two_pi * std::floor((b[6] - a[6] + pi) / two_pi);
+        const auto d7 = b[7] - a[7];
+        return std::sqrt(
+            d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 +
+            d4 * d4 + d5 * d5 + d6 * d6 + d7 * d7);
     }
 
     static inline auto interpolate(const Configuration &a_in, const Configuration &b_in, float t) -> Configuration
     {
-
-        return a_in.interpolate(b_in, t);
-
+        const auto a = a_in.to_array();
+        const auto b = b_in.to_array();
+        ConfigurationBuffer y{};
+        constexpr float two_pi = 6.2831853071795864769F;
+        constexpr float pi = 3.1415926535897932385F;
+        const auto d0 = b[0] - a[0] - two_pi * std::floor((b[0] - a[0] + pi) / two_pi);
+        const auto d2 = b[2] - a[2] - two_pi * std::floor((b[2] - a[2] + pi) / two_pi);
+        const auto d4 = b[4] - a[4] - two_pi * std::floor((b[4] - a[4] + pi) / two_pi);
+        const auto d6 = b[6] - a[6] - two_pi * std::floor((b[6] - a[6] + pi) / two_pi);
+        y[0] = a[0] + t * d0;
+        y[1] = a[1] + t * (b[1] - a[1]);
+        y[2] = a[2] + t * d2;
+        y[3] = a[3] + t * (b[3] - a[3]);
+        y[4] = a[4] + t * d4;
+        y[5] = a[5] + t * (b[5] - a[5]);
+        y[6] = a[6] + t * d6;
+        y[7] = a[7] + t * (b[7] - a[7]);
+        return Configuration(y.data());
     }
 
     template <std::size_t rake>
@@ -155,13 +200,23 @@ q[7] = 0.3015567362308502 * (q[7] - -1.6580628156661987);
         // vector receiver.
         using V = FloatVector<rake, 1>;
 
-           out[0] = a.broadcast(0) + t * (b.broadcast(0) - a.broadcast(0));
+        const V two_pi = V(6.2831853071795864769F);
+        const V pi = V(3.1415926535897932385F);
+        auto d0 = b.broadcast(0) - a.broadcast(0);
+        d0 = d0 - two_pi * ((d0 + pi) / two_pi).floor();
+        auto d2 = b.broadcast(2) - a.broadcast(2);
+        d2 = d2 - two_pi * ((d2 + pi) / two_pi).floor();
+        auto d4 = b.broadcast(4) - a.broadcast(4);
+        d4 = d4 - two_pi * ((d4 + pi) / two_pi).floor();
+        auto d6 = b.broadcast(6) - a.broadcast(6);
+        d6 = d6 - two_pi * ((d6 + pi) / two_pi).floor();
+   out[0] = a.broadcast(0) + t * d0;
    out[1] = a.broadcast(1) + t * (b.broadcast(1) - a.broadcast(1));
-   out[2] = a.broadcast(2) + t * (b.broadcast(2) - a.broadcast(2));
+   out[2] = a.broadcast(2) + t * d2;
    out[3] = a.broadcast(3) + t * (b.broadcast(3) - a.broadcast(3));
-   out[4] = a.broadcast(4) + t * (b.broadcast(4) - a.broadcast(4));
+   out[4] = a.broadcast(4) + t * d4;
    out[5] = a.broadcast(5) + t * (b.broadcast(5) - a.broadcast(5));
-   out[6] = a.broadcast(6) + t * (b.broadcast(6) - a.broadcast(6));
+   out[6] = a.broadcast(6) + t * d6;
    out[7] = a.broadcast(7) + t * (b.broadcast(7) - a.broadcast(7));
 
     }

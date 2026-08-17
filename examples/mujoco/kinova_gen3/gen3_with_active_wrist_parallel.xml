@@ -96,13 +96,13 @@
   </worldbody>
 
   <actuator>
-    <position class="large_actuator" name="joint_1" joint="joint_1" ctrllimited="true" ctrlrange="-3.141592654 3.141592654"/>
+    <position class="large_actuator" name="joint_1" joint="joint_1"/>
     <position class="large_actuator" name="joint_2" joint="joint_2" ctrlrange="-2.2497294058206907 2.2497294058206907"/>
-    <position class="large_actuator" name="joint_3" joint="joint_3" ctrllimited="true" ctrlrange="-3.141592654 3.141592654"/>
+    <position class="large_actuator" name="joint_3" joint="joint_3"/>
     <position class="large_actuator" name="joint_4" joint="joint_4" ctrlrange="-2.5795966344476193 2.5795966344476193"/>
     <position class="small_actuator" name="joint_5" joint="joint_5"/>
     <position class="small_actuator" name="joint_6" joint="joint_6" ctrlrange="-2.0996310901491784 2.0996310901491784"/>
-    <position class="small_actuator" name="joint_7" joint="joint_7" ctrllimited="true" ctrlrange="-3.141592654 3.141592654"/>
+    <position class="small_actuator" name="joint_7" joint="joint_7"/>
   </actuator>
 
   <keyframe>

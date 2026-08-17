@@ -154,6 +154,7 @@ class CuroboIKSolver:
         try:
             from curobo.types import GoalToolPose, JointState, Pose
 
+            self._solver.reset_seed()
             matrix = np.asarray(target.matrix, dtype=np.float32)
             pose = Pose.from_matrix(self._device.to_device(matrix))
             goals = GoalToolPose.from_poses({self._model.tcp_frame: pose}, num_goalset=1)

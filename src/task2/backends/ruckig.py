@@ -117,10 +117,12 @@ class RuckigTimeParameterizer:
             parameters.target_velocity = list(velocities[index + 1])
             parameters.target_acceleration = [0.0] * dof
             parameters.max_position = [
-                item.maximum_position_rad for item in self._model.joint_limits
+                item.maximum_position_rad if item.position_bounded else float("inf")
+                for item in self._model.joint_limits
             ]
             parameters.min_position = [
-                item.minimum_position_rad for item in self._model.joint_limits
+                item.minimum_position_rad if item.position_bounded else -float("inf")
+                for item in self._model.joint_limits
             ]
             parameters.max_velocity = [
                 motion_scale * item.maximum_velocity_rad_s

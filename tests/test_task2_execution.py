@@ -3,8 +3,8 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import replace
+from math import pi
 from pathlib import Path
-from struct import pack, unpack
 
 import pytest
 
@@ -538,23 +538,14 @@ def test_mujoco_adapter_preserves_formal_control_and_gravity_semantics():
             ) == -1
 
         joint_index = robot_model.joint_names.index("joint_3")
-        model_limit = float(
-            adapter._model.actuator_ctrlrange[
-                adapter._joint_actuator_ids["joint_3"], 1
-            ]
-        )
-        float32_limit = unpack("!f", pack("!f", model_limit))[0]
+        joint_3_actuator = adapter._joint_actuator_ids["joint_3"]
+        assert robot_model.joint_limits[joint_index].continuous
+        assert not adapter._model.actuator_ctrllimited[joint_3_actuator]
         boundary_positions = list(command.positions_rad)
-        boundary_positions[joint_index] = float32_limit
+        boundary_positions[joint_index] = pi + 0.25
         adapter.apply_control(
             replace(command, positions_rad=tuple(boundary_positions))
         )
-        assert adapter._data.ctrl[adapter._joint_actuator_ids["joint_3"]] == model_limit
-
-        boundary_positions[joint_index] = float32_limit + 1e-12
-        with pytest.raises(ControlInterfaceError, match="lies outside"):
-            adapter.apply_control(
-                replace(command, positions_rad=tuple(boundary_positions))
-            )
+        assert adapter._data.ctrl[joint_3_actuator] == pytest.approx(pi + 0.25)
     finally:
         adapter.close()

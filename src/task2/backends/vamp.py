@@ -231,6 +231,22 @@ class VampBackend:
             raise BackendUnavailableError("VAMP joint order does not match RobotModel")
         if int(robot.n_spheres()) != config.robot_sphere_count:
             raise BackendUnavailableError("VAMP collision sphere count does not match RobotModel")
+        empty_environment = vamp.Environment()
+        if not robot.validate(
+            robot_model.default_joint_positions, empty_environment, True
+        ):
+            raise BackendUnavailableError(
+                "VAMP rejects the configured default RobotModel state"
+            )
+        for index, limits in enumerate(robot_model.joint_limits):
+            if not limits.continuous:
+                continue
+            shifted = list(robot_model.default_joint_positions)
+            shifted[index] += 2.0 * np.pi
+            if not robot.validate(shifted, empty_environment, True):
+                raise BackendUnavailableError(
+                    "VAMP does not expose RobotModel continuous joints as periodic"
+                )
         collision_spheres = tuple(robot.fk(robot_model.default_joint_positions))
         for calibration in config.collision_sphere_calibrations:
             sphere = collision_spheres[calibration.sphere_index]
@@ -342,7 +358,14 @@ class VampBackend:
         path_array = np.asarray(result.path.numpy(), dtype=np.float64)
         if path_array.ndim != 2 or path_array.shape[1] != len(self._model.joint_names):
             raise BackendOperationError("VAMP returned a malformed path")
-        path = tuple(tuple(float(value) for value in row) for row in path_array)
+        path_rows = tuple(tuple(float(value) for value in row) for row in path_array)
+        path = []
+        reference = start
+        for row in path_rows:
+            unwrapped = self._model.unwrap_positions(row, reference)
+            path.append(unwrapped)
+            reference = unwrapped
+        path = tuple(path)
         if not path:
             raise BackendOperationError("VAMP returned an empty path")
         return VampPlan(path=path, elapsed_s=elapsed, iterations=planning_iterations)

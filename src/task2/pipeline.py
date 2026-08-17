@@ -406,7 +406,9 @@ class Task2Pipeline:
             request.base_robot_state.positions_rad,
             self._config.base_robot.joint_limits,
         ):
-            if not limits.minimum_position_rad <= value <= limits.maximum_position_rad:
+            if limits.position_bounded and not (
+                limits.minimum_position_rad <= value <= limits.maximum_position_rad
+            ):
                 raise ValueError(f"base robot state position for {name} is outside limits")
         activated = self._runtime.activate(profile, request.base_robot_state)
         if request.T_world_base.child_frame != activated.robot_model.base_frame:

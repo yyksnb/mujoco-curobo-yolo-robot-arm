@@ -1,0 +1,33 @@
+diff --git a/src/impl/vamp/bindings/python/robot_helper.hh b/src/impl/vamp/bindings/python/robot_helper.hh
+--- a/src/impl/vamp/bindings/python/robot_helper.hh
++++ b/src/impl/vamp/bindings/python/robot_helper.hh
+@@ -257,9 +257,6 @@ namespace vamp::binding
+         {
+             auto configuration = Input::to(c_in);
+-            auto copy = configuration.trim();
+-            Robot::descale_configuration(copy);
+-
+-            const bool in_bounds = (copy <= 1.F).all() and (copy >= 0.F).all();
++            const bool in_bounds = Robot::in_bounds(configuration);
+ 
+             return (not check_bounds or in_bounds) and
+                    vamp::planning::validate_motion<Robot, rake, 1>(
+@@ -273,16 +270,10 @@ namespace vamp::binding
+             bool check_bounds = false) -> bool
+         {
+             auto configuration_in = Input::to(c_in);
+-            auto copy_in = configuration_in.trim();
+-            Robot::descale_configuration(copy_in);
+-
+-            const bool in_bounds_in = (copy_in <= 1.F).all() and (copy_in >= 0.F).all();
++            const bool in_bounds_in = Robot::in_bounds(configuration_in);
+ 
+             auto configuration_out = Input::to(c_out);
+-            auto copy_out = configuration_out.trim();
+-            Robot::descale_configuration(copy_out);
+-
+-            const bool in_bounds_out = (copy_out <= 1.F).all() and (copy_out >= 0.F).all();
++            const bool in_bounds_out = Robot::in_bounds(configuration_out);
+ 
+             return (not check_bounds or (in_bounds_in and in_bounds_out)) and
+                    vamp::planning::validate_motion<Robot, rake, 1>(

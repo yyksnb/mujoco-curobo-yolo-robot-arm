@@ -28,10 +28,15 @@ def main() -> int:
     convex_mesh_patch = (
         root / "native/vamp/patches/vamp_planner_0.6.4_convex_mesh.patch"
     )
+    periodic_bounds_patch = (
+        root / "native/vamp/patches/vamp_planner_0.6.4_periodic_bounds.patch"
+    )
     if not header.is_file():
         raise SystemExit(f"VAMP robot header is missing: {header}")
     if not convex_mesh_patch.is_file():
         raise SystemExit(f"VAMP ConvexMesh patch is missing: {convex_mesh_patch}")
+    if not periodic_bounds_patch.is_file():
+        raise SystemExit(f"VAMP periodic bounds patch is missing: {periodic_bounds_patch}")
     available = _available_memory_bytes()
     if available is not None and available < MINIMUM_AVAILABLE_BYTES:
         raise SystemExit(
@@ -71,6 +76,7 @@ def main() -> int:
         shutil.rmtree(source_dir)
     _safe_extract(archives[0], work_dir)
     _apply_convex_mesh_patch(source_dir, convex_mesh_patch)
+    _apply_periodic_bounds_patch(source_dir, periodic_bounds_patch)
     pyproject = source_dir / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
     expected_modules = 'VAMP_ROBOT_MODULES="sphere;ur5;panda;fetch;baxter"'
@@ -191,6 +197,28 @@ def _apply_convex_mesh_patch(source_dir: Path, patch_file: Path) -> None:
         raise SystemExit(
             "VAMP ConvexMesh patch did not produce expected files: " + ", ".join(missing)
         )
+
+
+def _apply_periodic_bounds_patch(source_dir: Path, patch_file: Path) -> None:
+    relative_path = "src/impl/vamp/bindings/python/robot_helper.hh"
+    marker = "Robot::in_bounds(configuration_in)"
+    target = source_dir / relative_path
+    if marker in target.read_text(encoding="utf-8"):
+        raise SystemExit("clean VAMP source unexpectedly contains periodic bounds support")
+    subprocess.run(
+        [
+            "patch",
+            "--batch",
+            "--forward",
+            "--strip=1",
+            "--input",
+            str(patch_file),
+        ],
+        cwd=source_dir,
+        check=True,
+    )
+    if marker not in target.read_text(encoding="utf-8"):
+        raise SystemExit("VAMP periodic bounds patch did not update robot_helper.hh")
 
 
 def _run_memory_bounded(command: list[str], *, env: dict[str, str]) -> None:

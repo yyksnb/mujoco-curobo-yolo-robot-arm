@@ -339,6 +339,9 @@ def _parse_joints(
     for index, value in enumerate(values):
         item = _as_mapping(value, f"{path}[{index}]")
         position = _pair(item, "position_rad", f"{path}[{index}]")
+        continuous = item.get("continuous", False)
+        if not isinstance(continuous, bool):
+            raise ValueError(f"{path}[{index}].continuous must be a boolean")
         names.append(_string(item, "name", f"{path}[{index}]"))
         limits.append(
             JointLimits(
@@ -347,6 +350,7 @@ def _parse_joints(
                 _number(item, "velocity_rad_s", f"{path}[{index}]"),
                 _number(item, "acceleration_rad_s2", f"{path}[{index}]"),
                 _number(item, "jerk_rad_s3", f"{path}[{index}]"),
+                continuous,
             )
         )
         defaults.append(_number(item, "default_rad", f"{path}[{index}]"))
