@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from math import pi, tau
 from pathlib import Path
 
 import numpy as np
 import yaml
 
-from ..contracts import PlanningPolicy, RigidTransform, RobotModel, RobotState
+from ..contracts import JointLimits, PlanningPolicy, RigidTransform, RobotModel, RobotState
 from ..ik import IKConstraints, IKErrorCode, IKResult, IKSolution
 from .errors import BackendUnavailableError
 
@@ -20,16 +21,18 @@ class CuroboIKConfig:
         kinematics_path: Path,
         asset_root_path: Path,
         seed_count: int,
+        seed_batch_count: int,
     ) -> None:
         self.version = version
         self.robot_config_path = robot_config_path
         self.kinematics_path = kinematics_path
         self.asset_root_path = asset_root_path
         self.seed_count = seed_count
+        self.seed_batch_count = seed_batch_count
 
     def validate(self) -> None:
-        if not self.version or self.seed_count <= 0:
-            raise ValueError("cuRobo version and seed count must be explicit")
+        if not self.version or self.seed_count <= 0 or self.seed_batch_count <= 0:
+            raise ValueError("cuRobo version, seed count, and seed batch count must be explicit")
         if (
             not self.robot_config_path.is_file()
             or not self.kinematics_path.is_file()
@@ -42,7 +45,7 @@ def parse_curobo_ik_config(
     payload: Mapping[str, object],
     end_effector_profile: Mapping[str, object],
     base_dir: Path,
-) -> tuple[str, CuroboIKConfig, int]:
+) -> tuple[str, CuroboIKConfig, int, int]:
     backend = _config_string(payload, "backend", "cuRobo IK")
     result = CuroboIKConfig(
         version=_config_string(payload, "curobo_version", "cuRobo IK"),
@@ -56,9 +59,15 @@ def parse_curobo_ik_config(
             end_effector_profile, "asset_root", "cuRobo IK profile", base_dir
         ),
         seed_count=_config_integer(payload, "seed_count", "cuRobo IK"),
+        seed_batch_count=_config_integer(payload, "seed_batch_count", "cuRobo IK"),
     )
     result.validate()
-    return backend, result, _config_integer(payload, "solution_count", "cuRobo IK")
+    return (
+        backend,
+        result,
+        _config_integer(payload, "solution_count", "cuRobo IK"),
+        _config_integer(payload, "pregrasp_solution_count", "cuRobo IK"),
+    )
 
 
 class CuroboIKSolver:
@@ -71,6 +80,8 @@ class CuroboIKSolver:
         random_seed: int,
     ):
         config.validate()
+        seed_count = config.seed_count
+        seed_batch_count = config.seed_batch_count
         try:
             import curobo
             import torch
@@ -134,6 +145,8 @@ class CuroboIKSolver:
         self._device = device
         self._solver = solver
         self._model = robot_model
+        self._seed_count = seed_count
+        self._seed_batch_count = seed_batch_count
         self.version = version
 
     def solve(
@@ -151,6 +164,53 @@ class CuroboIKSolver:
             return IKResult((), IKErrorCode.BACKEND_ERROR, "cuRobo target frames do not match RobotModel")
         for state in seed_states:
             state.validate(self._model)
+        accepted: list[IKSolution] = []
+        batches_checked = 0
+        for batch in _seed_batches(
+            self._model,
+            seed_states,
+            self._seed_count,
+            self._seed_batch_count,
+        ):
+            batches_checked += 1
+            result = self._solve_seed_batch(target, batch)
+            if result.error_code == IKErrorCode.BACKEND_ERROR:
+                return result
+            for solution in result.solutions:
+                if any(_equivalent(solution.state, item.state, self._model) for item in accepted):
+                    continue
+                if constraints.solution_validator is not None and not constraints.solution_validator(
+                    solution.state
+                ):
+                    continue
+                accepted.append(solution)
+            if batches_checked == 1 and accepted:
+                break
+            if len(accepted) >= constraints.maximum_solutions:
+                break
+        accepted.sort(
+            key=lambda item: (
+                _distance(self._model, item.state.positions_rad, seed_states[0].positions_rad),
+                item.position_error_m,
+                item.orientation_error_rad,
+                item.state.positions_rad,
+            )
+        )
+        accepted = accepted[: constraints.maximum_solutions]
+        if not accepted:
+            message = (
+                "cuRobo found no validator-accepted IK solution"
+                if constraints.solution_validator is not None
+                else "cuRobo found no valid IK solution"
+            )
+            return IKResult((), IKErrorCode.NO_SOLUTION, f"{message} after {batches_checked} seed batches")
+        return IKResult(tuple(accepted), None, "cuRobo IK succeeded")
+
+    def _solve_seed_batch(
+        self,
+        target: RigidTransform,
+        seed_states: Sequence[RobotState],
+    ) -> IKResult:
         try:
             from curobo.types import GoalToolPose, JointState, Pose
 
@@ -171,7 +231,7 @@ class CuroboIKSolver:
                 goals,
                 current_state=current,
                 seed_config=seed_values,
-                return_seeds=constraints.maximum_solutions,
+                return_seeds=self._seed_count,
             )
             success = result.success[0].detach().cpu().numpy().astype(bool)
             positions = result.js_solution.position[0].detach().cpu().numpy()
@@ -198,19 +258,87 @@ class CuroboIKSolver:
             )
         solutions.sort(
             key=lambda item: (
-                _distance(item.state.positions_rad, seed_states[0].positions_rad),
+                _distance(self._model, item.state.positions_rad, seed_states[0].positions_rad),
                 item.position_error_m,
                 item.orientation_error_rad,
                 item.state.positions_rad,
             )
         )
         if not solutions:
-            return IKResult((), IKErrorCode.NO_SOLUTION, "cuRobo found no valid IK solution")
-        return IKResult(tuple(solutions), None, "cuRobo IK succeeded")
+            return IKResult((), IKErrorCode.NO_SOLUTION, "cuRobo found no valid IK solution in seed batch")
+        return IKResult(tuple(solutions), None, "cuRobo IK seed batch succeeded")
 
 
-def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
-    return sum((a - b) ** 2 for a, b in zip(left, right))
+def _distance(
+    model: RobotModel,
+    left: tuple[float, ...],
+    right: tuple[float, ...],
+) -> float:
+    return sum(
+        _joint_delta(a, b, limits) ** 2
+        for a, b, limits in zip(left, right, model.joint_limits)
+    )
+
+
+def _joint_delta(left: float, right: float, limits: JointLimits) -> float:
+    delta = left - right
+    return (delta + pi) % tau - pi if limits.continuous else delta
+
+
+def _equivalent(left: RobotState, right: RobotState, model: RobotModel) -> bool:
+    return all(
+        abs(_joint_delta(a, b, limits)) <= 1e-6
+        for a, b, limits in zip(left.positions_rad, right.positions_rad, model.joint_limits)
+    )
+
+
+def _seed_batches(
+    model: RobotModel,
+    seed_states: Sequence[RobotState],
+    seed_count: int,
+    batch_count: int,
+) -> Iterator[tuple[RobotState, ...]]:
+    yield tuple(seed_states)
+    reference = seed_states[0].positions_rad
+    primes = _first_primes(len(model.joint_names))
+    for batch_index in range(1, batch_count):
+        first_sample = (batch_index - 1) * seed_count + 1
+        batch = []
+        for sample_index in range(first_sample, first_sample + seed_count):
+            positions = []
+            for joint_index, (current, limits) in enumerate(
+                zip(reference, model.joint_limits)
+            ):
+                fraction = _radical_inverse(sample_index, primes[joint_index])
+                if limits.continuous:
+                    value = current + (2.0 * fraction - 1.0) * pi
+                else:
+                    value = limits.minimum_position_rad + fraction * (
+                        limits.maximum_position_rad - limits.minimum_position_rad
+                    )
+                positions.append(value)
+            batch.append(RobotState(model.joint_names, tuple(positions)))
+        yield tuple(batch)
+
+
+def _radical_inverse(index: int, base: int) -> float:
+    result = 0.0
+    scale = 1.0 / base
+    while index:
+        index, digit = divmod(index, base)
+        result += digit * scale
+        scale /= base
+    return result
+
+
+def _first_primes(count: int) -> tuple[int, ...]:
+    primes: list[int] = []
+    candidate = 2
+    while len(primes) < count:
+        if all(candidate % prime for prime in primes if prime * prime <= candidate):
+            primes.append(candidate)
+        candidate += 1
+    return tuple(primes)
 
 
 def _config_value(payload: Mapping[str, object], key: str, label: str) -> object:

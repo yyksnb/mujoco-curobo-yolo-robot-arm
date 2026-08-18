@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from math import ceil, cos, pi, sin, sqrt
 from time import monotonic
@@ -54,12 +55,15 @@ class _Route:
     orientation_preference_cost_rad: float
     payload_cumulative_translation_m: float = 0.0
     payload_cumulative_rotation_rad: float = 0.0
+    payload_nominal_duration_s: float = 0.0
 
 
 @dataclass(frozen=True)
 class _TargetContactAllowance:
     endpoint: frozenset[str]
     motion: frozenset[str]
+    terminal_endpoint: bool
+    terminal_motion: bool
 
 
 @dataclass(frozen=True)
@@ -91,10 +95,15 @@ class PlanningDependencies:
     create_ik: Callable[[object, int], IKSolver]
     create_ruckig: Callable[[object], RuckigTimeParameterizer]
     ik_solution_count: int
+    pregrasp_ik_solution_count: int
     placement_sample_count: int
 
     def validate(self) -> None:
-        if self.ik_solution_count <= 0 or self.placement_sample_count <= 0:
+        if (
+            self.ik_solution_count <= 0
+            or self.pregrasp_ik_solution_count <= 0
+            or self.placement_sample_count <= 0
+        ):
             raise ValueError("Planning backend solution and placement counts must be positive")
 
 
@@ -145,15 +154,17 @@ def plan(
                 )
             attempt_started = monotonic()
             try:
-                route = _build_route(
+                routes = _build_route(
                     request,
                     candidate,
                     seed,
                     ik_solver,
                     vamp,
+                    ruckig,
                     attempts,
                     started,
                     dependencies.ik_solution_count,
+                    dependencies.pregrasp_ik_solution_count,
                     dependencies.placement_sample_count,
                 )
             except _RouteFailure as failure:
@@ -191,7 +202,7 @@ def plan(
                     tuple(attempts),
                     _metadata(request, vamp.version, ik_solver.version, ruckig.version),
                 )
-            candidate_routes.append((seed, route))
+            candidate_routes.extend((seed, route) for route in routes)
         if not candidate_routes:
             continue
         for selected_seed, route in sorted(
@@ -423,11 +434,13 @@ def _build_route(
     seed: int,
     ik_solver: IKSolver,
     vamp: VampBackend,
+    ruckig: RuckigTimeParameterizer,
     attempts: list[PlanningAttempt],
     total_started: float,
     ik_solution_count: int,
+    pregrasp_ik_solution_count: int,
     placement_sample_count: int,
-) -> _Route:
+) -> tuple[_Route, ...]:
     target_geometries = tuple(
         item for item in request.scene.geometries if item.object_id == request.target_object_id
     )
@@ -452,6 +465,11 @@ def _build_route(
     }
     waypoints: list[GeometricWaypoint] = []
     initial = request.initial_state.positions_rad
+    free_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(request.target_object_id,),
+    )
     pregrasp_pose = compose(
         inverse(request.T_world_base),
         reframe(candidate.T_world_pregrasp, child_frame=request.robot_model.tcp_frame),
@@ -462,7 +480,15 @@ def _build_route(
         pregrasp_pose,
         request.initial_state,
         TrajectoryStage.PREGRASP,
-        ik_solution_count,
+        pregrasp_ik_solution_count,
+        solution_validator=lambda state: _pregrasp_solution_valid(
+            state,
+            request,
+            vamp,
+            free_environment,
+            target_geometries,
+            candidate.grasp_command.pregrasp_opening_m,
+        ),
     )
     grasp_pose = compose(
         inverse(request.T_world_base),
@@ -484,11 +510,6 @@ def _build_route(
         interpolated_approach,
         request.planning_policy.approach_contact_transition_m,
         frozenset(candidate.expected_contacts),
-    )
-    free_environment = vamp.environment(
-        request.scene,
-        T_world_base=request.T_world_base,
-        excluded_object_ids=(request.target_object_id,),
     )
     pregrasp_path = None
     pregrasp_elapsed = 0.0
@@ -868,15 +889,45 @@ def _build_route(
                         free_search_started,
                         total_started,
                     )
+                    try:
+                        payload_duration_s = _payload_route_duration_s(
+                            tuple(waypoints),
+                            extra_lift_states,
+                            candidate_egress,
+                            candidate_place,
+                            channels,
+                            ruckig,
+                        )
+                    except RuckigRouteError as exc:
+                        placement_failure = _RouteFailure(
+                            PlanningErrorCode.RUCKIG_FAILED,
+                            exc.stage,
+                            str(exc),
+                        )
+                        attempts.append(
+                            PlanningAttempt(
+                                candidate.candidate_id,
+                                seed,
+                                exc.stage,
+                                monotonic() - free_search_started,
+                                PlanningErrorCode.RUCKIG_FAILED,
+                                str(exc),
+                            )
+                        )
+                        continue
                     free_routes.append(
                         (
-                            _path_quality_key(
-                                payload_metrics,
+                            _payload_route_selection_key(
+                                payload_duration_s,
+                                payload_metrics.cumulative_rotation_rad,
+                                payload_metrics.cumulative_translation_m,
+                                payload_metrics.maximum_deviation_rad,
                                 _joint_path_length(payload_path),
                                 endpoint_index,
+                                request,
                             ),
                             payload_metrics,
-                            endpoint_index,
+                            payload_duration_s,
                             extra_lift_states,
                             candidate_egress,
                             candidate_place,
@@ -896,19 +947,24 @@ def _build_route(
                         TrajectoryStage.EGRESS,
                         "no orientation-free LIFT endpoint produced a valid route",
                     )
-                (
-                    _,
-                    selected_payload_metrics,
-                    _,
-                    selected_extra_lift_states,
-                    egress_plan,
-                    place_plan,
-                ) = min(free_routes, key=lambda item: item[0])
-                orientation_preference_cost = (
-                    selected_payload_metrics.maximum_deviation_rad
+                route_choices = tuple(
+                    (
+                        payload_metrics,
+                        payload_duration_s,
+                        extra_lift_states,
+                        candidate_egress,
+                        candidate_place,
+                    )
+                    for (
+                        _,
+                        payload_metrics,
+                        payload_duration_s,
+                        extra_lift_states,
+                        candidate_egress,
+                        candidate_place,
+                    ) in sorted(free_routes, key=lambda item: item[0])
                 )
             else:
-                selected_extra_lift_states = ()
                 egress_start = lift_states[-1].positions_rad
                 preplace = _first_valid_ik(
                     request,
@@ -954,66 +1010,22 @@ def _build_route(
                     attempts,
                     total_started,
                 )
-                orientation_preference_cost = 0.0
-                selected_payload_metrics = _OrientationPathMetrics(
-                    0.0,
-                    0.0,
-                    0.0,
-                    0,
-                )
-            if _path_has_forbidden_attachment_contact(
-                egress_plan,
-                request,
-                candidate,
-                vamp,
-                environment_geometries,
-            ):
-                raise _RouteFailure(
-                    PlanningErrorCode.STAGE_COLLISION_VIOLATION,
-                    TrajectoryStage.EGRESS,
-                    "attached object has a forbidden contact during EGRESS",
-                )
-            if _path_has_forbidden_attachment_contact(
-                place_plan,
-                request,
-                candidate,
-                vamp,
-                environment_geometries,
-            ):
-                raise _RouteFailure(
-                    PlanningErrorCode.STAGE_COLLISION_VIOLATION,
-                    TrajectoryStage.PLACE,
-                    "attached object has a forbidden contact during PLACE",
+                route_choices = (
+                    (
+                        _OrientationPathMetrics(0.0, 0.0, 0.0, 0),
+                        0.0,
+                        (),
+                        egress_plan,
+                        place_plan,
+                    ),
                 )
         except _RouteFailure as failure:
             placement_failure = failure
             continue
-        waypoints.extend(
-            GeometricWaypoint(
-                TrajectoryStage.LIFT,
-                state.positions_rad,
-                dict(channels),
-            )
-            for state in selected_extra_lift_states
-        )
-        waypoints.extend(
-            GeometricWaypoint(TrajectoryStage.EGRESS, point, dict(channels))
-            for point in egress_plan[1:]
-        )
-        waypoints.extend(
-            GeometricWaypoint(
-                TrajectoryStage.PLACE,
-                point,
-                dict(channels),
-                stop=index == len(place_plan[1:]) - 1,
-            )
-            for index, point in enumerate(place_plan[1:])
-        )
         released_channels = dict(channels)
         released_channels[request.end_effector_config.actuator_position_channel] = (
             request.end_effector_config.open_position_m
         )
-        release_index = len(waypoints) - 1
         T_world_object = compose(
             world_placement_pose,
             reframe(
@@ -1022,17 +1034,88 @@ def _build_route(
                 child_frame="object",
             ),
         )
-        return _Route(
-            tuple(waypoints),
-            (
-                ("grip", TrajectoryStage.GRASP, grip_index, dict(channels)),
-                ("release", TrajectoryStage.PLACE, release_index, released_channels),
-            ),
-            T_world_object,
-            orientation_preference_cost,
-            selected_payload_metrics.cumulative_translation_m,
-            selected_payload_metrics.cumulative_rotation_rad,
-        )
+        completed_routes = []
+        for (
+            payload_metrics,
+            payload_duration_s,
+            extra_lift_states,
+            egress_plan,
+            place_plan,
+        ) in route_choices:
+            if _path_has_forbidden_attachment_contact(
+                egress_plan,
+                request,
+                candidate,
+                vamp,
+                environment_geometries,
+            ):
+                placement_failure = _RouteFailure(
+                    PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                    TrajectoryStage.EGRESS,
+                    "attached object has a forbidden contact during EGRESS",
+                )
+                continue
+            if _path_has_forbidden_attachment_contact(
+                place_plan,
+                request,
+                candidate,
+                vamp,
+                environment_geometries,
+            ):
+                placement_failure = _RouteFailure(
+                    PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+                    TrajectoryStage.PLACE,
+                    "attached object has a forbidden contact during PLACE",
+                )
+                continue
+            route_waypoints = list(waypoints)
+            route_waypoints.extend(
+                GeometricWaypoint(
+                    TrajectoryStage.LIFT,
+                    state.positions_rad,
+                    dict(channels),
+                )
+                for state in extra_lift_states
+            )
+            route_waypoints.extend(
+                GeometricWaypoint(
+                    TrajectoryStage.EGRESS,
+                    point,
+                    dict(channels),
+                )
+                for point in egress_plan[1:]
+            )
+            route_waypoints.extend(
+                GeometricWaypoint(
+                    TrajectoryStage.PLACE,
+                    point,
+                    dict(channels),
+                    stop=index == len(place_plan[1:]) - 1,
+                )
+                for index, point in enumerate(place_plan[1:])
+            )
+            release_index = len(route_waypoints) - 1
+            completed_routes.append(
+                _Route(
+                    tuple(route_waypoints),
+                    (
+                        ("grip", TrajectoryStage.GRASP, grip_index, dict(channels)),
+                        (
+                            "release",
+                            TrajectoryStage.PLACE,
+                            release_index,
+                            released_channels,
+                        ),
+                    ),
+                    T_world_object,
+                    payload_metrics.maximum_deviation_rad,
+                    payload_metrics.cumulative_translation_m,
+                    payload_metrics.cumulative_rotation_rad,
+                    payload_duration_s,
+                )
+            )
+        if completed_routes:
+            return tuple(completed_routes)
     if placement_failure is not None:
         raise placement_failure
     raise _RouteFailure(
@@ -1092,7 +1175,6 @@ def _continuous_ik(
         for state in solutions:
             if not _has_joint_margin(state, request):
                 continue
-            exact_environment_geometries = environment_geometries
             exact_opening = (
                 candidate.grasp_command.pregrasp_opening_m
                 if stage is TrajectoryStage.APPROACH
@@ -1100,10 +1182,10 @@ def _continuous_ik(
             )
             if (
                 stage is not TrajectoryStage.LIFT
-                and exact_environment_geometries
+                and non_support_environment_geometries
                 and vamp.semantic_target_contacts(
                     state.positions_rad,
-                    exact_environment_geometries,
+                    non_support_environment_geometries,
                     exact_opening,
                     request.T_world_base,
                 )
@@ -1111,13 +1193,41 @@ def _continuous_ik(
                 continue
             if (
                 stage is not TrajectoryStage.LIFT
-                and exact_environment_geometries
+                and support_geometries
+                and vamp.semantic_source_support_contacts(
+                    state.positions_rad,
+                    support_geometries,
+                    exact_opening,
+                    request.T_world_base,
+                    use_physical_pad_hulls=allowed_target_contacts[
+                        index
+                    ].terminal_endpoint,
+                )
+            ):
+                continue
+            if (
+                stage is not TrajectoryStage.LIFT
+                and non_support_environment_geometries
                 and _semantic_motion_has_forbidden_contact(
                     current.positions_rad,
                     state.positions_rad,
-                    exact_environment_geometries,
+                    non_support_environment_geometries,
                     exact_opening,
                     frozenset(),
+                    vamp,
+                    request.T_world_base,
+                )
+            ):
+                continue
+            if (
+                stage is not TrajectoryStage.LIFT
+                and support_geometries
+                and _semantic_support_motion_has_forbidden_contact(
+                    current.positions_rad,
+                    state.positions_rad,
+                    support_geometries,
+                    exact_opening,
+                    allowed_target_contacts[index].terminal_motion,
                     vamp,
                     request.T_world_base,
                 )
@@ -1193,6 +1303,7 @@ def _solve_ik(
     seed_state: RobotState,
     stage: TrajectoryStage,
     maximum_solutions: int,
+    solution_validator: Callable[[RobotState], bool] | None = None,
 ) -> tuple[RobotState, ...]:
     result = solver.solve(
         (pose,),
@@ -1201,6 +1312,7 @@ def _solve_ik(
             request.planning_policy.ik_position_tolerance_m,
             request.planning_policy.ik_orientation_tolerance_rad,
             maximum_solutions,
+            solution_validator,
         ),
     )
     if result.error_code == IKErrorCode.BACKEND_UNAVAILABLE:
@@ -1237,6 +1349,34 @@ def _solve_ik(
             ),
         )
     )
+
+
+def _pregrasp_solution_valid(
+    state: RobotState,
+    request: PlanningRequest,
+    vamp: VampBackend,
+    environment,
+    target_geometries: tuple[SceneGeometry, ...],
+    opening_m: float,
+) -> bool:
+    aligned = RobotState(
+        request.robot_model.joint_names,
+        request.robot_model.unwrap_positions(
+            state.positions_rad,
+            request.initial_state.positions_rad,
+        ),
+    )
+    if not _has_joint_margin(aligned, request):
+        return False
+    if not vamp.configuration_valid(aligned.positions_rad, environment):
+        return False
+    contacts = vamp.semantic_target_contacts(
+        aligned.positions_rad,
+        target_geometries,
+        opening_m,
+        request.T_world_base,
+    )
+    return not contacts
 
 
 def _first_valid_ik(
@@ -1299,30 +1439,31 @@ def _orientation_free_lift_endpoints(
     environment_geometries: tuple[SceneGeometry, ...],
     total_started: float,
     ik_solution_count: int,
-) -> tuple[tuple[RobotState, ...], ...]:
+) -> Iterator[tuple[RobotState, ...]]:
     minimum_z = float(minimum_world_lift_pose.matrix[2][3])
     maximum_z = float(world_preplace_pose.matrix[2][3])
     extra_distance = max(0.0, maximum_z - minimum_z)
     step = request.planning_policy.cartesian_translation_step_m
     step_count = int(ceil(extra_distance / step))
-    if step_count + 1 > request.planning_policy.trajectory_validation_max_samples:
-        raise _RouteFailure(
-            PlanningErrorCode.BUDGET_EXHAUSTED,
-            TrajectoryStage.LIFT,
-            "orientation-free LIFT endpoint search exceeded its configured "
-            "sample budget",
-        )
+    yield ()
 
-    started = monotonic()
-    endpoints: list[tuple[RobotState, ...]] = [()]
+    elapsed = 0.0
     extension: list[RobotState] = []
     current = minimum_lift_state
     for index in range(1, step_count + 1):
+        if index + 1 > request.planning_policy.trajectory_validation_max_samples:
+            raise _RouteFailure(
+                PlanningErrorCode.BUDGET_EXHAUSTED,
+                TrajectoryStage.LIFT,
+                "orientation-free LIFT endpoint search exceeded its configured "
+                "sample budget",
+            )
         extra_lift = min(extra_distance, index * step)
         target = compose(
             inverse(request.T_world_base),
             _translate_world_z(minimum_world_lift_pose, extra_lift),
         )
+        started = monotonic()
         try:
             state = _continuous_ik(
                 request,
@@ -1339,23 +1480,30 @@ def _orientation_free_lift_endpoints(
                 ik_solution_count,
             )[0]
         except _RouteFailure as failure:
+            elapsed += monotonic() - started
+            _check_stage_budget(
+                request,
+                elapsed,
+                total_started,
+                TrajectoryStage.LIFT,
+            )
             if failure.code in (
                 PlanningErrorCode.CONTINUOUS_IK_FAILED,
                 PlanningErrorCode.IK_CANDIDATES_EXHAUSTED,
                 PlanningErrorCode.STAGE_COLLISION_VIOLATION,
             ):
-                break
+                return
             raise
+        elapsed += monotonic() - started
         extension.append(state)
-        endpoints.append(tuple(extension))
         current = state
         _check_stage_budget(
             request,
-            monotonic() - started,
+            elapsed,
             total_started,
             TrajectoryStage.LIFT,
         )
-    return tuple(endpoints)
+        yield tuple(extension)
 
 
 def _orientation_preferred_vamp_stage(
@@ -1621,6 +1769,68 @@ def _joint_path_length(path: tuple[tuple[float, ...], ...]) -> float:
     )
 
 
+def _payload_route_duration_s(
+    prefix_waypoints: tuple[GeometricWaypoint, ...],
+    extra_lift_states: tuple[RobotState, ...],
+    egress_path: tuple[tuple[float, ...], ...],
+    place_path: tuple[tuple[float, ...], ...],
+    channels: dict[str, float],
+    ruckig: RuckigTimeParameterizer,
+) -> float:
+    waypoints = list(prefix_waypoints)
+    waypoints.extend(
+        GeometricWaypoint(TrajectoryStage.LIFT, state.positions_rad, dict(channels))
+        for state in extra_lift_states
+    )
+    waypoints.extend(
+        GeometricWaypoint(TrajectoryStage.EGRESS, point, dict(channels))
+        for point in egress_path[1:]
+    )
+    waypoints.extend(
+        GeometricWaypoint(
+            TrajectoryStage.PLACE,
+            point,
+            dict(channels),
+            stop=index == len(place_path[1:]) - 1,
+        )
+        for index, point in enumerate(place_path[1:])
+    )
+    trajectory = ruckig.parameterize(tuple(waypoints), ())
+    lift_phase = next(
+        phase for phase in trajectory.phases
+        if phase.stage is TrajectoryStage.LIFT
+    )
+    return trajectory.knots[-1].time_s - lift_phase.start_time_s
+
+
+def _payload_route_selection_key(
+    duration_s: float,
+    cumulative_rotation_rad: float,
+    cumulative_translation_m: float,
+    maximum_orientation_deviation_rad: float,
+    joint_path_length: float,
+    tie_breaker: int,
+    request: PlanningRequest,
+) -> tuple[float, ...]:
+    rotation_time_s = (
+        cumulative_rotation_rad
+        / request.planning_policy.payload_tcp_max_angular_velocity_rad_s
+    )
+    translation_time_s = (
+        cumulative_translation_m
+        / request.planning_policy.payload_tcp_max_translation_velocity_m_s
+    )
+    return (
+        duration_s + rotation_time_s + translation_time_s,
+        duration_s,
+        rotation_time_s,
+        translation_time_s,
+        maximum_orientation_deviation_rad,
+        joint_path_length,
+        tie_breaker,
+    )
+
+
 def _path_has_forbidden_target_contact(
     path: tuple[tuple[float, ...], ...],
     target_geometries: tuple[SceneGeometry, ...],
@@ -1669,6 +1879,35 @@ def _semantic_motion_has_forbidden_contact(
             else allowed_groups
         )
         if contacts - permitted:
+            return True
+    return False
+
+
+def _semantic_support_motion_has_forbidden_contact(
+    start: tuple[float, ...],
+    goal: tuple[float, ...],
+    support_geometries: tuple[SceneGeometry, ...],
+    opening_m: float,
+    use_physical_pad_hulls: bool,
+    vamp: VampBackend,
+    T_world_base: RigidTransform,
+) -> bool:
+    sample_count = max(
+        2,
+        int(ceil(max(abs(right - left) for left, right in zip(start, goal)) / 0.02)),
+    )
+    for index in range(1, sample_count + 1):
+        fraction = index / sample_count
+        state = tuple(
+            left + fraction * (right - left) for left, right in zip(start, goal)
+        )
+        if vamp.semantic_source_support_contacts(
+            state,
+            support_geometries,
+            opening_m,
+            T_world_base,
+            use_physical_pad_hulls=use_physical_pad_hulls,
+        ):
             return True
     return False
 
@@ -1781,7 +2020,7 @@ def _retime_payload_motion(
         return trajectory
 
     result = trajectory
-    for _ in range(3):
+    for _ in range(4):
         limiting_stage = min(stage_scales, key=stage_scales.__getitem__)
         _check_total_budget(request, total_started, limiting_stage)
         scaled_waypoints = tuple(
@@ -2131,19 +2370,34 @@ def _validate_time_parameterized_trajectory(
             opening_m = float(sample.actuator_channels[opening_channel])
             time_s = sample.time_s
             if stage is TrajectoryStage.APPROACH:
-                environment_contacts = vamp.semantic_target_contacts(
+                non_support_contacts = vamp.semantic_target_contacts(
                     configuration,
-                    environment_geometries,
+                    non_support_environment_geometries,
                     opening_m,
                     request.T_world_base,
                 )
-                if environment_contacts:
+                tcp_position = np.asarray(
+                    vamp.tcp_pose(configuration).matrix, dtype=np.float64
+                )[:3, 3]
+                grasp_distance_m = float(
+                    np.linalg.norm(tcp_position - grasp_position)
+                )
+                support_contacts = vamp.semantic_source_support_contacts(
+                    configuration,
+                    support_geometries,
+                    opening_m,
+                    request.T_world_base,
+                    use_physical_pad_hulls=grasp_distance_m
+                    <= request.planning_policy.approach_contact_transition_m + 1e-12,
+                )
+                if non_support_contacts or support_contacts:
                     raise _RouteFailure(
                         PlanningErrorCode.STAGE_COLLISION_VIOLATION,
                         stage,
                         f"time-parameterized {stage.value} robot contacts the environment "
                         f"at current opening {opening_m:.6f}m: "
-                        f"{sorted(environment_contacts)!r}",
+                        f"non_support={sorted(non_support_contacts)!r}, "
+                        f"source_support={sorted(support_contacts)!r}",
                     )
             elif stage in (TrajectoryStage.GRASP, TrajectoryStage.LIFT):
                 non_support_contacts = vamp.semantic_target_contacts(
@@ -2660,6 +2914,8 @@ def _approach_contact_allowances(
                 expected_contacts
                 if start_remaining <= transition_distance_m + 1e-12
                 else frozenset(),
+                end_remaining <= transition_distance_m + 1e-12,
+                start_remaining <= transition_distance_m + 1e-12,
             )
         )
     return tuple(allowances)
@@ -2850,15 +3106,16 @@ def _route_selection_key(
         request.placement_goal.orientation_constraint
         is PlacementOrientationConstraint.FREE
     ):
-        return (
-            route.orientation_preference_cost_rad
-            + route.payload_cumulative_rotation_rad,
+        key = _payload_route_selection_key(
+            route.payload_nominal_duration_s,
+            route.payload_cumulative_rotation_rad,
             route.payload_cumulative_translation_m,
             route.orientation_preference_cost_rad,
             length,
-            -minimum_margin,
             seed,
+            request,
         )
+        return (*key[:-1], -minimum_margin, key[-1])
     return length, -minimum_margin, seed
 
 

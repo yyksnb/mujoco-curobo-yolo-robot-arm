@@ -8,7 +8,7 @@ from typing import Iterable, Mapping
 
 import numpy as np
 from scipy.spatial.transform import Rotation
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull as SpatialConvexHull, cKDTree
 
 from ..contracts import (
     AttachedGeometry,
@@ -74,6 +74,30 @@ class CollisionSphereCalibration:
 
 
 @dataclass(frozen=True)
+class SourceSupportContactHull:
+    group: str
+    vertices_at_maximum_opening_m: tuple[Vector3, ...]
+    translation_per_closed_fraction_m: Vector3
+
+    def validate(self, contact_groups: set[str]) -> None:
+        if self.group not in contact_groups:
+            raise ValueError(
+                "VAMP source-support contact hull must name a collision sphere group"
+            )
+        vertices = np.asarray(self.vertices_at_maximum_opening_m, dtype=np.float64)
+        if vertices.ndim != 2 or vertices.shape[0] < 4 or vertices.shape[1] != 3:
+            raise ValueError("VAMP source-support contact hull requires at least four xyz vertices")
+        if not np.all(np.isfinite(vertices)) or np.linalg.matrix_rank(
+            vertices[1:] - vertices[0]
+        ) < 3:
+            raise ValueError("VAMP source-support contact hull must be finite and three-dimensional")
+        if len(self.translation_per_closed_fraction_m) != 3 or not all(
+            isfinite(value) for value in self.translation_per_closed_fraction_m
+        ):
+            raise ValueError("VAMP source-support contact hull translation must be finite xyz")
+
+
+@dataclass(frozen=True)
 class VampConfig:
     version: str
     robot_module: str
@@ -82,6 +106,7 @@ class VampConfig:
     maximum_gripper_opening_m: float
     collision_sphere_groups: tuple[CollisionSphereGroup, ...]
     collision_sphere_calibrations: tuple[CollisionSphereCalibration, ...]
+    source_support_contact_hulls: tuple[SourceSupportContactHull, ...]
     range_rad: float
     dynamic_domain: bool
     max_iterations: int
@@ -110,6 +135,12 @@ class VampConfig:
             raise ValueError("VAMP calibrated collision sphere indices must be unique")
         for item in self.collision_sphere_calibrations:
             item.validate(self.robot_sphere_count)
+        hull_groups = [item.group for item in self.source_support_contact_hulls]
+        if len(hull_groups) != len(set(hull_groups)):
+            raise ValueError("VAMP source-support contact hull groups must be unique")
+        contact_groups = set(names)
+        for item in self.source_support_contact_hulls:
+            item.validate(contact_groups)
 
 
 def parse_vamp_config(
@@ -164,6 +195,43 @@ def parse_vamp_config(
                 _config_number(item, "radius_m", "VAMP sphere calibration"),
             )
         )
+    hulls_value = _config_value(
+        end_effector_profile,
+        "source_support_contact_hulls",
+        "VAMP end-effector profile",
+    )
+    if not isinstance(hulls_value, list):
+        raise ValueError("VAMP source_support_contact_hulls must be a list")
+    hulls = []
+    for index, value in enumerate(hulls_value):
+        item = _config_mapping(value, f"VAMP source_support_contact_hulls[{index}]")
+        vertices_value = _config_value(
+            item,
+            "vertices_at_maximum_opening_m",
+            "VAMP source-support contact hull",
+        )
+        if not isinstance(vertices_value, list):
+            raise ValueError(
+                "VAMP source-support contact hull vertices must be a list"
+            )
+        hulls.append(
+            SourceSupportContactHull(
+                _config_string(item, "group", "VAMP source-support contact hull"),
+                tuple(
+                    _config_vector(
+                        {"vertex": vertex},
+                        "vertex",
+                        "VAMP source-support contact hull vertex",
+                    )
+                    for vertex in vertices_value
+                ),
+                _config_vector(
+                    item,
+                    "translation_per_closed_fraction_m",
+                    "VAMP source-support contact hull",
+                ),
+            )
+        )
     result = VampConfig(
         _config_string(payload, "version", "VAMP"),
         _config_string(end_effector_profile, "vamp_robot_module", "VAMP profile"),
@@ -178,6 +246,7 @@ def parse_vamp_config(
         ),
         tuple(groups),
         tuple(calibrations),
+        tuple(hulls),
         _config_number(payload, "range_rad", "VAMP"),
         _config_boolean(payload, "dynamic_domain", "VAMP"),
         _config_integer(payload, "max_iterations", "VAMP"),
@@ -466,6 +535,72 @@ class VampBackend:
                     contacts.add(group_name)
         return frozenset(contacts)
 
+    def semantic_source_support_contacts(
+        self,
+        configuration: tuple[float, ...],
+        support_geometries: tuple[SceneGeometry, ...],
+        opening_m: float,
+        T_world_base: RigidTransform,
+        *,
+        use_physical_pad_hulls: bool,
+    ) -> frozenset[str]:
+        sphere_contacts = self.semantic_target_contacts(
+            configuration,
+            support_geometries,
+            opening_m,
+            T_world_base,
+        )
+        contacts = set(sphere_contacts)
+        if not use_physical_pad_hulls or not self._config.source_support_contact_hulls:
+            return frozenset(contacts)
+        if not 0.0 <= opening_m <= self._config.maximum_gripper_opening_m:
+            raise BackendOperationError("gripper opening is outside RobotModel limits")
+
+        geometries_in_base = tuple(
+            SceneGeometry(
+                item.geometry_id,
+                item.object_id,
+                item.collision_group,
+                compose(inverse(T_world_base), item.T_world_geometry),
+                item.geometry,
+            )
+            for item in support_geometries
+        )
+        tcp_matrix = np.asarray(
+            self.tcp_pose(configuration).matrix, dtype=np.float64
+        )
+        closed_fraction = 1.0 - opening_m / self._config.maximum_gripper_opening_m
+        for hull in self._config.source_support_contact_hulls:
+            contacts.discard(hull.group)
+            local_vertices = np.asarray(
+                hull.vertices_at_maximum_opening_m, dtype=np.float64
+            ) + closed_fraction * np.asarray(
+                hull.translation_per_closed_fraction_m, dtype=np.float64
+            )
+            pad_vertices = (
+                local_vertices @ tcp_matrix[:3, :3].T + tcp_matrix[:3, 3]
+            )
+            pad_faces = SpatialConvexHull(pad_vertices).simplices
+            unsupported_geometry = False
+            for geometry in geometries_in_base:
+                support_polyhedron = _convex_polyhedron_spec(geometry)
+                if support_polyhedron is None:
+                    unsupported_geometry = True
+                    continue
+                support_vertices, support_faces = support_polyhedron
+                if _convex_polyhedra_intersect(
+                    pad_vertices,
+                    pad_faces,
+                    support_vertices,
+                    support_faces,
+                ):
+                    contacts.add(hull.group)
+                    break
+            else:
+                if unsupported_geometry and hull.group in sphere_contacts:
+                    contacts.add(hull.group)
+        return frozenset(contacts)
+
     def semantic_robot_sphere_centers(
         self,
         configuration: tuple[float, ...],
@@ -705,6 +840,78 @@ def _convex_mesh_spec(
         bounds_euler.tolist(),
         half_extents.tolist(),
     )
+
+
+def _convex_polyhedron_spec(
+    item: SceneGeometry,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    transform = np.asarray(item.T_world_geometry.matrix, dtype=np.float64)
+    geometry = item.geometry
+    if isinstance(geometry, Box):
+        half = np.asarray(geometry.size_m, dtype=np.float64) / 2.0
+        local_vertices = np.asarray(
+            [
+                (x, y, z)
+                for x in (-half[0], half[0])
+                for y in (-half[1], half[1])
+                for z in (-half[2], half[2])
+            ],
+            dtype=np.float64,
+        )
+        faces = SpatialConvexHull(local_vertices).simplices
+    elif isinstance(geometry, ConvexHull):
+        local_vertices = np.asarray(geometry.vertices_m, dtype=np.float64)
+        faces = _outward_convex_faces(local_vertices, geometry.triangles)
+    else:
+        return None
+    vertices = local_vertices @ transform[:3, :3].T + transform[:3, 3]
+    return vertices, np.asarray(faces, dtype=np.int64)
+
+
+def _convex_polyhedra_intersect(
+    left_vertices: np.ndarray,
+    left_faces: np.ndarray,
+    right_vertices: np.ndarray,
+    right_faces: np.ndarray,
+) -> bool:
+    def face_normals(vertices: np.ndarray, faces: np.ndarray) -> list[np.ndarray]:
+        normals = []
+        for face in faces:
+            a, b, c = vertices[face]
+            normal = np.cross(b - a, c - a)
+            length = float(np.linalg.norm(normal))
+            if length > 1e-12:
+                normals.append(normal / length)
+        return normals
+
+    def edges(vertices: np.ndarray, faces: np.ndarray) -> list[np.ndarray]:
+        indices = {
+            tuple(sorted((int(face[index]), int(face[(index + 1) % 3]))))
+            for face in faces
+            for index in range(3)
+        }
+        return [vertices[end] - vertices[start] for start, end in indices]
+
+    axes = face_normals(left_vertices, left_faces)
+    axes.extend(face_normals(right_vertices, right_faces))
+    left_edges = edges(left_vertices, left_faces)
+    right_edges = edges(right_vertices, right_faces)
+    for left_edge in left_edges:
+        for right_edge in right_edges:
+            axis = np.cross(left_edge, right_edge)
+            length = float(np.linalg.norm(axis))
+            if length > 1e-12:
+                axes.append(axis / length)
+    for axis in axes:
+        left_projection = left_vertices @ axis
+        right_projection = right_vertices @ axis
+        if (
+            float(np.max(left_projection)) < float(np.min(right_projection)) - 1e-12
+            or float(np.max(right_projection))
+            < float(np.min(left_projection)) - 1e-12
+        ):
+            return False
+    return True
 
 
 def _outward_convex_faces(

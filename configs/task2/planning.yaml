@@ -31,6 +31,29 @@ backends:
         collision_sphere_groups:
           - {group: left_pad, first_sphere: 176, sphere_count: 128, translation_per_closed_fraction_m: [0.0, 0.042, 0.0], sweep_radius_inflation_m: 0.021}
           - {group: right_pad, first_sphere: 304, sphere_count: 128, translation_per_closed_fraction_m: [0.0, -0.042, 0.0], sweep_radius_inflation_m: 0.021}
+        source_support_contact_hulls:
+          - group: left_pad
+            translation_per_closed_fraction_m: [0.0, 0.042, 0.0]
+            vertices_at_maximum_opening_m:
+              - [0.014, -0.050, -0.030]
+              - [0.014, -0.042, -0.030]
+              - [-0.014, -0.050, -0.030]
+              - [-0.014, -0.042, -0.030]
+              - [0.0055, -0.050, -0.001]
+              - [0.0055, -0.042, -0.001]
+              - [-0.0055, -0.050, -0.001]
+              - [-0.0055, -0.042, -0.001]
+          - group: right_pad
+            translation_per_closed_fraction_m: [0.0, -0.042, 0.0]
+            vertices_at_maximum_opening_m:
+              - [0.014, 0.042, -0.030]
+              - [0.014, 0.050, -0.030]
+              - [-0.014, 0.042, -0.030]
+              - [-0.014, 0.050, -0.030]
+              - [0.0055, 0.042, -0.001]
+              - [0.0055, 0.050, -0.001]
+              - [-0.0055, 0.042, -0.001]
+              - [-0.0055, 0.050, -0.001]
         collision_sphere_calibrations:
           - {sphere_index: 27, center_at_default_m: [0.215160, 0.001000, 0.539479], radius_m: 0.036648}
           - {sphere_index: 41, center_at_default_m: [0.275690, -0.019505, 0.428311], radius_m: 0.035516}
@@ -49,7 +72,9 @@ backends:
       backend: curobo
       curobo_version: 0.8.0
       solution_count: 8
+      pregrasp_solution_count: 16
       seed_count: 32
+      seed_batch_count: 14
     ruckig:
       version: 0.19.4
     placement_sample_count: 17

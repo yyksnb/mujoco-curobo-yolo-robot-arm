@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from math import isfinite
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .backends.errors import BackendUnavailableError
 from .contracts import PlanningPolicy, RigidTransform, RobotModel, RobotState
@@ -20,6 +20,7 @@ class IKConstraints:
     position_tolerance_m: float
     orientation_tolerance_rad: float
     maximum_solutions: int
+    solution_validator: Callable[[RobotState], bool] | None = None
 
 
 @dataclass(frozen=True)

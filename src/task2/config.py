@@ -74,6 +74,7 @@ class _PlanningBackendProfile:
     ik: CuroboIKConfig
     ruckig: RuckigConfig
     ik_solution_count: int
+    pregrasp_ik_solution_count: int
     placement_sample_count: int
 
 
@@ -174,6 +175,7 @@ class Task2Config:
             ),
             create_ruckig=partial(RuckigTimeParameterizer, config=backend.ruckig),
             ik_solution_count=backend.ik_solution_count,
+            pregrasp_ik_solution_count=backend.pregrasp_ik_solution_count,
             placement_sample_count=backend.placement_sample_count,
         )
 
@@ -538,7 +540,7 @@ def _parse_planning(
         profile = _as_mapping(
             raw_profile, f"backends.{backend_id}.end_effector_profiles.{profile_id}"
         )
-        ik_backend, ik_config, solution_count = parse_curobo_ik_config(
+        ik_backend, ik_config, solution_count, pregrasp_solution_count = parse_curobo_ik_config(
             ik_payload, profile, base_dir
         )
         profiles[profile_id] = _PlanningBackendProfile(
@@ -547,6 +549,7 @@ def _parse_planning(
             ik_config,
             parse_ruckig_config(ruckig_payload),
             solution_count,
+            pregrasp_solution_count,
             _integer(backend, "placement_sample_count", f"backends.{backend_id}"),
         )
     return policy, profiles

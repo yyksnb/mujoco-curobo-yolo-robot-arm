@@ -108,6 +108,19 @@ class _FakeVamp:
             return frozenset(("left_pad", "right_pad"))
         return frozenset()
 
+    def semantic_source_support_contacts(
+        self,
+        configuration,
+        support_geometries,
+        opening_m,
+        T_world_base,
+        *,
+        use_physical_pad_hulls,
+    ):
+        return self.semantic_target_contacts(
+            configuration, support_geometries, opening_m, T_world_base
+        )
+
     def semantic_attachment_contacts(
         self,
         configuration,
@@ -151,6 +164,46 @@ class _ReturnedKnotVamp(_FixedOrientationVamp):
         return super().plan(start, goal, environment, seed=seed)
 
 
+class _LiftEndpointVamp(_FixedOrientationVamp):
+    def __init__(self, robot_model, rotation, *, reject_minimum):
+        super().__init__(robot_model, rotation)
+        self.reject_minimum = reject_minimum
+        self.loaded_plan_starts = []
+
+    def plan(self, start, goal, environment, *, seed):
+        if environment.get("attached_geometry"):
+            self.loaded_plan_starts.append(tuple(start))
+            if self.reject_minimum and len(self.loaded_plan_starts) == 1:
+                raise BackendOperationError("minimum LIFT endpoint is blocked")
+        return super().plan(start, goal, environment, seed=seed)
+
+
+class _LiftEndpointCostVamp(_FixedOrientationVamp):
+    def __init__(self, robot_model, rotation, *, minimum_is_better):
+        super().__init__(robot_model, rotation)
+        self.minimum_is_better = minimum_is_better
+        self.loaded_plan_count = 0
+        self.egress_starts = []
+
+    def plan(self, start, goal, environment, *, seed):
+        if not environment.get("attached_geometry"):
+            return super().plan(start, goal, environment, seed=seed)
+        is_egress = self.loaded_plan_count % 2 == 0
+        self.loaded_plan_count += 1
+        if not is_egress:
+            return super().plan(start, goal, environment, seed=seed)
+        endpoint_index = len(self.egress_starts)
+        self.egress_starts.append(tuple(start))
+        detour = (endpoint_index == 0) != self.minimum_is_better
+        if not detour:
+            return super().plan(start, goal, environment, seed=seed)
+        midpoint = list(
+            0.5 * (left + right) for left, right in zip(start, goal)
+        )
+        midpoint[1] += 0.4
+        return VampPlan((tuple(start), tuple(midpoint), tuple(goal)), 0.001, 1)
+
+
 class _SeedRouteVamp(_FixedOrientationVamp):
     def __init__(self, robot_model, rotation, detour_seed):
         super().__init__(robot_model, rotation)
@@ -171,7 +224,7 @@ class _SeedRouteVamp(_FixedOrientationVamp):
                 self.detour_midpoints.append(midpoint)
             else:
                 midpoint = tuple(
-                    value + (0.6 if index == 3 else 0.0)
+                    value + (0.1 if index == 3 else 0.0)
                     for index, value in enumerate(midpoint)
                 )
                 self.direct_midpoints.append(midpoint)
@@ -311,6 +364,58 @@ class _ApproachContactVamp(_FakeVamp):
             return frozenset(("left_pad", "right_pad"))
         return super().semantic_target_contacts(
             configuration, geometries, opening_m, T_world_base
+        )
+
+
+class _ApproachSupportProxyVamp(_FakeVamp):
+    def __init__(
+        self,
+        robot_model,
+        grasp_position_m,
+        proxy_contact_distance_m,
+        *,
+        physical_contact,
+    ):
+        super().__init__(robot_model)
+        self.grasp_position_m = np.asarray(grasp_position_m, dtype=np.float64)
+        self.proxy_contact_distance_m = proxy_contact_distance_m
+        self.physical_contact = physical_contact
+
+    def _in_proxy_contact(self, configuration):
+        tcp_position = np.asarray(
+            self.tcp_pose(configuration).matrix, dtype=np.float64
+        )[:3, 3]
+        return (
+            np.linalg.norm(tcp_position - self.grasp_position_m)
+            <= self.proxy_contact_distance_m
+        )
+
+    def semantic_target_contacts(self, configuration, geometries, opening_m, T_world_base):
+        if (
+            any(item.collision_group == "source_support" for item in geometries)
+            and opening_m >= 0.02
+            and self._in_proxy_contact(configuration)
+        ):
+            return frozenset(("left_pad", "right_pad"))
+        return super().semantic_target_contacts(
+            configuration, geometries, opening_m, T_world_base
+        )
+
+    def semantic_source_support_contacts(
+        self,
+        configuration,
+        support_geometries,
+        opening_m,
+        T_world_base,
+        *,
+        use_physical_pad_hulls,
+    ):
+        if use_physical_pad_hulls:
+            if self.physical_contact and self._in_proxy_contact(configuration):
+                return frozenset(("left_pad", "right_pad"))
+            return frozenset()
+        return self.semantic_target_contacts(
+            configuration, support_geometries, opening_m, T_world_base
         )
 
 
@@ -527,7 +632,48 @@ def _fake_dependencies() -> PlanningDependencies:
         lambda robot_model, random_seed: _FakeIK(robot_model),
         lambda robot_model: RuckigTimeParameterizer(robot_model, backend.ruckig),
         backend.ik_solution_count,
+        backend.pregrasp_ik_solution_count,
         backend.placement_sample_count,
+    )
+
+
+def _two_endpoint_free_placement_request() -> PlanningRequest:
+    baseline = _request()
+    candidate = baseline.candidates[0]
+    step_m = 0.05
+    minimum_lift_z = (
+        candidate.T_world_tcp.matrix[2][3]
+        + baseline.planning_policy.lift_distance_m
+    )
+    placement_matrix = [
+        list(row) for row in baseline.placement_goal.T_world_tcp.matrix
+    ]
+    placement_matrix[2][3] = (
+        minimum_lift_z
+        + step_m
+        - baseline.planning_policy.preplace_offset_m
+    )
+    placement_pose = RigidTransform(
+        baseline.placement_goal.T_world_tcp.parent_frame,
+        baseline.placement_goal.T_world_tcp.child_frame,
+        tuple(tuple(row) for row in placement_matrix),
+    )
+    return replace(
+        baseline,
+        candidates=(candidate,),
+        placement_goal=replace(
+            baseline.placement_goal,
+            T_world_tcp=placement_pose,
+            orientation_constraint=PlacementOrientationConstraint.FREE,
+        ),
+        planning_policy=replace(
+            baseline.planning_policy,
+            cartesian_translation_step_m=step_m,
+            payload_tcp_max_angular_velocity_rad_s=1000.0,
+            payload_tcp_max_translation_velocity_m_s=1000.0,
+            payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+        budgets=PlanningBudgets(1, 1, 5.0, 20.0),
     )
 
 
@@ -574,6 +720,24 @@ def _approach_contact_dependencies(contact_distance_m: float) -> PlanningDepende
     )
 
 
+def _approach_support_proxy_dependencies(
+    proxy_contact_distance_m: float, *, physical_contact: bool
+) -> PlanningDependencies:
+    request = _request()
+    grasp_position = np.asarray(
+        request.candidates[0].T_world_tcp.matrix, dtype=np.float64
+    )[:3, 3]
+    return replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: _ApproachSupportProxyVamp(
+            robot_model,
+            grasp_position,
+            proxy_contact_distance_m,
+            physical_contact=physical_contact,
+        ),
+    )
+
+
 def _final_validation_dependencies(
     *, reject_motion=False, reject_attachment=False
 ) -> tuple[PlanningDependencies, _FinalTrajectoryVamp]:
@@ -591,6 +755,7 @@ def _final_validation_dependencies(
             RuckigTimeParameterizer(robot_model, backend.ruckig), vamp
         ),
         backend.ik_solution_count,
+        backend.pregrasp_ik_solution_count,
         backend.placement_sample_count,
     )
     return dependencies, vamp
@@ -761,9 +926,6 @@ def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> No
         planning_policy=replace(
             baseline.planning_policy,
             cartesian_translation_step_m=1.0,
-            payload_tcp_max_angular_velocity_rad_s=1000.0,
-            payload_tcp_max_translation_velocity_m_s=1000.0,
-            payload_tcp_max_translation_acceleration_m_s2=1000.0,
         ),
         budgets=PlanningBudgets(1, 2, 5.0, 20.0),
     )
@@ -833,6 +995,87 @@ def test_orientation_free_route_preserves_vamp_returned_knots_for_ruckig() -> No
         midpoint == knot
         for midpoint in vamp.loaded_midpoints
         for knot in loaded_knots
+    )
+
+
+def test_orientation_free_placement_selects_later_lower_cost_payload_route() -> None:
+    request = _two_endpoint_free_placement_request()
+    candidate = request.candidates[0]
+    vamp = _LiftEndpointCostVamp(
+        request.robot_model,
+        np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
+        minimum_is_better=False,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    assert len(vamp.egress_starts) == 2
+    lift = next(
+        phase for phase in result.trajectory.phases
+        if phase.stage is TrajectoryStage.LIFT
+    )
+    assert result.trajectory.knots[lift.last_knot].positions_rad == pytest.approx(
+        vamp.egress_starts[1]
+    )
+
+
+def test_orientation_free_placement_keeps_minimum_lower_cost_payload_route() -> None:
+    request = _two_endpoint_free_placement_request()
+    candidate = request.candidates[0]
+    vamp = _LiftEndpointCostVamp(
+        request.robot_model,
+        np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
+        minimum_is_better=True,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    assert len(vamp.egress_starts) == 2
+    lift = next(
+        phase for phase in result.trajectory.phases
+        if phase.stage is TrajectoryStage.LIFT
+    )
+    assert result.trajectory.knots[lift.last_knot].positions_rad == pytest.approx(
+        vamp.egress_starts[0]
+    )
+
+
+def test_orientation_free_placement_tries_higher_lift_after_minimum_fails() -> None:
+    request = _two_endpoint_free_placement_request()
+    candidate = request.candidates[0]
+    vamp = _LiftEndpointVamp(
+        request.robot_model,
+        np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
+        reject_minimum=True,
+    )
+    dependencies = replace(
+        _fake_dependencies(),
+        create_vamp=lambda robot_model: vamp,
+    )
+
+    result = plan(request, dependencies=dependencies)
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    assert len(vamp.loaded_plan_starts) == 3
+    minimum_start, selected_start = vamp.loaded_plan_starts[:2]
+    assert selected_start != minimum_start
+    assert any(
+        knot.stage is TrajectoryStage.LIFT
+        and knot.positions_rad == pytest.approx(selected_start)
+        for knot in result.trajectory.knots
     )
 
 
@@ -920,6 +1163,35 @@ def test_approach_rejects_early_target_contact_but_allows_terminal_transition() 
     assert coarse_terminal.success, coarse_terminal.message
 
 
+@pytest.mark.parametrize(
+    ("proxy_contact_distance_m", "physical_contact", "expected_success"),
+    (
+        (0.008, False, True),
+        (0.012, False, False),
+        (0.008, True, False),
+    ),
+)
+def test_approach_source_support_uses_physical_pad_hull_only_in_terminal_transition(
+    proxy_contact_distance_m, physical_contact, expected_success
+) -> None:
+    request = _request()
+    result = plan(
+        request,
+        dependencies=_approach_support_proxy_dependencies(
+            proxy_contact_distance_m,
+            physical_contact=physical_contact,
+        ),
+    )
+
+    assert result.success is expected_success
+    if not expected_success:
+        assert result.attempts[-1].stage is TrajectoryStage.APPROACH
+        assert result.attempts[-1].error_code in (
+            PlanningErrorCode.CONTINUOUS_IK_FAILED,
+            PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+        )
+
+
 def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
     vamp = CONFIG.planning_backends[PROFILE.planning_backend_profile].vamp
     assert vamp.range_rad == 0.5
@@ -949,6 +1221,13 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         (303, (0.668818, 0.005874, 0.411724), 0.024911),
         (304, (0.643443, -0.008751, 0.461724), 0.026419),
         (431, (0.668818, 0.005874, 0.455724), 0.024911),
+    )
+    assert tuple(
+        (item.group, item.translation_per_closed_fraction_m)
+        for item in vamp.source_support_contact_hulls
+    ) == (
+        ("left_pad", (0.0, 0.042, 0.0)),
+        ("right_pad", (0.0, -0.042, 0.0)),
     )
     assert CONFIG.planning_policy.approach_contact_transition_m == 0.01
     assert CONFIG.planning_policy.payload_tcp_max_angular_velocity_rad_s == 0.44
@@ -1033,10 +1312,16 @@ def test_pad_collision_spheres_cover_tapered_mujoco_envelope_without_old_box_air
         (ROOT / "configs/curobo/gen3/task2_active_wrist_parallel_spheres.yml").read_text()
     )["collision_spheres"]
     groups = (
-        ("left_jaw", "task2_tool_left_pad_collision", 1.0),
-        ("right_jaw", "task2_tool_right_pad_collision", -1.0),
+        ("left_jaw", "task2_tool_left_pad_collision", "left_pad", 1.0),
+        ("right_jaw", "task2_tool_right_pad_collision", "right_pad", -1.0),
     )
-    for body_name, sphere_link, closed_direction in groups:
+    support_hulls = {
+        item.group: item
+        for item in CONFIG.planning_backends[
+            PROFILE.planning_backend_profile
+        ].vamp.source_support_contact_hulls
+    }
+    for body_name, sphere_link, contact_group, closed_direction in groups:
         body = model.find(f".//body[@name='{body_name}']")
         assert body is not None
         joint = body.find("joint")
@@ -1051,6 +1336,15 @@ def test_pad_collision_spheres_cover_tapered_mujoco_envelope_without_old_box_air
         open_vertices = (
             body_position + joint_axis * joint_range[1] + mesh_vertices - tcp_position
         ) @ tcp_rotation
+        configured_hull = np.asarray(
+            support_hulls[contact_group].vertices_at_maximum_opening_m,
+            dtype=np.float64,
+        )
+        vertex_distances = np.linalg.norm(
+            configured_hull[:, None, :] - open_vertices[None, :, :], axis=2
+        )
+        assert np.all(np.min(vertex_distances, axis=1) <= 1e-12)
+        assert np.all(np.min(vertex_distances, axis=0) <= 1e-12)
         surface_points = []
         for face in mesh_faces:
             triangle = open_vertices[face]
