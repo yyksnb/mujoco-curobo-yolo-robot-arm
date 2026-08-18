@@ -150,6 +150,43 @@ objects:
             contact_margin_m: 0.017030
             opening_margin_m: 0.052053
             force_margin_n: 12.000000
+        - template_id: rivet_gun_parallel_sideup_pad_support
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [-0.865576692886883, -0.001504356845544, 0.500774126369850, -0.010419434517220]
+              - [-0.075908161988024, 0.988834532562107, -0.128235011429321, 0.018717399205072]
+              - [-0.494989837950846, -0.149010080609197, -0.856026317470575, 0.001743153084207]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: discrete
+            group: C1
+            axis: approach_axis_object
+            axis_vector: [0.500774126369850, -0.128235011429321, -0.856026317470575]
+            values_rad: [0.0]
+          pregrasp_opening_m: 0.084
+          target_opening_m: 0.00016988094830865802
+          grip_force_limit_n: 120.0
+          minimum_retention_force_n: 12.0
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 1.0
+          diagnostics:
+            contact_margin_m: 0.017030
+            opening_margin_m: 0.052053
+            force_margin_n: 108.000000
     planning:
       attached_geometry:
         - geometry_id: rivet_gun_proxy_00

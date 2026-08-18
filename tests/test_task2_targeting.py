@@ -45,7 +45,7 @@ def test_calibrated_templates_preserve_candidates_and_commands() -> None:
     expected = {
         "marker": (2, 0.013014206, 0.75, "marker_parallel_body"),
         "masking_tape": (4, 0.074333332, 2.0, "masking_tape_parallel_outer_wall"),
-        "rivet_gun": (2, 0.011946974, 24.0, "rivet_gun_parallel_handle"),
+        "rivet_gun": (3, 0.011946974, 24.0, "rivet_gun_parallel_handle"),
         "standard_part": (4, 0.002745694, 0.30, "standard_part_parallel_shaft"),
     }
     for object_type, (count, opening, force, template_id) in expected.items():
