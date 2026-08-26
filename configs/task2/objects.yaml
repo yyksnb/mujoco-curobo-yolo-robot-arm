@@ -285,7 +285,7 @@ objects:
             child_frame: tcp_at_grasp
             matrix:
               - [0.0, 1.0, 0.0, 0.0]
-              - [0.984807753, 0.0, 0.173648178, -0.002826351822]
+              - [0.984807753, 0.0, 0.173648178, -0.001826351822]
               - [0.173648178, 0.0, -0.984807753, 0.002265192247]
               - [0.0, 0.0, 0.0, 1.0]
           T_tcp_pregrasp:
@@ -303,7 +303,7 @@ objects:
             axis_vector: [0.0, 0.173648178, -0.984807753]
             values_rad: [0.0, 3.141592654]
           pregrasp_opening_m: 0.010995694
-          target_opening_m: 0.002501621
+          target_opening_m: 0.002300000
           grip_force_limit_n: 4.0
           minimum_retention_force_n: 0.10
           closing_speed_m_s: 0.014

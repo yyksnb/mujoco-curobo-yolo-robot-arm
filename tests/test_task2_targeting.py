@@ -103,7 +103,7 @@ def test_standard_part_mid_pos10_template_contract() -> None:
     angle = radians(10.0)
     expected_T_object_tcp = (
         (0.0, 1.0, 0.0, 0.0),
-        (cos(angle), 0.0, sin(angle), -0.002826351822),
+        (cos(angle), 0.0, sin(angle), -0.001826351822),
         (sin(angle), 0.0, -cos(angle), 0.002265192247),
         (0.0, 0.0, 0.0, 1.0),
     )
@@ -118,8 +118,9 @@ def test_standard_part_mid_pos10_template_contract() -> None:
         for left, right in zip(closing_axis_object, standard_part_axis_object)
     ) == pytest.approx(0.0, abs=1e-9)
 
-    assert yaw_zero.grasp_command.target_opening_m == pytest.approx(0.002501621)
+    assert yaw_zero.grasp_command.target_opening_m == pytest.approx(0.0023)
     assert yaw_zero.grasp_command.grip_force_limit_n == pytest.approx(4.0)
+    assert yaw_zero.grasp_command.closing_speed_m_s == pytest.approx(0.014)
     assert yaw_zero.diagnostics.force_margin_n == pytest.approx(3.90)
 
 
