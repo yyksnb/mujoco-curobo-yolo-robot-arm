@@ -232,10 +232,11 @@ def execute(request: ExecutionRequest) -> ExecutionResult:
         for key in timeline[1:]:
             planned_time = float(key)
             observation = request.adapter.advance(planned_time - previous_time)
-            facts.add_observation(
-                observation, request.diagnostics_config.minimum_departure_height_m
-            )
             if key in control_keys:
+                facts.add_observation(
+                    observation,
+                    request.diagnostics_config.minimum_departure_height_m,
+                )
                 next_command = _sample_command(
                     request, planned_time, previous_control_time
                 )
@@ -268,17 +269,31 @@ def execute(request: ExecutionRequest) -> ExecutionResult:
             previous_time = planned_time
             executed_duration_s = planned_time
 
-        post_release_times = _sample_times(
+        post_release_evaluation_times = _sample_times(
+            request.diagnostics_config.post_release_observation_s,
+            request.control_frequency_hz,
+        )
+        post_release_log_times = _sample_times(
             request.diagnostics_config.post_release_observation_s,
             request.diagnostic_log_frequency_hz,
         )
+        post_release_evaluation_keys = {
+            _time_key(value) for value in post_release_evaluation_times
+        }
+        post_release_log_keys = {_time_key(value) for value in post_release_log_times}
+        post_release_timeline = sorted(
+            post_release_evaluation_keys | post_release_log_keys
+        )
         previous_post_time = 0.0
-        for post_time in post_release_times[1:]:
+        for key in post_release_timeline[1:]:
+            post_time = float(key)
             observation = request.adapter.advance(post_time - previous_post_time)
-            facts.add_observation(
-                observation, request.diagnostics_config.minimum_departure_height_m
-            )
-            if log_error is None:
+            if key in post_release_evaluation_keys:
+                facts.add_observation(
+                    observation,
+                    request.diagnostics_config.minimum_departure_height_m,
+                )
+            if key in post_release_log_keys and log_error is None:
                 try:
                     diagnostic_writer.write(
                         duration_s,

@@ -246,6 +246,89 @@ def test_diagnostic_samples_cannot_consume_events_between_control_samples(tmp_pa
     assert result.control_sample_count == len(adapter.commands) == 6
 
 
+class _PostReleaseTransientAdapter(_RecordingAdapter):
+    def observe(self):
+        observation = super().observe()
+        state = observation.target_object_state
+        assert state is not None
+        transient_z = 0.2 if 0.619 < self.time_s < 0.621 else 0.0
+        return replace(
+            observation,
+            target_object_state=replace(
+                state,
+                T_world_body=_pose("world", "object", (0.0, 0.0, transient_z)),
+            ),
+        )
+
+
+def test_100_hz_control_with_50_hz_logs_only_changes_persistence(tmp_path):
+    adapter_50_hz = _PostReleaseTransientAdapter()
+    diagnostics = replace(
+        _request(tmp_path, adapter_50_hz).diagnostics_config,
+        target_position_world_m=(0.0, 0.0, 0.0),
+    )
+    request_50_hz = replace(
+        _request(tmp_path / "50_hz", adapter_50_hz),
+        control_frequency_hz=100.0,
+        control_log_frequency_hz=50.0,
+        diagnostic_log_frequency_hz=50.0,
+        diagnostics_config=diagnostics,
+    )
+    adapter_25_hz = _PostReleaseTransientAdapter()
+    request_25_hz = replace(
+        request_50_hz,
+        adapter=adapter_25_hz,
+        control_log_frequency_hz=25.0,
+        diagnostic_log_frequency_hz=25.0,
+        control_log_path=str(tmp_path / "25_hz/control.csv"),
+        diagnostic_log_path=str(tmp_path / "25_hz/diagnostics.jsonl"),
+    )
+
+    result_50_hz = execute(request_50_hz)
+    result_25_hz = execute(request_25_hz)
+
+    assert result_50_hz.execution_status is ExecutionStatus.COMPLETED
+    assert result_50_hz.dynamics_diagnostics.success
+    assert result_50_hz.execution_status is result_25_hz.execution_status
+    assert result_50_hz.dynamics_diagnostics == result_25_hz.dynamics_diagnostics
+    assert result_50_hz.control_sample_count == result_25_hz.control_sample_count == 61
+    assert adapter_50_hz.commands == adapter_25_hz.commands
+    assert [
+        event for command in adapter_50_hz.commands for event in command.events
+    ] == ["grip", "release"]
+
+    with Path(request_50_hz.control_log_path).open(
+        encoding="utf-8", newline=""
+    ) as stream:
+        control_rows = tuple(csv.DictReader(stream))
+    dynamics_rows = tuple(
+        json.loads(line)
+        for line in Path(request_50_hz.diagnostic_log_path).read_text().splitlines()
+    )
+    assert len(control_rows) == result_50_hz.control_log_sample_count == 31
+    assert len(dynamics_rows) == result_50_hz.diagnostic_log_sample_count == 41
+    control_times = [float(row["runtime_time_s"]) for row in control_rows]
+    dynamics_times = [float(row["runtime_time_s"]) for row in dynamics_rows]
+    assert all(right > left for left, right in zip(control_times, control_times[1:]))
+    assert all(right > left for left, right in zip(dynamics_times, dynamics_times[1:]))
+    assert [
+        right - left for left, right in zip(control_times, control_times[1:])
+    ] == pytest.approx([0.02] * (len(control_times) - 1))
+    assert [
+        right - left for left, right in zip(dynamics_times, dynamics_times[1:])
+    ] == pytest.approx([0.02] * (len(dynamics_times) - 1))
+    assert [
+        event
+        for row in control_rows
+        for event in json.loads(row["events"])
+    ] == ["grip", "release"]
+    assert all(row["actual_positions_rad"] for row in control_rows)
+    assert all(row["actuator_states"] for row in control_rows)
+    assert all(row["tcp_pose"] for row in dynamics_rows)
+    assert all(row["target_object_state"] for row in dynamics_rows)
+    assert all("contacts" in row for row in dynamics_rows)
+
+
 def test_control_log_frequency_cannot_exceed_control_frequency(tmp_path):
     adapter = _RecordingAdapter()
     request = replace(

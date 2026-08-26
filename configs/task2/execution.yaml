@@ -1,7 +1,7 @@
 execution:
   control_frequency_hz: 100.0
-  control_log_frequency_hz: 10.0
-  diagnostic_log_frequency_hz: 10.0
+  control_log_frequency_hz: 50.0
+  diagnostic_log_frequency_hz: 50.0
   diagnostics:
     world_frame: world
     source_support_geom_names: [tank_bottom_collision]
