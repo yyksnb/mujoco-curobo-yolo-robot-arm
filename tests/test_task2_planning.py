@@ -13,8 +13,13 @@ import yaml
 
 from task2 import plan, target
 from task2.backends.errors import BackendOperationError, BackendUnavailableError
-from task2.backends.ruckig import RuckigRouteError, RuckigTimeParameterizer
+from task2.backends.ruckig import (
+    GeometricWaypoint,
+    RuckigRouteError,
+    RuckigTimeParameterizer,
+)
 from task2.backends.vamp import (
+    VampBackend,
     VampPlan,
     _convex_contact_groups,
     _outward_convex_faces,
@@ -38,10 +43,16 @@ from task2.contracts import (
     Sphere,
     TargetingRequest,
     TrajectoryStage,
+    VerticalTransitCorridor,
 )
+from task2.contracts.geometry import compose, inverse
 from task2.ik import IKResult, IKSolution
 from task2.planning import (
+    _OrientationPathMetrics,
     PlanningDependencies,
+    _cartesian_continuation_route,
+    _farthest_collision_valid_shortcut,
+    _pregrasp_path_quality_key,
     _sampled_orientation_deviation,
 )
 
@@ -56,11 +67,15 @@ class _FakeVamp:
 
     def __init__(self, robot_model):
         self.model = robot_model
+        self.plan_environments = []
+        self.plan_calls = []
 
     def environment(self, scene, **kwargs):
         return kwargs
 
     def plan(self, start, goal, environment, *, seed):
+        self.plan_environments.append(environment)
+        self.plan_calls.append((tuple(start), tuple(goal), environment, seed))
         return VampPlan((tuple(start), tuple(goal)), 0.001, 1)
 
     def configuration_valid(self, configuration, environment):
@@ -343,6 +358,28 @@ class _RecordingIK(_FakeIK):
     def solve(self, targets, seed_states, constraints):
         self.targets.extend(targets)
         return super().solve(targets, seed_states, constraints)
+
+
+class _BranchingRouteIK(_FakeIK):
+    def solve(self, targets, seed_states, constraints):
+        target_x = round(targets[0].matrix[0][3])
+        branches = {
+            1: (0.4, 0.8),
+            2: (0.3, 0.9),
+            3: (1.0,),
+        }[target_x]
+        solutions = []
+        for value in branches:
+            positions = list(seed_states[0].positions_rad)
+            positions[0] = value
+            solutions.append(
+                IKSolution(
+                    RobotState(self.model.joint_names, tuple(positions)),
+                    0.0,
+                    0.0,
+                )
+            )
+        return IKResult(tuple(solutions), None, "branching IK succeeded")
 
 
 class _ApproachContactVamp(_FakeVamp):
@@ -780,21 +817,13 @@ def test_plan_preserves_six_phases_named_channels_and_stops() -> None:
     place_phase = next(
         item for item in trajectory.phases if item.stage is TrajectoryStage.PLACE
     )
-    stopped_knots = set(range(grasp_phase.first_knot, grasp_phase.last_knot + 1))
-    stopped_knots.update((0, place_phase.last_knot))
-    for index in stopped_knots:
-        assert trajectory.knots[index].velocities_rad_s == pytest.approx(
-            (0.0,) * len(request.robot_model.joint_names)
-        )
-
-    for index, knot in enumerate(trajectory.knots):
-        if index in stopped_knots:
-            continue
-        relative_speed = max(
-            abs(value) / limit.maximum_velocity_rad_s
-            for value, limit in zip(knot.velocities_rad_s, request.robot_model.joint_limits)
-        )
-        assert 0.0 < relative_speed <= 1.0
+    assert grasp_phase.first_knot < grasp_phase.last_knot
+    assert place_phase.first_knot <= place_phase.last_knot
+    assert all(
+        knot.velocities_rad_s
+        == pytest.approx((0.0,) * len(request.robot_model.joint_names))
+        for knot in trajectory.knots
+    )
 
     for left, right in zip(trajectory.segments, trajectory.segments[1:]):
         assert left.end_knot == right.start_knot
@@ -882,6 +911,52 @@ def test_orientation_free_placement_preserves_grasp_orientation_and_continuity()
         )
 
 
+def test_ruckig_parameterizes_each_waypoint_edge_as_scalar_path_progress() -> None:
+    model = _request().robot_model
+    zero = (0.0,) * len(model.joint_names)
+    final = (0.4, 0.1, *zero[2:])
+    channels = {"opening": 0.08, "force": 1.0}
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    positions = tuple(
+        tuple(fraction * value for value in final)
+        for fraction in (0.0, 0.15, 0.3, 0.45, 0.6, 0.8, 1.0)
+    )
+    stages = (
+        TrajectoryStage.PREGRASP,
+        TrajectoryStage.PREGRASP,
+        TrajectoryStage.APPROACH,
+        TrajectoryStage.GRASP,
+        TrajectoryStage.LIFT,
+        TrajectoryStage.EGRESS,
+        TrajectoryStage.PLACE,
+    )
+    trajectory = RuckigTimeParameterizer(model, backend.ruckig).parameterize(
+        tuple(
+            GeometricWaypoint(stage, point, channels)
+            for stage, point in zip(stages, positions)
+        ),
+        (),
+    )
+
+    assert all(
+        knot.velocities_rad_s == pytest.approx(zero)
+        for knot in trajectory.knots
+    )
+    for segment, source, target_position in zip(
+        trajectory.segments, positions, positions[1:]
+    ):
+        delta = np.asarray(target_position) - np.asarray(source)
+        active = int(np.flatnonzero(np.abs(delta) > 1e-12)[0])
+        for fraction in (0.1, 0.5, 0.9):
+            sample = segment.sample(segment.duration_s * fraction)
+            progress = (
+                sample.positions_rad[active] - source[active]
+            ) / delta[active]
+            assert sample.positions_rad == pytest.approx(
+                np.asarray(source) + progress * delta
+            )
+
+
 def test_orientation_preference_cost_samples_between_vamp_knots() -> None:
     baseline = _request()
     request = replace(
@@ -911,6 +986,50 @@ def test_orientation_preference_cost_samples_between_vamp_knots() -> None:
     assert metrics.maximum_deviation_rad == pytest.approx(1.5)
     assert metrics.cumulative_rotation_rad > 2.9
     assert metrics.sample_count > 3
+
+
+def test_pregrasp_quality_prefers_cumulative_rotation_before_max_deviation() -> None:
+    direct = _OrientationPathMetrics(0.40, 1.0, 1.20, 10)
+    winding = _OrientationPathMetrics(0.05, 0.9, 1.50, 10)
+    assert _pregrasp_path_quality_key(direct, 1.0, 0) < _pregrasp_path_quality_key(
+        winding, 0.2, 1
+    )
+
+
+def test_cartesian_route_preserves_the_globally_smoother_ik_branch() -> None:
+    request = _request()
+    start = list(request.initial_state.positions_rad)
+    start[0] = 0.5
+    poses = tuple(
+        RigidTransform(
+            request.robot_model.base_frame,
+            request.robot_model.tcp_frame,
+            (
+                (1.0, 0.0, 0.0, float(index)),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        )
+        for index in (1, 2, 3)
+    )
+
+    route = _cartesian_continuation_route(
+        request,
+        _BranchingRouteIK(request.robot_model),
+        _FakeVamp(request.robot_model),
+        poses,
+        tuple(start),
+        {},
+        TrajectoryStage.EGRESS,
+        monotonic(),
+        4,
+    )
+
+    assert tuple(point[0] for point in route) == pytest.approx((0.5, 0.8, 0.9, 1.0))
+    assert max(abs(right[0] - left[0]) for left, right in zip(route, route[1:])) == pytest.approx(
+        0.3
+    )
 
 
 def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> None:
@@ -953,6 +1072,211 @@ def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> No
     assert vamp.direct_midpoints
     assert any(point in selected_loaded_knots for point in vamp.direct_midpoints)
     assert not any(point in selected_loaded_knots for point in vamp.detour_midpoints)
+
+
+def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() -> None:
+    baseline = _request()
+    request = replace(
+        baseline,
+        candidates=(baseline.candidates[0],),
+        placement_goal=replace(
+            baseline.placement_goal,
+            orientation_constraint=PlacementOrientationConstraint.FREE,
+        ),
+        planning_policy=replace(
+            baseline.planning_policy,
+            payload_tcp_max_angular_velocity_rad_s=1000.0,
+            payload_tcp_max_translation_velocity_m_s=1000.0,
+            payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+        vertical_transit_corridor=VerticalTransitCorridor(
+            "test_portal",
+            (0.4, 0.2),
+            0.08,
+            0.4,
+            0.12,
+            0.25,
+            0.45,
+            0.09,
+            0.03,
+        ),
+        budgets=PlanningBudgets(1, 1, 5.0, 20.0),
+    )
+
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    parameterizer = RuckigTimeParameterizer(request.robot_model, backend.ruckig)
+    vamp = _FakeVamp(request.robot_model)
+    result = plan(
+        request,
+        dependencies=replace(
+            _fake_dependencies(),
+            create_vamp=lambda robot_model: vamp,
+            create_ruckig=lambda robot_model: parameterizer,
+        ),
+    )
+
+    assert result.success, result.message
+    assert result.trajectory is not None
+    goal_tcp = compose(
+        result.T_world_object_goal,
+        inverse(request.candidates[0].T_tcp_object),
+    )
+    assert tuple(row[2] for row in goal_tcp.matrix[:3]) == pytest.approx(
+        (0.0, 0.0, -1.0)
+    )
+    grasp_z = request.candidates[0].T_world_tcp.matrix[2][3]
+    portal_by_stage = {}
+    for stage in (TrajectoryStage.PREGRASP, TrajectoryStage.EGRESS):
+        portal_z = [
+            10.0 * knot.positions_rad[2]
+            for knot in result.trajectory.knots
+            if knot.stage is stage
+            and 10.0 * knot.positions_rad[0] == pytest.approx(0.4)
+            and 10.0 * knot.positions_rad[1] == pytest.approx(0.2)
+        ]
+        portal_by_stage[stage] = portal_z
+        assert len(portal_z) >= 2
+        assert max(portal_z) - min(portal_z) >= 0.15
+    assert min(portal_by_stage[TrajectoryStage.PREGRASP]) <= grasp_z + 0.17 + 1e-9
+    assert any(
+        value == pytest.approx(grasp_z + 0.4)
+        for value in portal_by_stage[TrajectoryStage.PREGRASP]
+    )
+    assert any(
+        value == pytest.approx(grasp_z + 0.25)
+        for value in portal_by_stage[TrajectoryStage.EGRESS]
+    )
+    assert any(
+        value == pytest.approx(grasp_z + 0.45)
+        for value in portal_by_stage[TrajectoryStage.EGRESS]
+    )
+    assert portal_by_stage[TrajectoryStage.PREGRASP][0] > portal_by_stage[
+        TrajectoryStage.PREGRASP
+    ][-1]
+    assert portal_by_stage[TrajectoryStage.EGRESS][0] < portal_by_stage[
+        TrajectoryStage.EGRESS
+    ][-1]
+    pregrasp_positions = tuple(
+        knot.positions_rad
+        for knot in result.trajectory.knots
+        if knot.stage is TrajectoryStage.PREGRASP
+    )
+    assert all(
+        max(abs(a - b) for a, b in zip(left, right)) > 1e-10
+        for left, right in zip(pregrasp_positions, pregrasp_positions[1:])
+    )
+    loaded_plan_environments = [
+        environment
+        for environment in vamp.plan_environments
+        if environment.get("attached_geometry")
+    ]
+    unloaded_plan_calls = [
+        call
+        for call in vamp.plan_calls
+        if not call[2].get("attached_geometry")
+    ]
+    # PREGRASP evaluates the branch-preserving route and the explicit forward
+    # Cartesian route to the same portal state.  The final PLACE edge may use
+    # loaded VAMP, but EGRESS does not.
+    assert len(loaded_plan_environments) == 1
+    assert len(unloaded_plan_calls) == 2
+    assert {call[0] == request.initial_state.positions_rad for call in unloaded_plan_calls} == {
+        False,
+        True,
+    }
+    maximum_polynomial_xy_deviation_m = 0.0
+    portal_xy = np.asarray(request.vertical_transit_corridor.portal_world_xy_m)
+    for segment in result.trajectory.segments:
+        if segment.stage not in (TrajectoryStage.PREGRASP, TrajectoryStage.EGRESS):
+            continue
+        endpoints = (
+            segment.sample(0.0),
+            segment.sample(segment.duration_s),
+        )
+        endpoint_xy = tuple(
+            np.asarray(vamp.tcp_pose(item.positions_rad).matrix, dtype=np.float64)[
+                :2, 3
+            ]
+            for item in endpoints
+        )
+        if any(np.linalg.norm(item - portal_xy) > 1e-6 for item in endpoint_xy):
+            continue
+        for index in range(51):
+            local_time_s = (
+                segment.duration_s
+                if index == 50
+                else segment.duration_s * index / 50
+            )
+            sample = segment.sample(local_time_s)
+            sample_xy = np.asarray(
+                vamp.tcp_pose(sample.positions_rad).matrix, dtype=np.float64
+            )[:2, 3]
+            maximum_polynomial_xy_deviation_m = max(
+                maximum_polynomial_xy_deviation_m,
+                float(np.linalg.norm(sample_xy - portal_xy)),
+            )
+    assert (
+        maximum_polynomial_xy_deviation_m
+        <= request.vertical_transit_corridor.egress_waypoint_step_m
+    )
+    transit_egress_attempts = tuple(
+        attempt
+        for attempt in result.attempts
+        if attempt.stage is TrajectoryStage.EGRESS
+        and "vertical transit" in attempt.reason
+    )
+    assert len(transit_egress_attempts) == 1
+    assert transit_egress_attempts[0].error_code is None
+    assert transit_egress_attempts[0].reason == (
+        "EGRESS followed the explicit diagonal vertical transit and Cartesian transfer"
+    )
+
+
+def test_pregrasp_shortcut_keeps_the_farthest_collision_valid_edges() -> None:
+    path = tuple((float(index),) for index in range(5))
+
+    class _ShortcutVamp:
+        @staticmethod
+        def motion_valid(start, goal, environment):
+            del environment
+            return (int(start[0]), int(goal[0])) in {(0, 3), (3, 4)}
+
+    assert _farthest_collision_valid_shortcut(path, _ShortcutVamp(), {}) == (
+        path[0],
+        path[3],
+        path[4],
+    )
+
+
+def test_vamp_backend_returns_a_valid_direct_motion_before_running_rrtc() -> None:
+    model = _request().robot_model
+    start = model.default_joint_positions
+    raw_goal = list(start)
+    raw_goal[0] += 2.0 * np.pi
+    raw_goal[1] += 0.1
+    expected_goal = model.unwrap_positions(tuple(raw_goal), start)
+
+    class _DirectRobot:
+        def __init__(self):
+            self.validated = []
+
+        def validate_motion(self, left, right, environment, check_bounds):
+            self.validated.append((left, right, environment, check_bounds))
+            return True
+
+        def rrtc(self, *args, **kwargs):
+            raise AssertionError("RRTC must not run for a valid direct motion")
+
+    robot = _DirectRobot()
+    backend = object.__new__(VampBackend)
+    backend._model = model
+    backend._robot = robot
+
+    result = backend.plan(start, tuple(raw_goal), object(), seed=19)
+
+    assert result.path == (start, expected_goal)
+    assert result.iterations == 0
+    assert len(robot.validated) == 1
 
 
 def test_orientation_free_route_preserves_vamp_returned_knots_for_ruckig() -> None:
@@ -1196,6 +1520,7 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
     vamp = CONFIG.planning_backends[PROFILE.planning_backend_profile].vamp
     assert vamp.range_rad == 0.5
     assert vamp.dynamic_domain is False
+    assert vamp.simplify_iterations == 4
     assert vamp.robot_sphere_count == 432
     assert tuple(
         (
@@ -1230,6 +1555,7 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         ("right_pad", (0.0, -0.042, 0.0)),
     )
     assert CONFIG.planning_policy.approach_contact_transition_m == 0.01
+    assert CONFIG.planning_policy.pregrasp_joint_path_detour_ratio_limit == 3.0
     assert CONFIG.planning_policy.payload_tcp_max_angular_velocity_rad_s == 0.44
     assert CONFIG.planning_policy.payload_tcp_max_translation_velocity_m_s == 0.20
     assert (
@@ -1548,15 +1874,13 @@ def test_real_ruckig_retimes_payload_motion_and_preserves_trajectory_contract() 
         for phase in result.trajectory.phases
         if phase.stage is TrajectoryStage.PLACE
     )
-    stopped_knots = set(range(grasp_phase.first_knot, grasp_phase.last_knot + 1))
-    stopped_knots.update((0, place_phase.last_knot))
-    for index, knot in enumerate(result.trajectory.knots):
-        if index in stopped_knots:
-            assert knot.velocities_rad_s == pytest.approx(
-                (0.0,) * len(request.robot_model.joint_names)
-            )
-        else:
-            assert any(abs(value) > 0.0 for value in knot.velocities_rad_s)
+    assert grasp_phase.first_knot < grasp_phase.last_knot
+    assert place_phase.first_knot <= place_phase.last_knot
+    assert all(
+        knot.velocities_rad_s
+        == pytest.approx((0.0,) * len(request.robot_model.joint_names))
+        for knot in result.trajectory.knots
+    )
     for left, right in zip(
         result.trajectory.segments,
         result.trajectory.segments[1:],
@@ -1694,13 +2018,11 @@ def test_orientation_free_region_skips_zero_motion_sample_without_timing_leak() 
         place = next(
             phase for phase in trajectory.phases if phase.stage is TrajectoryStage.PLACE
         )
-        assert any(
-            abs(value) > 0.0
-            for value in trajectory.knots[lift.last_knot].velocities_rad_s
+        assert trajectory.knots[lift.last_knot].velocities_rad_s == pytest.approx(
+            (0.0,) * len(request.robot_model.joint_names)
         )
-        assert any(
-            abs(value) > 0.0
-            for value in trajectory.knots[egress.last_knot].velocities_rad_s
+        assert trajectory.knots[egress.last_knot].velocities_rad_s == pytest.approx(
+            (0.0,) * len(request.robot_model.joint_names)
         )
         assert trajectory.knots[place.first_knot].positions_rad != pytest.approx(
             trajectory.knots[place.last_knot].positions_rad

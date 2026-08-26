@@ -44,6 +44,7 @@ from .contracts.planning import (
     TrajectoryPolynomialSection,
     TrajectorySegment,
     TrajectoryStage,
+    VerticalTransitCorridor,
 )
 from .contracts.targeting import (
     GraspCandidate,
@@ -259,10 +260,18 @@ def _request_to_dict(request: Task2Request) -> dict[str, object]:
         "placement_goal": _placement_to_dict(request.placement_goal),
         "random_seed": request.random_seed,
         "end_effector_profile_id": request.end_effector_profile_id,
+        "vertical_transit_corridor": (
+            _vertical_transit_corridor_to_dict(request.vertical_transit_corridor)
+            if request.vertical_transit_corridor is not None
+            else None
+        ),
     }
 
 
 def _request_from_dict(value: dict[str, Any]) -> Task2Request:
+    if "vertical_transit_corridor" not in value:
+        raise ValueError("artifact field 'vertical_transit_corridor' is required")
+    corridor = value["vertical_transit_corridor"]
     result = Task2Request(
         _string(value, "request_id"),
         _string(value, "object_type"),
@@ -275,6 +284,13 @@ def _request_from_dict(value: dict[str, Any]) -> Task2Request:
         _placement_from_dict(_mapping(value, "placement_goal")),
         _integer(value, "random_seed"),
         _optional_string(value.get("end_effector_profile_id")),
+        (
+            _vertical_transit_corridor_from_dict(
+                _as_mapping(corridor, "vertical_transit_corridor")
+            )
+            if corridor is not None
+            else None
+        ),
     )
     result.validate()
     return result
@@ -395,6 +411,39 @@ def _placement_to_dict(value: PlacementGoal) -> dict[str, object]:
         "radius_m": value.radius_m,
         "height_range_m": list(value.height_range_m),
     }
+
+
+def _vertical_transit_corridor_to_dict(
+    value: VerticalTransitCorridor,
+) -> dict[str, object]:
+    return {
+        "corridor_id": value.corridor_id,
+        "portal_world_xy_m": list(value.portal_world_xy_m),
+        "ingress_bottom_offset_m": value.ingress_bottom_offset_m,
+        "ingress_top_offset_m": value.ingress_top_offset_m,
+        "minimum_vertical_lift_m": value.minimum_vertical_lift_m,
+        "egress_transition_offset_m": value.egress_transition_offset_m,
+        "egress_top_offset_m": value.egress_top_offset_m,
+        "ingress_waypoint_step_m": value.ingress_waypoint_step_m,
+        "egress_waypoint_step_m": value.egress_waypoint_step_m,
+    }
+
+
+def _vertical_transit_corridor_from_dict(
+    value: dict[str, Any],
+) -> VerticalTransitCorridor:
+    portal = _list(value, "portal_world_xy_m")
+    return VerticalTransitCorridor(
+        _string(value, "corridor_id"),
+        (float(portal[0]), float(portal[1])),
+        _number(value, "ingress_bottom_offset_m"),
+        _number(value, "ingress_top_offset_m"),
+        _number(value, "minimum_vertical_lift_m"),
+        _number(value, "egress_transition_offset_m"),
+        _number(value, "egress_top_offset_m"),
+        _number(value, "ingress_waypoint_step_m"),
+        _number(value, "egress_waypoint_step_m"),
+    )
 
 
 def _placement_from_dict(value: dict[str, Any]) -> PlacementGoal:

@@ -22,7 +22,7 @@ from .contracts.pipeline import (
     Task2PipelineResult,
     Task2Request,
 )
-from .contracts.planning import PlanningRequest, PlanningResult, RobotState
+from .contracts.planning import PlanningRequest, PlanningResult
 from .contracts.targeting import TargetingRequest, TargetingResult
 from .execution import execute
 from .planning import plan
@@ -477,6 +477,7 @@ class Task2Pipeline:
                 self._config.planning_policy,
                 root.random_seed,
                 self._config.planning_budgets,
+                root.vertical_transit_corridor,
             )
         )
         result.validate()

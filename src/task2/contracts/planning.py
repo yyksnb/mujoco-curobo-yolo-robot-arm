@@ -281,6 +281,48 @@ class PlacementOrientationConstraint(str, Enum):
 
 
 @dataclass(frozen=True)
+class VerticalTransitCorridor:
+    corridor_id: str
+    portal_world_xy_m: tuple[float, float]
+    ingress_bottom_offset_m: float
+    ingress_top_offset_m: float
+    minimum_vertical_lift_m: float
+    egress_transition_offset_m: float
+    egress_top_offset_m: float
+    ingress_waypoint_step_m: float
+    egress_waypoint_step_m: float
+
+    def validate(self) -> None:
+        values = (
+            *self.portal_world_xy_m,
+            self.ingress_bottom_offset_m,
+            self.ingress_top_offset_m,
+            self.minimum_vertical_lift_m,
+            self.egress_transition_offset_m,
+            self.egress_top_offset_m,
+            self.ingress_waypoint_step_m,
+            self.egress_waypoint_step_m,
+        )
+        if not self.corridor_id or not all(isfinite(value) for value in values):
+            raise ValueError("vertical transit corridor must have an ID and finite values")
+        if not 0.0 < self.ingress_bottom_offset_m < self.ingress_top_offset_m:
+            raise ValueError("vertical transit ingress offsets must be positive and ordered")
+        if not (
+            0.0
+            < self.minimum_vertical_lift_m
+            < self.egress_transition_offset_m
+            < self.egress_top_offset_m
+        ):
+            raise ValueError(
+                "vertical transit lift and egress offsets must be positive and ordered"
+            )
+        if self.ingress_waypoint_step_m <= 0.0 or self.egress_waypoint_step_m <= 0.0:
+            raise ValueError(
+                "vertical transit ingress and egress waypoint steps must be positive"
+            )
+
+
+@dataclass(frozen=True)
 class PlacementGoal:
     goal_id: str
     kind: PlacementGoalKind
@@ -373,6 +415,7 @@ class PlanningPolicy:
     lift_distance_m: float
     preplace_offset_m: float
     joint_limit_margin_rad: float
+    pregrasp_joint_path_detour_ratio_limit: float
     payload_tcp_max_angular_velocity_rad_s: float
     payload_tcp_max_translation_velocity_m_s: float
     payload_tcp_max_translation_acceleration_m_s2: float
@@ -394,6 +437,7 @@ class PlanningPolicy:
             self.lift_distance_m,
             self.preplace_offset_m,
             self.joint_limit_margin_rad,
+            self.pregrasp_joint_path_detour_ratio_limit,
             self.payload_tcp_max_angular_velocity_rad_s,
             self.payload_tcp_max_translation_velocity_m_s,
             self.payload_tcp_max_translation_acceleration_m_s2,
@@ -442,6 +486,7 @@ class PlanningRequest:
     planning_policy: PlanningPolicy
     random_seed: int
     budgets: PlanningBudgets
+    vertical_transit_corridor: VerticalTransitCorridor | None = None
 
     def validate(self) -> None:
         if not self.request_id or not self.candidates or not self.target_object_id or not self.source_support_group:
@@ -462,6 +507,15 @@ class PlanningRequest:
         self.end_effector_config.validate()
         self.planning_policy.validate()
         self.budgets.validate()
+        if self.vertical_transit_corridor is not None:
+            self.vertical_transit_corridor.validate()
+            if (
+                self.placement_goal.orientation_constraint
+                is not PlacementOrientationConstraint.FREE
+            ):
+                raise ValueError(
+                    "vertical transit corridor requires free placement orientation"
+                )
         object_ids = {item.object_id for item in self.scene.geometries}
         if self.target_object_id not in object_ids:
             raise ValueError("Planning target object is absent from SceneSnapshot")

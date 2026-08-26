@@ -32,6 +32,7 @@ from task2.contracts import (
     TrajectoryPolynomialSection,
     TrajectorySegment,
     TrajectoryStage,
+    VerticalTransitCorridor,
 )
 from task2.runtime import ActivatedEndEffector
 from task2.targeting import target
@@ -231,6 +232,17 @@ def test_request_artifact_round_trip_preserves_free_placement_orientation(
             baseline.placement_goal,
             orientation_constraint=PlacementOrientationConstraint.FREE,
         ),
+        vertical_transit_corridor=VerticalTransitCorridor(
+            "tank_opening",
+            (0.425, 0.6),
+            0.08,
+            0.62,
+            0.15,
+            0.26,
+            0.59,
+            0.09,
+            0.03,
+        ),
     )
     artifacts = Task2Artifacts(tmp_path, request.request_id)
 
@@ -243,6 +255,30 @@ def test_request_artifact_round_trip_preserves_free_placement_orientation(
     )
     payload = json.loads((artifacts.run_dir / "request.json").read_text())
     assert payload["placement_goal"]["orientation_constraint"] == "free"
+    assert persisted.vertical_transit_corridor == request.vertical_transit_corridor
+    assert payload["vertical_transit_corridor"]["corridor_id"] == "tank_opening"
+    assert payload["vertical_transit_corridor"]["ingress_waypoint_step_m"] == 0.09
+    assert payload["vertical_transit_corridor"]["egress_waypoint_step_m"] == 0.03
+    with pytest.raises(ValueError, match="free placement orientation"):
+        replace(
+            baseline,
+            vertical_transit_corridor=request.vertical_transit_corridor,
+        ).validate()
+
+
+def test_request_artifact_rejects_missing_vertical_transit_corridor_field(
+    tmp_path: Path,
+) -> None:
+    request = _request("missing_vertical_transit_corridor")
+    artifacts = Task2Artifacts(tmp_path, request.request_id)
+    artifacts.write_request(request)
+    path = artifacts.run_dir / "request.json"
+    payload = json.loads(path.read_text())
+    del payload["vertical_transit_corridor"]
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="vertical_transit_corridor"):
+        artifacts.read_request()
 
 
 def test_request_artifact_rejects_missing_placement_orientation(

@@ -111,6 +111,7 @@ class VampConfig:
     dynamic_domain: bool
     max_iterations: int
     max_samples: int
+    simplify_iterations: int
 
     def validate(self) -> None:
         if not self.version or not self.robot_module or self.robot_sphere_count <= 0:
@@ -121,7 +122,11 @@ class VampConfig:
             raise ValueError("VAMP maximum gripper opening must be positive")
         if not isfinite(self.range_rad) or self.range_rad <= 0.0:
             raise ValueError("VAMP range must be positive")
-        if self.max_iterations <= 0 or self.max_samples <= 0:
+        if (
+            self.max_iterations <= 0
+            or self.max_samples <= 0
+            or self.simplify_iterations <= 0
+        ):
             raise ValueError("VAMP search limits must be positive")
         names = [group.group for group in self.collision_sphere_groups]
         if len(names) != len(set(names)):
@@ -251,6 +256,7 @@ def parse_vamp_config(
         _config_boolean(payload, "dynamic_domain", "VAMP"),
         _config_integer(payload, "max_iterations", "VAMP"),
         _config_integer(payload, "max_samples", "VAMP"),
+        _config_integer(payload, "simplify_iterations", "VAMP"),
     )
     result.validate()
     return result
@@ -392,6 +398,22 @@ class VampBackend:
     ) -> VampPlan:
         self._validate_configuration_shape(start)
         self._validate_configuration_shape(goal)
+        aligned_goal = self._model.unwrap_positions(goal, start)
+        started = monotonic()
+        try:
+            direct_valid = self._robot.validate_motion(
+                start, aligned_goal, environment, True
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise BackendOperationError(
+                f"VAMP direct motion validation failed: {exc}"
+            ) from exc
+        if direct_valid:
+            return VampPlan(
+                path=(start, aligned_goal),
+                elapsed_s=monotonic() - started,
+                iterations=0,
+            )
         settings = self._vamp.RRTCSettings()
         settings.max_iterations = self._config.max_iterations
         settings.max_samples = self._config.max_samples
@@ -399,22 +421,16 @@ class VampBackend:
         settings.dynamic_domain = self._config.dynamic_domain
         rng = self._robot.halton()
         rng.skip(seed)
-        started = monotonic()
         try:
-            result = self._robot.rrtc(start, goal, environment, settings, rng)
+            result = self._robot.rrtc(start, aligned_goal, environment, settings, rng)
         except (TypeError, ValueError, RuntimeError) as exc:
             raise BackendOperationError(f"VAMP RRTC failed: {exc}") from exc
         if not result.solved:
             raise BackendOperationError("VAMP RRTC exhausted its configured search budget")
         planning_iterations = int(result.iterations)
         simplify_settings = self._vamp.SimplifySettings()
-        simplify_settings.max_iterations = 1
-        simplify_settings.operations = [
-            self._vamp.SimplifyRoutine.SHORTCUT,
-            self._vamp.SimplifyRoutine.BSPLINE,
-        ]
-        simplify_settings.bspline.max_steps = 3
-        simplify_settings.bspline.min_change = 0.001
+        simplify_settings.max_iterations = self._config.simplify_iterations
+        simplify_settings.operations = [self._vamp.SimplifyRoutine.SHORTCUT]
         try:
             result = self._robot.simplify(
                 result.path, environment, simplify_settings, rng

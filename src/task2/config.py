@@ -100,11 +100,9 @@ class Task2Config:
     planning_objects: tuple[PlanningObjectConfig, ...]
     planning_policy: PlanningPolicy
     planning_backends: dict[str, _PlanningBackendProfile]
-    planning_backend_id: str
     planning_budgets: PlanningBudgets
     continuous_yaw_resolution_rad: float
     maximum_targeting_candidates: int
-    execution_adapter_id: str
     execution_settings: ExecutionSettings
     mujoco_robots: dict[str, MuJoCoRobotConfig]
     mujoco_end_effectors: dict[str, MuJoCoEndEffectorConfig]
@@ -233,7 +231,6 @@ def load_task2_config(path: str | Path) -> Task2Config:
         planning_objects=planning_objects,
         planning_policy=policy,
         planning_backends=backends,
-        planning_backend_id=planning_backend_id,
         planning_budgets=PlanningBudgets(
             _integer(budgets, "maximum_candidates", "pipeline.planning_budgets"),
             _integer(budgets, "seeds_per_candidate", "pipeline.planning_budgets"),
@@ -246,7 +243,6 @@ def load_task2_config(path: str | Path) -> Task2Config:
         maximum_targeting_candidates=_integer(
             targeting, "maximum_candidates", "pipeline.targeting"
         ),
-        execution_adapter_id=execution_adapter_id,
         execution_settings=settings,
         mujoco_robots=robots,
         mujoco_end_effectors=end_effectors,
@@ -482,6 +478,11 @@ def _parse_planning(
         _number(policy_payload, "lift_distance_m", "policy"),
         _number(policy_payload, "preplace_offset_m", "policy"),
         _number(policy_payload, "joint_limit_margin_rad", "policy"),
+        _number(
+            policy_payload,
+            "pregrasp_joint_path_detour_ratio_limit",
+            "policy",
+        ),
         _number(
             policy_payload,
             "payload_tcp_max_angular_velocity_rad_s",

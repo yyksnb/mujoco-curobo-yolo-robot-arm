@@ -9,9 +9,11 @@ from .execution import ExecutionErrorCode
 from .geometry import RigidTransform
 from .planning import (
     PlacementGoal,
+    PlacementOrientationConstraint,
     PlanningErrorCode,
     RobotState,
     SceneSnapshot,
+    VerticalTransitCorridor,
 )
 from .targeting import TargetingErrorCode
 
@@ -43,6 +45,7 @@ class Task2Request:
     placement_goal: PlacementGoal
     random_seed: int
     end_effector_profile_id: str | None = None
+    vertical_transit_corridor: VerticalTransitCorridor | None = None
 
     def validate(self) -> None:
         if not self.request_id or not self.object_type:
@@ -75,6 +78,15 @@ class Task2Request:
             raise ValueError("Task2 target object is absent from SceneSnapshot")
         if self.source_support_group not in groups:
             raise ValueError("Task2 source support is absent from SceneSnapshot")
+        if self.vertical_transit_corridor is not None:
+            self.vertical_transit_corridor.validate()
+            if (
+                self.placement_goal.orientation_constraint
+                is not PlacementOrientationConstraint.FREE
+            ):
+                raise ValueError(
+                    "vertical transit corridor requires free placement orientation"
+                )
 
 
 @dataclass(frozen=True)

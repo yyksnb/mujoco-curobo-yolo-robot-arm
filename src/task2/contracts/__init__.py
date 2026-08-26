@@ -62,6 +62,7 @@ from .planning import (
     TrajectoryPolynomialSection,
     TrajectorySegment,
     TrajectoryStage,
+    VerticalTransitCorridor,
 )
 from .pipeline import (
     PipelineErrorCode,
@@ -132,6 +133,7 @@ __all__ = [
     "TrajectoryPolynomialSection",
     "TrajectorySegment",
     "TrajectoryStage",
+    "VerticalTransitCorridor",
     "PipelineErrorCode",
     "PipelineStatus",
     "Task2PipelineResult",
