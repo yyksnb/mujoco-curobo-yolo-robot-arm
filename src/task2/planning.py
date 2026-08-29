@@ -156,15 +156,14 @@ def plan(
     started = monotonic()
     attempts: list[PlanningAttempt] = []
     try:
-        candidates = request.candidates[: request.budgets.maximum_candidates]
         ordered_candidates = _order_candidates_by_pregrasp_ik_distance(
             request,
-            candidates,
+            request.candidates,
             ik_solver,
             vamp,
             dependencies.pregrasp_ik_solution_count,
         )
-        candidates = ordered_candidates
+        candidates = ordered_candidates[: request.budgets.maximum_candidates]
     except BackendUnavailableError as exc:
         return PlanningResult.failed(
             PlanningErrorCode.BACKEND_UNAVAILABLE,

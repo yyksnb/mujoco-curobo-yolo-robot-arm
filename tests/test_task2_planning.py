@@ -1150,7 +1150,7 @@ def test_plan_screens_equal_priority_candidates_by_nearest_pregrasp_ik() -> None
     request = replace(
         baseline,
         candidates=(far, near),
-        budgets=PlanningBudgets(2, 1, 5.0, 20.0),
+        budgets=PlanningBudgets(1, 1, 5.0, 20.0),
     )
 
     result = plan(request, dependencies=_fake_dependencies())

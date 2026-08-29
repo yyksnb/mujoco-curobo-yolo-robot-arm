@@ -11,7 +11,7 @@ pipeline:
     continuous_yaw_resolution_rad: 0.7853981633974483
     maximum_candidates: 72
   planning_budgets:
-    maximum_candidates: 8
+    maximum_candidates: 16
     search_attempts_per_candidate: 2
     stage_timeout_s: 120.0
     total_timeout_s: 600.0
