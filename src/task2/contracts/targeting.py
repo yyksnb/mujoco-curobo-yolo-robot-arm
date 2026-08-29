@@ -59,6 +59,49 @@ class TargetingDiagnosticsConfig:
 
 
 @dataclass(frozen=True)
+class PortalAdaptiveApproachConfig:
+    contact_axis_step_rad: float
+    tilt_margin_rad: float
+    maximum_tilt_rad: float
+    pregrasp_distance_m: float
+
+    def validate(self) -> None:
+        values = (
+            self.contact_axis_step_rad,
+            self.tilt_margin_rad,
+            self.maximum_tilt_rad,
+            self.pregrasp_distance_m,
+        )
+        if not all(isfinite(value) for value in values):
+            raise ValueError("portal-adaptive approach values must be finite")
+        if self.contact_axis_step_rad <= 0.0:
+            raise ValueError("portal-adaptive contact-axis step must be positive")
+        count = round(pi / self.contact_axis_step_rad)
+        if count <= 0 or abs(count * self.contact_axis_step_rad - pi) > 1e-9:
+            raise ValueError("portal-adaptive contact-axis step must divide pi")
+        if self.tilt_margin_rad < 0.0:
+            raise ValueError("portal-adaptive tilt margin must be non-negative")
+        if not 0.0 < self.maximum_tilt_rad < pi / 2.0:
+            raise ValueError("portal-adaptive maximum tilt must be within (0, pi/2)")
+        if self.pregrasp_distance_m <= 0.0:
+            raise ValueError("portal-adaptive pregrasp distance must be positive")
+
+
+@dataclass(frozen=True)
+class TargetingAccessContext:
+    portal_world_xy_m: tuple[float, float]
+    vertical_span_m: float
+
+    def validate(self) -> None:
+        if len(self.portal_world_xy_m) != 2 or not all(
+            isfinite(value) for value in self.portal_world_xy_m
+        ):
+            raise ValueError("Targeting access portal must contain two finite values")
+        if not isfinite(self.vertical_span_m) or self.vertical_span_m <= 0.0:
+            raise ValueError("Targeting access vertical span must be positive and finite")
+
+
+@dataclass(frozen=True)
 class GraspTemplateConfig:
     template_id: str
     object_type: str
@@ -76,6 +119,7 @@ class GraspTemplateConfig:
     expected_contact_groups: tuple[str, ...]
     template_priority: float
     diagnostics: TargetingDiagnosticsConfig
+    portal_adaptive_approach: PortalAdaptiveApproachConfig | None = None
 
     def validate(self) -> None:
         if not self.template_id or not self.object_type or not self.end_effector_family:
@@ -114,6 +158,12 @@ class GraspTemplateConfig:
         if not isfinite(self.template_priority):
             raise ValueError(f"{self.template_id} template_priority must be finite")
         self.diagnostics.validate()
+        if self.portal_adaptive_approach is not None:
+            if not isinstance(self.yaw_symmetry, ContinuousYawSymmetry):
+                raise ValueError(
+                    f"{self.template_id} portal-adaptive approach requires continuous yaw symmetry"
+                )
+            self.portal_adaptive_approach.validate()
 
 
 @dataclass(frozen=True)
@@ -282,6 +332,7 @@ class TargetingRequest:
     end_effector_config: EndEffectorTargetingConfig
     continuous_yaw_resolution_rad: float
     maximum_candidates: int
+    access_context: TargetingAccessContext | None = None
 
 
 @dataclass(frozen=True)

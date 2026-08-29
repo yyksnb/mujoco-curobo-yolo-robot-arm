@@ -23,7 +23,11 @@ from .contracts.pipeline import (
     Task2Request,
 )
 from .contracts.planning import PlanningRequest, PlanningResult
-from .contracts.targeting import TargetingRequest, TargetingResult
+from .contracts.targeting import (
+    TargetingAccessContext,
+    TargetingRequest,
+    TargetingResult,
+)
 from .execution import execute
 from .planning import plan
 from .runtime import (
@@ -438,6 +442,15 @@ class Task2Pipeline:
                 profile.targeting,
                 self._config.continuous_yaw_resolution_rad,
                 self._config.maximum_targeting_candidates,
+                (
+                    None
+                    if root.vertical_transit_corridor is None
+                    else TargetingAccessContext(
+                        root.vertical_transit_corridor.portal_world_xy_m,
+                        root.vertical_transit_corridor.egress_top_offset_m
+                        - root.vertical_transit_corridor.ingress_bottom_offset_m,
+                    )
+                ),
             )
         )
         artifacts.write_targeting(result)

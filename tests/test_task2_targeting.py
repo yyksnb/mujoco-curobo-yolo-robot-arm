@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from task2.config import load_task2_config
-from task2.contracts import RigidTransform, TargetingErrorCode, TargetingRequest, compose
+from task2.contracts import (
+    RigidTransform,
+    TargetingAccessContext,
+    TargetingErrorCode,
+    TargetingRequest,
+    compose,
+)
 from task2.targeting import target
 
 
@@ -140,6 +146,65 @@ def test_continuous_yaw_is_lower_inclusive_upper_exclusive() -> None:
     assert limited.success and len(limited.candidates) == 3
 
 
+def test_masking_tape_portal_access_generates_outward_tilted_candidates() -> None:
+    request = replace(
+        _request("masking_tape", x_m=0.8),
+        T_world_object=RigidTransform(
+            "world",
+            "object",
+            (
+                (1.0, 0.0, 0.0, 0.8),
+                (0.0, 1.0, 0.0, 0.7),
+                (0.0, 0.0, 1.0, 0.003),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        maximum_candidates=72,
+        access_context=TargetingAccessContext((0.425, 0.6), 0.51),
+    )
+    result = target(request)
+    assert result.success and len(result.candidates) == 72
+    assert len(
+        {
+            candidate.candidate_id.split(".axis_f64_", 1)[1].split(".", 1)[0]
+            for candidate in result.candidates
+        }
+    ) == 12
+    assert len(
+        {
+            candidate.candidate_id.split(".tilt_f64_", 1)[1].split(".", 1)[0]
+            for candidate in result.candidates
+        }
+    ) == 3
+    assert {
+        candidate.candidate_id.rsplit(".sign_", 1)[1]
+        for candidate in result.candidates
+    } == {"m", "p"}
+    assert all(
+        candidate.T_object_tcp.matrix[2][3] == pytest.approx(0.010)
+        for candidate in result.candidates
+    )
+    outward = (0.8 - 0.425, 0.7 - 0.6)
+    for candidate in result.candidates:
+        rotation = candidate.T_world_tcp.matrix
+        closing = tuple(rotation[row][1] for row in range(3))
+        approach = tuple(rotation[row][2] for row in range(3))
+        assert closing[2] == pytest.approx(0.0, abs=1e-9)
+        assert sum(a * b for a, b in zip(closing, approach)) == pytest.approx(
+            0.0, abs=1e-9
+        )
+        assert approach[0] * outward[0] + approach[1] * outward[1] > 0.0
+        assert approach[2] < 0.0
+        grasp = candidate.T_world_tcp.matrix
+        pregrasp = candidate.T_world_pregrasp.matrix
+        distance = sum(
+            (pregrasp[row][3] - grasp[row][3]) ** 2 for row in range(3)
+        ) ** 0.5
+        assert distance == pytest.approx(0.06)
+        assert ".axis_f64_" in candidate.candidate_id
+        assert ".tilt_f64_" in candidate.candidate_id
+
+
 def test_targeting_failure_codes_are_stable() -> None:
     request = _request("marker")
     unknown = target(replace(request, object_type="unknown_part"))
@@ -188,4 +253,5 @@ def test_targeting_module_stays_within_its_boundary() -> None:
         "end_effector_config",
         "continuous_yaw_resolution_rad",
         "maximum_candidates",
+        "access_context",
     }

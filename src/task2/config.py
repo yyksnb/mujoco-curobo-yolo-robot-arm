@@ -36,6 +36,7 @@ from .contracts.targeting import (
     EndEffectorTargetingConfig,
     GraspTemplateConfig,
     ParallelGripperCapabilities,
+    PortalAdaptiveApproachConfig,
     TargetingDiagnosticsConfig,
     TargetingObjectConfig,
 )
@@ -416,6 +417,34 @@ def _parse_template(value: object, object_type: str, index: int) -> GraspTemplat
     else:
         raise ValueError(f"{path}.yaw_symmetry.kind is unsupported")
     diagnostics = _mapping(item, "diagnostics", path)
+    adaptive_payload = item.get("portal_adaptive_approach")
+    adaptive = None
+    if adaptive_payload is not None:
+        adaptive_item = _as_mapping(
+            adaptive_payload, f"{path}.portal_adaptive_approach"
+        )
+        adaptive = PortalAdaptiveApproachConfig(
+            _number(
+                adaptive_item,
+                "contact_axis_step_rad",
+                f"{path}.portal_adaptive_approach",
+            ),
+            _number(
+                adaptive_item,
+                "tilt_margin_rad",
+                f"{path}.portal_adaptive_approach",
+            ),
+            _number(
+                adaptive_item,
+                "maximum_tilt_rad",
+                f"{path}.portal_adaptive_approach",
+            ),
+            _number(
+                adaptive_item,
+                "pregrasp_distance_m",
+                f"{path}.portal_adaptive_approach",
+            ),
+        )
     return GraspTemplateConfig(
         _string(item, "template_id", path),
         object_type,
@@ -437,6 +466,7 @@ def _parse_template(value: object, object_type: str, index: int) -> GraspTemplat
             _number(diagnostics, "opening_margin_m", f"{path}.diagnostics"),
             _number(diagnostics, "force_margin_n", f"{path}.diagnostics"),
         ),
+        adaptive,
     )
 
 
