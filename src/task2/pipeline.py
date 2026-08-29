@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from pathlib import Path
 from typing import Callable
@@ -43,9 +43,14 @@ PlanningStage = Callable[[PlanningRequest], PlanningResult]
 ExecutionStage = Callable[[ExecutionRequest], ExecutionResult]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _ConfiguredPlanner:
     config: Task2Config
+    _dependencies_by_profile: dict[str, tuple[object, object, object, object]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def __call__(self, request: PlanningRequest) -> PlanningResult:
         profile_ids = {item.end_effector_profile_id for item in request.candidates}
@@ -58,7 +63,30 @@ class _ConfiguredPlanner:
         )
         if profile is None:
             raise ValueError(f"Planning profile {profile_id!r} is not configured")
-        return plan(request, dependencies=self.config.planning_dependencies(profile))
+        cached = self._dependencies_by_profile.get(profile_id)
+        if cached is None:
+            base = self.config.planning_dependencies(profile)
+            vamp = base.create_vamp(request.robot_model)
+            ik_solver = base.create_ik(request.robot_model)
+            ruckig = base.create_ruckig(request.robot_model)
+            cached = (request.robot_model, vamp, ik_solver, ruckig)
+            self._dependencies_by_profile[profile_id] = cached
+        robot_model, vamp, ik_solver, ruckig = cached
+        if robot_model != request.robot_model:
+            raise ValueError("cached Planning backend RobotModel does not match request")
+        vamp.begin_request()
+        base = self.config.planning_dependencies(profile)
+        dependencies = type(base)(
+            create_vamp=lambda _robot_model: vamp,
+            create_ik=lambda _robot_model: ik_solver,
+            create_ruckig=lambda _robot_model: ruckig,
+            ik_solution_count=base.ik_solution_count,
+            pregrasp_ik_solution_count=base.pregrasp_ik_solution_count,
+            placement_sample_count=base.placement_sample_count,
+            vamp_sample_offset_start=base.vamp_sample_offset_start,
+            vamp_sample_offset_stride=base.vamp_sample_offset_stride,
+        )
+        return plan(request, dependencies=dependencies)
 
 
 class Task2Pipeline:
@@ -488,7 +516,6 @@ class Task2Pipeline:
                 self._config.planning_object(root.object_type),
                 profile.planning,
                 self._config.planning_policy,
-                root.random_seed,
                 self._config.planning_budgets,
                 root.vertical_transit_corridor,
             )

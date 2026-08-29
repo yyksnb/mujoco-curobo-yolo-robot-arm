@@ -40,28 +40,12 @@ objects:
             opening_margin_m: 0.008000
             force_margin_n: 0.450000
     planning:
+      approach_motion_strategy: continuous_cartesian
+      payload_motion_strategy: continuous_cartesian
       attached_geometry:
-        - geometry_id: marker_body_0
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_0, translation_m: [-0.060, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
-        - geometry_id: marker_body_1
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_1, translation_m: [-0.040, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
-        - geometry_id: marker_body_2
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_2, translation_m: [-0.020, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
-        - geometry_id: marker_body_3
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_3, translation_m: [0.0, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
-        - geometry_id: marker_body_4
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_4, translation_m: [0.020, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
-        - geometry_id: marker_body_5
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_5, translation_m: [0.040, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
-        - geometry_id: marker_body_6
-          T_object_geometry: {parent_frame: object, child_frame: marker_body_6, translation_m: [0.060, 0.0, 0.008], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.012}
+        - geometry_id: marker_body_capsule
+          T_object_geometry: {parent_frame: object, child_frame: marker_body_capsule, translation_m: [-0.000085271, 0.0, 0.008015441], quaternion_wxyz: [0.707106781, 0.0, 0.707106781, 0.0]}
+          capsule: {radius_m: 0.009, length_m: 0.122}
   masking_tape:
     targeting:
       templates:
@@ -111,10 +95,58 @@ objects:
             opening_margin_m: 0.006000
             force_margin_n: 1.250000
     planning:
+      approach_motion_strategy: staged_portal
+      payload_motion_strategy: staged_portal
+      approach_contact_transition_m: 0.030
       attached_geometry:
-        - geometry_id: masking_tape_body
-          T_object_geometry: {parent_frame: object, child_frame: masking_tape_body, translation_m: [0.0, 0.0, 0.010], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}
-          sphere: {radius_m: 0.040}
+        - geometry_id: masking_tape_ring_00
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_00, translation_m: [0.028976000, 0.000000000, 0.010000000], quaternion_wxyz: [1.000000000, 0.0, 0.0, 0.000000000]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_01
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_01, translation_m: [0.026770333, 0.011088635, 0.010000000], quaternion_wxyz: [0.980785280, 0.0, 0.0, 0.195090322]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_02
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_02, translation_m: [0.020489126, 0.020489126, 0.010000000], quaternion_wxyz: [0.923879533, 0.0, 0.0, 0.382683432]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_03
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_03, translation_m: [0.011088635, 0.026770333, 0.010000000], quaternion_wxyz: [0.831469612, 0.0, 0.0, 0.555570233]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_04
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_04, translation_m: [0.000000000, 0.028976000, 0.010000000], quaternion_wxyz: [0.707106781, 0.0, 0.0, 0.707106781]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_05
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_05, translation_m: [-0.011088635, 0.026770333, 0.010000000], quaternion_wxyz: [0.555570233, 0.0, 0.0, 0.831469612]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_06
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_06, translation_m: [-0.020489126, 0.020489126, 0.010000000], quaternion_wxyz: [0.382683432, 0.0, 0.0, 0.923879533]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_07
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_07, translation_m: [-0.026770333, 0.011088635, 0.010000000], quaternion_wxyz: [0.195090322, 0.0, 0.0, 0.980785280]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_08
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_08, translation_m: [-0.028976000, 0.000000000, 0.010000000], quaternion_wxyz: [0.000000000, 0.0, 0.0, 1.000000000]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_09
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_09, translation_m: [-0.026770333, -0.011088635, 0.010000000], quaternion_wxyz: [-0.195090322, 0.0, 0.0, 0.980785280]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_10
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_10, translation_m: [-0.020489126, -0.020489126, 0.010000000], quaternion_wxyz: [-0.382683432, 0.0, 0.0, 0.923879533]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_11
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_11, translation_m: [-0.011088635, -0.026770333, 0.010000000], quaternion_wxyz: [-0.555570233, 0.0, 0.0, 0.831469612]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_12
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_12, translation_m: [0.000000000, -0.028976000, 0.010000000], quaternion_wxyz: [-0.707106781, 0.0, 0.0, 0.707106781]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_13
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_13, translation_m: [0.011088635, -0.026770333, 0.010000000], quaternion_wxyz: [-0.831469612, 0.0, 0.0, 0.555570233]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_14
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_14, translation_m: [0.020489126, -0.020489126, 0.010000000], quaternion_wxyz: [-0.923879533, 0.0, 0.0, 0.382683432]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
+        - geometry_id: masking_tape_ring_15
+          T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_15, translation_m: [0.026770333, -0.011088635, 0.010000000], quaternion_wxyz: [-0.980785280, 0.0, 0.0, 0.195090322]}
+          box: {size_m: [0.018052000, 0.014830000, 0.020002000]}
   rivet_gun:
     targeting:
       templates:
@@ -193,6 +225,8 @@ objects:
             opening_margin_m: 0.052053
             force_margin_n: 108.000000
     planning:
+      approach_motion_strategy: continuous_cartesian
+      payload_motion_strategy: continuous_cartesian
       attached_geometry:
         - geometry_id: rivet_gun_proxy_00
           T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_00, translation_m: [0.046962383, -0.015460274, 0.013999021], quaternion_wxyz: [0.667637079, -0.232939327, 0.667637079, 0.232939327]}
@@ -320,6 +354,8 @@ objects:
             opening_margin_m: 0.008000
             force_margin_n: 3.900000
     planning:
+      approach_motion_strategy: continuous_cartesian
+      payload_motion_strategy: continuous_cartesian
       attached_geometry:
         - geometry_id: standard_part_body
           T_object_geometry: {parent_frame: object, child_frame: standard_part_body, translation_m: [0.0, 0.0, 0.002695], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}

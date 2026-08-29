@@ -373,10 +373,18 @@ class AttachedGeometry:
         self.geometry.validate()
 
 
+class LocalMotionStrategy(str, Enum):
+    CONTINUOUS_CARTESIAN = "continuous_cartesian"
+    STAGED_PORTAL = "staged_portal"
+
+
 @dataclass(frozen=True)
 class PlanningObjectConfig:
     object_type: str
     attached_geometry: tuple[AttachedGeometry, ...]
+    approach_motion_strategy: LocalMotionStrategy
+    payload_motion_strategy: LocalMotionStrategy
+    approach_contact_transition_m: float | None = None
 
     def validate(self) -> None:
         if not self.object_type or not self.attached_geometry:
@@ -386,6 +394,13 @@ class PlanningObjectConfig:
             raise ValueError("attached geometry IDs must be unique")
         for item in self.attached_geometry:
             item.validate()
+        if self.approach_contact_transition_m is not None and (
+            not isfinite(self.approach_contact_transition_m)
+            or self.approach_contact_transition_m <= 0.0
+        ):
+            raise ValueError(
+                "object approach contact transition must be finite and positive"
+            )
 
 
 @dataclass(frozen=True)
@@ -457,13 +472,13 @@ class PlanningPolicy:
 @dataclass(frozen=True)
 class PlanningBudgets:
     maximum_candidates: int
-    seeds_per_candidate: int
+    search_attempts_per_candidate: int
     stage_timeout_s: float
     total_timeout_s: float
 
     def validate(self) -> None:
-        if self.maximum_candidates <= 0 or self.seeds_per_candidate <= 0:
-            raise ValueError("Planning candidate and seed budgets must be positive")
+        if self.maximum_candidates <= 0 or self.search_attempts_per_candidate <= 0:
+            raise ValueError("Planning candidate and search-attempt budgets must be positive")
         if not all(isfinite(value) and value > 0.0 for value in (self.stage_timeout_s, self.total_timeout_s)):
             raise ValueError("Planning time budgets must be finite and positive")
         if self.stage_timeout_s > self.total_timeout_s:
@@ -484,15 +499,12 @@ class PlanningRequest:
     object_config: PlanningObjectConfig
     end_effector_config: PlanningEndEffectorConfig
     planning_policy: PlanningPolicy
-    random_seed: int
     budgets: PlanningBudgets
     vertical_transit_corridor: VerticalTransitCorridor | None = None
 
     def validate(self) -> None:
         if not self.request_id or not self.candidates or not self.target_object_id or not self.source_support_group:
             raise ValueError("Planning request IDs, candidates, and source support must be explicit")
-        if self.random_seed < 0:
-            raise ValueError("Planning random seed must be non-negative")
         self.robot_model.validate()
         self.initial_state.validate(self.robot_model)
         self.scene.validate()
@@ -552,7 +564,7 @@ class PlanningRequest:
 @dataclass(frozen=True)
 class PlanningAttempt:
     candidate_id: str
-    seed: int
+    sample_offset: int
     stage: TrajectoryStage
     elapsed_s: float
     error_code: PlanningErrorCode | None
@@ -561,7 +573,7 @@ class PlanningAttempt:
     def to_dict(self) -> dict[str, object]:
         return {
             "candidate_id": self.candidate_id,
-            "seed": self.seed,
+            "sample_offset": self.sample_offset,
             "stage": self.stage.value,
             "elapsed_s": self.elapsed_s,
             "error_code": self.error_code.value if self.error_code is not None else None,

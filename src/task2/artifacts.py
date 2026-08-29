@@ -258,7 +258,6 @@ def _request_to_dict(request: Task2Request) -> dict[str, object]:
         "target_object_id": request.target_object_id,
         "source_support_group": request.source_support_group,
         "placement_goal": _placement_to_dict(request.placement_goal),
-        "random_seed": request.random_seed,
         "end_effector_profile_id": request.end_effector_profile_id,
         "vertical_transit_corridor": (
             _vertical_transit_corridor_to_dict(request.vertical_transit_corridor)
@@ -269,6 +268,11 @@ def _request_to_dict(request: Task2Request) -> dict[str, object]:
 
 
 def _request_from_dict(value: dict[str, Any]) -> Task2Request:
+    if "random_seed" in value:
+        raise ValueError(
+            "artifact field 'random_seed' is not part of Task2Request; "
+            "deterministic search belongs to planning configuration"
+        )
     if "vertical_transit_corridor" not in value:
         raise ValueError("artifact field 'vertical_transit_corridor' is required")
     corridor = value["vertical_transit_corridor"]
@@ -282,7 +286,6 @@ def _request_from_dict(value: dict[str, Any]) -> Task2Request:
         _string(value, "target_object_id"),
         _string(value, "source_support_group"),
         _placement_from_dict(_mapping(value, "placement_goal")),
-        _integer(value, "random_seed"),
         _optional_string(value.get("end_effector_profile_id")),
         (
             _vertical_transit_corridor_from_dict(
@@ -516,7 +519,7 @@ def _planning_from_dict(value: dict[str, Any]) -> PlanningResult:
     attempts = tuple(
         PlanningAttempt(
             _string(item, "candidate_id"),
-            _integer(item, "seed"),
+            _integer(item, "sample_offset"),
             TrajectoryStage(_string(item, "stage")),
             _number(item, "elapsed_s"),
             PlanningErrorCode(code) if (code := item.get("error_code")) is not None else None,

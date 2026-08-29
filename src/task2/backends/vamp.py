@@ -33,6 +33,16 @@ class VampPlan:
     path: tuple[tuple[float, ...], ...]
     elapsed_s: float
     iterations: int
+    selected_goal_index: int = 0
+
+
+@dataclass(frozen=True)
+class _PreparedPolyhedron:
+    vertices: np.ndarray
+    face_normals: np.ndarray
+    edge_directions: np.ndarray
+    minimum: np.ndarray
+    maximum: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -107,6 +117,8 @@ class VampConfig:
     collision_sphere_groups: tuple[CollisionSphereGroup, ...]
     collision_sphere_calibrations: tuple[CollisionSphereCalibration, ...]
     source_support_contact_hulls: tuple[SourceSupportContactHull, ...]
+    sample_offset_start: int
+    sample_offset_stride: int
     range_rad: float
     dynamic_domain: bool
     max_iterations: int
@@ -122,6 +134,10 @@ class VampConfig:
             raise ValueError("VAMP maximum gripper opening must be positive")
         if not isfinite(self.range_rad) or self.range_rad <= 0.0:
             raise ValueError("VAMP range must be positive")
+        if self.sample_offset_start < 0 or self.sample_offset_stride < self.max_samples:
+            raise ValueError(
+                "VAMP sample offsets must be non-negative and use non-overlapping ranges"
+            )
         if (
             self.max_iterations <= 0
             or self.max_samples <= 0
@@ -252,6 +268,8 @@ def parse_vamp_config(
         tuple(groups),
         tuple(calibrations),
         tuple(hulls),
+        _config_integer(payload, "sample_offset_start", "VAMP"),
+        _config_integer(payload, "sample_offset_stride", "VAMP"),
         _config_number(payload, "range_rad", "VAMP"),
         _config_boolean(payload, "dynamic_domain", "VAMP"),
         _config_integer(payload, "max_iterations", "VAMP"),
@@ -348,7 +366,50 @@ class VampBackend:
         self._config = config
         self._pointcloud_trees: dict[int, cKDTree] = {}
         self._convex_mesh_data: dict[int, tuple[np.ndarray, ...]] = {}
+        self._semantic_polyhedra: dict[tuple[int, bytes], _PreparedPolyhedron] = {}
+        self._environment_cache: dict[tuple[object, ...], object] = {}
+        self._semantic_geometry_cache: dict[
+            tuple[tuple[int, ...], bytes], tuple[SceneGeometry, ...]
+        ] = {}
+        self._target_contact_cache: dict[
+            tuple[tuple[float, ...], tuple[int, ...], float, bytes],
+            frozenset[str],
+        ] = {}
+        self._support_contact_cache: dict[
+            tuple[tuple[float, ...], tuple[int, ...], float, bytes, bool],
+            frozenset[str],
+        ] = {}
+        self._attachment_contact_cache: dict[
+            tuple[
+                tuple[float, ...],
+                bytes,
+                tuple[int, ...],
+                tuple[int, ...],
+                bytes,
+            ],
+            frozenset[str],
+        ] = {}
+        groups_by_sphere: list[CollisionSphereGroup | None] = [
+            None
+        ] * config.robot_sphere_count
+        for group in config.collision_sphere_groups:
+            for index in range(
+                group.first_sphere, group.first_sphere + group.sphere_count
+            ):
+                groups_by_sphere[index] = group
+        self._collision_group_by_sphere = tuple(groups_by_sphere)
         self.version = installed
+
+    def begin_request(self) -> None:
+        """Drop request-owned geometry caches while retaining native robot setup."""
+        self._pointcloud_trees.clear()
+        self._convex_mesh_data.clear()
+        self._semantic_polyhedra.clear()
+        self._environment_cache.clear()
+        self._semantic_geometry_cache.clear()
+        self._target_contact_cache.clear()
+        self._support_contact_cache.clear()
+        self._attachment_contact_cache.clear()
 
     def environment(
         self,
@@ -362,6 +423,21 @@ class VampBackend:
     ):
         excluded_objects = set(excluded_object_ids)
         excluded_collision_groups = set(excluded_groups)
+        cache_key = (
+            tuple(id(item) for item in scene.geometries),
+            np.asarray(T_world_base.matrix, dtype=np.float64).tobytes(),
+            tuple(sorted(excluded_objects)),
+            tuple(sorted(excluded_collision_groups)),
+            (
+                None
+                if T_tcp_object is None
+                else np.asarray(T_tcp_object.matrix, dtype=np.float64).tobytes()
+            ),
+            tuple(id(item) for item in attached_geometry),
+        )
+        cached = self._environment_cache.get(cache_key)
+        if cached is not None:
+            return cached
         environment = self._vamp.Environment()
         for item in scene.geometries:
             if item.object_id in excluded_objects or item.collision_group in excluded_collision_groups:
@@ -386,6 +462,7 @@ class VampBackend:
                 for center, radius in _attached_sphere_specs(item):
                     attachment.add_sphere(self._vamp.Sphere(center.tolist(), radius))
             environment.attach(attachment)
+        self._environment_cache[cache_key] = environment
         return environment
 
     def plan(
@@ -394,25 +471,62 @@ class VampBackend:
         goal: tuple[float, ...],
         environment,
         *,
-        seed: int,
+        sample_offset: int,
+    ) -> VampPlan:
+        return self.plan_to_any(
+            start,
+            (goal,),
+            environment,
+            sample_offset=sample_offset,
+        )
+
+    def plan_to_any(
+        self,
+        start: tuple[float, ...],
+        goals: tuple[tuple[float, ...], ...],
+        environment,
+        *,
+        sample_offset: int,
     ) -> VampPlan:
         self._validate_configuration_shape(start)
-        self._validate_configuration_shape(goal)
-        aligned_goal = self._model.unwrap_positions(goal, start)
+        if not goals:
+            raise BackendOperationError("VAMP multi-goal planning requires at least one goal")
+        for goal in goals:
+            self._validate_configuration_shape(goal)
+        aligned_goals = tuple(
+            self._model.unwrap_positions(goal, start) for goal in goals
+        )
         started = monotonic()
-        try:
-            direct_valid = self._robot.validate_motion(
-                start, aligned_goal, environment, True
-            )
-        except (TypeError, ValueError, RuntimeError) as exc:
-            raise BackendOperationError(
-                f"VAMP direct motion validation failed: {exc}"
-            ) from exc
-        if direct_valid:
+        direct_goals = []
+        for index, aligned_goal in enumerate(aligned_goals):
+            try:
+                direct_valid = self._robot.validate_motion(
+                    start, aligned_goal, environment, True
+                )
+            except (TypeError, ValueError, RuntimeError) as exc:
+                raise BackendOperationError(
+                    f"VAMP direct motion validation failed: {exc}"
+                ) from exc
+            if direct_valid:
+                direct_goals.append(
+                    (
+                        float(
+                            np.linalg.norm(
+                                np.asarray(aligned_goal, dtype=np.float64)
+                                - np.asarray(start, dtype=np.float64)
+                            )
+                        ),
+                        index,
+                        aligned_goal,
+                    )
+                )
+        if direct_goals:
+            _, selected_index, selected_goal = min(direct_goals)
             return VampPlan(
-                path=(start, aligned_goal),
+                path=(start, selected_goal),
                 elapsed_s=monotonic() - started,
                 iterations=0,
+                selected_goal_index=selected_index,
             )
         settings = self._vamp.RRTCSettings()
         settings.max_iterations = self._config.max_iterations
@@ -420,9 +534,15 @@ class VampBackend:
         settings.range = self._config.range_rad
         settings.dynamic_domain = self._config.dynamic_domain
         rng = self._robot.halton()
-        rng.skip(seed)
+        rng.skip(sample_offset)
         try:
-            result = self._robot.rrtc(start, aligned_goal, environment, settings, rng)
+            result = self._robot.rrtc(
+                start,
+                aligned_goals,
+                environment,
+                settings,
+                rng,
+            )
         except (TypeError, ValueError, RuntimeError) as exc:
             raise BackendOperationError(f"VAMP RRTC failed: {exc}") from exc
         if not result.solved:
@@ -453,7 +573,29 @@ class VampBackend:
         path = tuple(path)
         if not path:
             raise BackendOperationError("VAMP returned an empty path")
-        return VampPlan(path=path, elapsed_s=elapsed, iterations=planning_iterations)
+        endpoint = path[-1]
+        goal_errors = tuple(
+            max(
+                abs(value - reference)
+                for value, reference in zip(
+                    self._model.unwrap_positions(goal, endpoint), endpoint
+                )
+            )
+            for goal in aligned_goals
+        )
+        selected_goal_index = min(
+            range(len(goal_errors)), key=lambda index: (goal_errors[index], index)
+        )
+        if goal_errors[selected_goal_index] > 1e-4:
+            raise BackendOperationError(
+                "VAMP multi-goal path endpoint missed every requested goal"
+            )
+        return VampPlan(
+            path=path,
+            elapsed_s=elapsed,
+            iterations=planning_iterations,
+            selected_goal_index=selected_goal_index,
+        )
 
     def configuration_valid(self, configuration: tuple[float, ...], environment) -> bool:
         self._validate_configuration_shape(configuration)
@@ -487,23 +629,55 @@ class VampBackend:
         return tuple(self._robot.fk(configuration))
 
     def tcp_pose(self, configuration: tuple[float, ...]) -> RigidTransform:
+        raw = self._tcp_matrix(configuration)
+        result = RigidTransform(
+            self._model.base_frame,
+            self._model.tcp_frame,
+            tuple(tuple(float(value) for value in row) for row in raw),  # type: ignore[arg-type]
+        )
+        result.validate(label="VAMP TCP pose")
+        return result
+
+    def _tcp_matrix(self, configuration: tuple[float, ...]) -> np.ndarray:
         self._validate_configuration_shape(configuration)
         raw = np.asarray(self._robot.eefk(configuration), dtype=np.float64)
         if raw.shape == (4, 4):
-            matrix = tuple(tuple(float(value) for value in row) for row in raw)
+            return raw
         elif raw.shape == (7,):
             x, y, z, qx, qy, qz, qw = raw
             rotation = Rotation.from_quat((qx, qy, qz, qw)).as_matrix()
-            matrix = tuple(
-                tuple(float(rotation[row, column]) for column in range(3))
-                + ((x, y, z)[row],)
-                for row in range(3)
-            ) + ((0.0, 0.0, 0.0, 1.0),)
+            matrix = np.eye(4, dtype=np.float64)
+            matrix[:3, :3] = rotation
+            matrix[:3, 3] = (x, y, z)
+            return matrix
         else:
             raise BackendOperationError(f"VAMP returned unexpected TCP pose shape {raw.shape}")
-        result = RigidTransform(self._model.base_frame, self._model.tcp_frame, matrix)  # type: ignore[arg-type]
-        result.validate(label="VAMP TCP pose")
-        return result
+
+    def _geometries_in_base(
+        self,
+        geometries: tuple[SceneGeometry, ...],
+        T_world_base: RigidTransform,
+    ) -> tuple[SceneGeometry, ...]:
+        key = (
+            tuple(id(item) for item in geometries),
+            np.asarray(T_world_base.matrix, dtype=np.float64).tobytes(),
+        )
+        cached = self._semantic_geometry_cache.get(key)
+        if cached is not None:
+            return cached
+        T_base_world = inverse(T_world_base)
+        transformed = tuple(
+            SceneGeometry(
+                item.geometry_id,
+                item.object_id,
+                item.collision_group,
+                compose(T_base_world, item.T_world_geometry),
+                item.geometry,
+            )
+            for item in geometries
+        )
+        self._semantic_geometry_cache[key] = transformed
+        return transformed
 
     def semantic_target_contacts(
         self,
@@ -512,16 +686,19 @@ class VampBackend:
         opening_m: float,
         T_world_base: RigidTransform,
     ) -> frozenset[str]:
+        cache_key = (
+            configuration,
+            tuple(id(item) for item in target_geometries),
+            opening_m,
+            np.asarray(T_world_base.matrix, dtype=np.float64).tobytes(),
+        )
+        cached = self._target_contact_cache.get(cache_key)
+        if cached is not None:
+            return cached
         contacts = set()
-        geometries_in_base = tuple(
-            SceneGeometry(
-                item.geometry_id,
-                item.object_id,
-                item.collision_group,
-                compose(inverse(T_world_base), item.T_world_geometry),
-                item.geometry,
-            )
-            for item in target_geometries
+        geometries_in_base = self._geometries_in_base(
+            target_geometries,
+            T_world_base,
         )
         adjusted_spheres = self._semantic_robot_spheres(configuration, opening_m)
         sphere_centers, sphere_radii = _sphere_arrays(adjusted_spheres)
@@ -549,7 +726,9 @@ class VampBackend:
             for adjusted, group_name in adjusted_spheres:
                 if _sphere_intersects_geometry(adjusted, geometry):
                     contacts.add(group_name)
-        return frozenset(contacts)
+        result = frozenset(contacts)
+        self._target_contact_cache[cache_key] = result
+        return result
 
     def semantic_source_support_contacts(
         self,
@@ -560,6 +739,16 @@ class VampBackend:
         *,
         use_physical_pad_hulls: bool,
     ) -> frozenset[str]:
+        cache_key = (
+            configuration,
+            tuple(id(item) for item in support_geometries),
+            opening_m,
+            np.asarray(T_world_base.matrix, dtype=np.float64).tobytes(),
+            use_physical_pad_hulls,
+        )
+        cached = self._support_contact_cache.get(cache_key)
+        if cached is not None:
+            return cached
         sphere_contacts = self.semantic_target_contacts(
             configuration,
             support_geometries,
@@ -568,23 +757,17 @@ class VampBackend:
         )
         contacts = set(sphere_contacts)
         if not use_physical_pad_hulls or not self._config.source_support_contact_hulls:
-            return frozenset(contacts)
+            result = frozenset(contacts)
+            self._support_contact_cache[cache_key] = result
+            return result
         if not 0.0 <= opening_m <= self._config.maximum_gripper_opening_m:
             raise BackendOperationError("gripper opening is outside RobotModel limits")
 
-        geometries_in_base = tuple(
-            SceneGeometry(
-                item.geometry_id,
-                item.object_id,
-                item.collision_group,
-                compose(inverse(T_world_base), item.T_world_geometry),
-                item.geometry,
-            )
-            for item in support_geometries
+        geometries_in_base = self._geometries_in_base(
+            support_geometries,
+            T_world_base,
         )
-        tcp_matrix = np.asarray(
-            self.tcp_pose(configuration).matrix, dtype=np.float64
-        )
+        tcp_matrix = self._tcp_matrix(configuration)
         closed_fraction = 1.0 - opening_m / self._config.maximum_gripper_opening_m
         for hull in self._config.source_support_contact_hulls:
             contacts.discard(hull.group)
@@ -615,7 +798,9 @@ class VampBackend:
             else:
                 if unsupported_geometry and hull.group in sphere_contacts:
                     contacts.add(hull.group)
-        return frozenset(contacts)
+        result = frozenset(contacts)
+        self._support_contact_cache[cache_key] = result
+        return result
 
     def semantic_robot_sphere_centers(
         self,
@@ -648,42 +833,103 @@ class VampBackend:
         scene_geometries: tuple[SceneGeometry, ...],
         T_world_base: RigidTransform,
     ) -> frozenset[str]:
-        attached_spheres = self._attachment_spheres(
-            configuration, T_tcp_object, attached_geometry
+        cache_key = (
+            configuration,
+            np.asarray(T_tcp_object.matrix, dtype=np.float64).tobytes(),
+            tuple(id(item) for item in attached_geometry),
+            tuple(id(item) for item in scene_geometries),
+            np.asarray(T_world_base.matrix, dtype=np.float64).tobytes(),
         )
-        geometries_in_base = tuple(
-            SceneGeometry(
-                item.geometry_id,
-                item.object_id,
-                item.collision_group,
-                compose(inverse(T_world_base), item.T_world_geometry),
-                item.geometry,
-            )
-            for item in scene_geometries
+        cached = self._attachment_contact_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        tcp_matrix = self._tcp_matrix(configuration)
+        object_matrix = tcp_matrix @ np.asarray(T_tcp_object.matrix, dtype=np.float64)
+        geometries_in_base = self._geometries_in_base(
+            scene_geometries,
+            T_world_base,
         )
-        contacts = set()
-        named_spheres = [(sphere, "attached_object") for sphere in attached_spheres]
+        environment_polyhedra = []
         for geometry in geometries_in_base:
-            if isinstance(geometry.geometry, PointCloud):
-                if _pointcloud_contact_groups(
-                    named_spheres, geometry, self._pointcloud_tree(geometry)
-                ):
-                    contacts.add(geometry.collision_group)
+            transform_key = np.asarray(
+                geometry.T_world_geometry.matrix, dtype=np.float64
+            ).tobytes()
+            polyhedron_key = (id(geometry.geometry), transform_key)
+            environment_polyhedron = self._semantic_polyhedra.get(polyhedron_key)
+            if environment_polyhedron is None:
+                environment_polyhedron = _prepared_convex_polyhedron(geometry)
+                if environment_polyhedron is not None:
+                    self._semantic_polyhedra[polyhedron_key] = environment_polyhedron
+            environment_polyhedra.append((geometry, environment_polyhedron))
+        contacts = set()
+        for attached in attached_geometry:
+            attached_matrix = object_matrix @ np.asarray(
+                attached.T_object_geometry.matrix, dtype=np.float64
+            )
+            attached_in_base = SceneGeometry(
+                attached.geometry_id,
+                "attached_object",
+                "attached_object",
+                RigidTransform(
+                    self._model.base_frame,
+                    attached.geometry_id,
+                    tuple(tuple(float(value) for value in row) for row in attached_matrix),  # type: ignore[arg-type]
+                ),
+                attached.geometry,
+            )
+            attached_polyhedron = _prepared_convex_polyhedron(attached_in_base)
+            if attached_polyhedron is not None:
+                for geometry, environment_polyhedron in environment_polyhedra:
+                    if environment_polyhedron is None:
+                        continue
+                    if np.any(
+                        attached_polyhedron.maximum
+                        < environment_polyhedron.minimum - 1e-12
+                    ) or np.any(
+                        environment_polyhedron.maximum
+                        < attached_polyhedron.minimum - 1e-12
+                    ):
+                        continue
+                    if _prepared_polyhedra_intersect(
+                        attached_polyhedron,
+                        environment_polyhedron,
+                    ):
+                        contacts.add(geometry.collision_group)
                 continue
-            if isinstance(geometry.geometry, ConvexHull):
-                if _convex_contact_groups(
-                    named_spheres,
-                    geometry,
-                    self._prepared_convex_mesh(geometry.geometry),
-                ):
+
+            attached_spheres = tuple(
+                self._vamp.Sphere(
+                    (attached_matrix[:3, :3] @ center + attached_matrix[:3, 3]).tolist(),
+                    radius,
+                )
+                for center, radius in _attached_sphere_specs(attached)
+            )
+            named_spheres = [(sphere, "attached_object") for sphere in attached_spheres]
+            for geometry in geometries_in_base:
+                if isinstance(geometry.geometry, PointCloud):
+                    hit = bool(
+                        _pointcloud_contact_groups(
+                            named_spheres, geometry, self._pointcloud_tree(geometry)
+                        )
+                    )
+                elif isinstance(geometry.geometry, ConvexHull):
+                    hit = bool(
+                        _convex_contact_groups(
+                            named_spheres,
+                            geometry,
+                            self._prepared_convex_mesh(geometry.geometry),
+                        )
+                    )
+                else:
+                    hit = any(
+                        _sphere_intersects_geometry(sphere, geometry)
+                        for sphere in attached_spheres
+                    )
+                if hit:
                     contacts.add(geometry.collision_group)
-                continue
-            if any(
-                _sphere_intersects_geometry(sphere, geometry)
-                for sphere in attached_spheres
-            ):
-                contacts.add(geometry.collision_group)
-        return frozenset(contacts)
+        result = frozenset(contacts)
+        self._attachment_contact_cache[cache_key] = result
+        return result
 
     def _semantic_robot_spheres(
         self,
@@ -692,20 +938,12 @@ class VampBackend:
     ) -> tuple[tuple[object, str], ...]:
         if not 0.0 <= opening_m <= self._config.maximum_gripper_opening_m:
             raise BackendOperationError("gripper opening is outside RobotModel limits")
-        sphere_groups = {}
-        for group in self._config.collision_sphere_groups:
-            for index in range(
-                group.first_sphere, group.first_sphere + group.sphere_count
-            ):
-                sphere_groups[index] = group
         closed_fraction = 1.0 - opening_m / self._config.maximum_gripper_opening_m
-        tcp_rotation = np.asarray(
-            self.tcp_pose(configuration).matrix, dtype=np.float64
-        )[:3, :3]
+        tcp_rotation = self._tcp_matrix(configuration)[:3, :3]
         adjusted_spheres = []
         for index, robot_sphere in enumerate(self.robot_spheres(configuration)):
             adjusted = robot_sphere
-            group = sphere_groups.get(index)
+            group = self._collision_group_by_sphere[index]
             if group is not None:
                 local_shift = np.asarray(
                     group.translation_per_closed_fraction_m, dtype=np.float64
@@ -730,7 +968,12 @@ class VampBackend:
         T_tcp_object: RigidTransform,
         attached_geometry: tuple[AttachedGeometry, ...],
     ) -> tuple[object, ...]:
-        tcp_matrix = np.asarray(self.tcp_pose(configuration).matrix, dtype=np.float64)
+        tcp_matrix_fn = getattr(self, "_tcp_matrix", None)
+        tcp_matrix = (
+            tcp_matrix_fn(configuration)
+            if callable(tcp_matrix_fn)
+            else np.asarray(self.tcp_pose(configuration).matrix, dtype=np.float64)
+        )
         object_matrix = tcp_matrix @ np.asarray(T_tcp_object.matrix, dtype=np.float64)
         attached_spheres = []
         for item in attached_geometry:
@@ -890,44 +1133,115 @@ def _convex_polyhedra_intersect(
     right_vertices: np.ndarray,
     right_faces: np.ndarray,
 ) -> bool:
-    def face_normals(vertices: np.ndarray, faces: np.ndarray) -> list[np.ndarray]:
-        normals = []
-        for face in faces:
-            a, b, c = vertices[face]
-            normal = np.cross(b - a, c - a)
-            length = float(np.linalg.norm(normal))
-            if length > 1e-12:
-                normals.append(normal / length)
-        return normals
+    return _prepared_polyhedra_intersect(
+        _prepare_polyhedron(left_vertices, left_faces),
+        _prepare_polyhedron(right_vertices, right_faces),
+    )
 
-    def edges(vertices: np.ndarray, faces: np.ndarray) -> list[np.ndarray]:
-        indices = {
-            tuple(sorted((int(face[index]), int(face[(index + 1) % 3]))))
-            for face in faces
-            for index in range(3)
-        }
-        return [vertices[end] - vertices[start] for start, end in indices]
 
-    axes = face_normals(left_vertices, left_faces)
-    axes.extend(face_normals(right_vertices, right_faces))
-    left_edges = edges(left_vertices, left_faces)
-    right_edges = edges(right_vertices, right_faces)
-    for left_edge in left_edges:
-        for right_edge in right_edges:
-            axis = np.cross(left_edge, right_edge)
-            length = float(np.linalg.norm(axis))
-            if length > 1e-12:
-                axes.append(axis / length)
-    for axis in axes:
-        left_projection = left_vertices @ axis
-        right_projection = right_vertices @ axis
-        if (
-            float(np.max(left_projection)) < float(np.min(right_projection)) - 1e-12
-            or float(np.max(right_projection))
-            < float(np.min(left_projection)) - 1e-12
-        ):
-            return False
-    return True
+def _prepared_convex_polyhedron(
+    item: SceneGeometry,
+) -> _PreparedPolyhedron | None:
+    if isinstance(item.geometry, Box):
+        transform = np.asarray(item.T_world_geometry.matrix, dtype=np.float64)
+        half = np.asarray(item.geometry.size_m, dtype=np.float64) / 2.0
+        local_vertices = np.asarray(
+            [
+                (x, y, z)
+                for x in (-half[0], half[0])
+                for y in (-half[1], half[1])
+                for z in (-half[2], half[2])
+            ],
+            dtype=np.float64,
+        )
+        vertices = (
+            local_vertices @ transform[:3, :3].T + transform[:3, 3]
+        )
+        axes = transform[:3, :3].T
+        return _PreparedPolyhedron(
+            vertices,
+            axes,
+            axes,
+            np.min(vertices, axis=0),
+            np.max(vertices, axis=0),
+        )
+    spec = _convex_polyhedron_spec(item)
+    if spec is None:
+        return None
+    vertices, faces = spec
+    return _prepare_polyhedron(vertices, faces)
+
+
+def _prepare_polyhedron(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    edge_directions: np.ndarray | None = None,
+) -> _PreparedPolyhedron:
+    triangles = vertices[faces]
+    normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normal_lengths = np.linalg.norm(normals, axis=1)
+    normals = normals[normal_lengths > 1e-12] / normal_lengths[
+        normal_lengths > 1e-12, None
+    ]
+    if edge_directions is None:
+        pairs = np.concatenate(
+            (faces[:, (0, 1)], faces[:, (1, 2)], faces[:, (2, 0)]), axis=0
+        )
+        pairs = np.unique(np.sort(pairs, axis=1), axis=0)
+        edge_directions = vertices[pairs[:, 1]] - vertices[pairs[:, 0]]
+    edge_lengths = np.linalg.norm(edge_directions, axis=1)
+    edge_directions = edge_directions[edge_lengths > 1e-12] / edge_lengths[
+        edge_lengths > 1e-12, None
+    ]
+    return _PreparedPolyhedron(
+        vertices,
+        normals,
+        edge_directions,
+        np.min(vertices, axis=0),
+        np.max(vertices, axis=0),
+    )
+
+
+def _prepared_polyhedra_intersect(
+    left: _PreparedPolyhedron,
+    right: _PreparedPolyhedron,
+) -> bool:
+    if np.any(left.maximum < right.minimum - 1e-12) or np.any(
+        right.maximum < left.minimum - 1e-12
+    ):
+        return False
+    edge_axes = np.cross(
+        left.edge_directions[:, None, :], right.edge_directions[None, :, :]
+    ).reshape(
+        -1, 3
+    )
+    edge_lengths = np.linalg.norm(edge_axes, axis=1)
+    edge_axes = edge_axes[edge_lengths > 1e-12] / edge_lengths[
+        edge_lengths > 1e-12, None
+    ]
+    axes = np.concatenate(
+        (
+            left.face_normals,
+            right.face_normals,
+            edge_axes,
+        ),
+        axis=0,
+    )
+    left_projection = left.vertices @ axes.T
+    right_projection = right.vertices @ axes.T
+    return not bool(
+        np.any(
+            (np.max(left_projection, axis=0) < np.min(right_projection, axis=0) - 1e-12)
+            | (
+                np.max(right_projection, axis=0)
+                < np.min(left_projection, axis=0) - 1e-12
+            )
+        )
+    )
 
 
 def _outward_convex_faces(

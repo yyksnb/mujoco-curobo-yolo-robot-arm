@@ -94,7 +94,6 @@ def _request(request_id: str = "pipeline_contract") -> Task2Request:
             _pose("world", PROFILE.tcp_frame, (0.6, 0.0, 0.6)),
             PlacementOrientationConstraint.EXACT,
         ),
-        7,
     )
 
 
@@ -254,6 +253,7 @@ def test_request_artifact_round_trip_preserves_free_placement_orientation(
         is PlacementOrientationConstraint.FREE
     )
     payload = json.loads((artifacts.run_dir / "request.json").read_text())
+    assert "random_seed" not in payload
     assert payload["placement_goal"]["orientation_constraint"] == "free"
     assert persisted.vertical_transit_corridor == request.vertical_transit_corridor
     assert payload["vertical_transit_corridor"]["corridor_id"] == "tank_opening"
@@ -278,6 +278,21 @@ def test_request_artifact_rejects_missing_vertical_transit_corridor_field(
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="vertical_transit_corridor"):
+        artifacts.read_request()
+
+
+def test_request_artifact_rejects_algorithm_seed_from_external_request(
+    tmp_path: Path,
+) -> None:
+    request = _request("external_algorithm_seed")
+    artifacts = Task2Artifacts(tmp_path, request.request_id)
+    artifacts.write_request(request)
+    path = artifacts.run_dir / "request.json"
+    payload = json.loads(path.read_text())
+    payload["random_seed"] = 19
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="not part of Task2Request"):
         artifacts.read_request()
 
 
@@ -350,7 +365,6 @@ def test_pipeline_boundary_failure_uses_single_pipeline_error_code(tmp_path: Pat
             request.target_object_id,
             request.source_support_group,
             request.placement_goal,
-            request.random_seed,
             "vacuum",
         )
     )

@@ -43,7 +43,6 @@ class Task2Request:
     target_object_id: str
     source_support_group: str
     placement_goal: PlacementGoal
-    random_seed: int
     end_effector_profile_id: str | None = None
     vertical_transit_corridor: VerticalTransitCorridor | None = None
 
@@ -52,8 +51,6 @@ class Task2Request:
             raise ValueError("Task2 request and object type must be explicit")
         if not self.target_object_id or not self.source_support_group:
             raise ValueError("Task2 target object and source support must be explicit")
-        if self.random_seed < 0:
-            raise ValueError("Task2 random seed must be non-negative")
         self.T_world_object.validate(label="T_world_object")
         if (
             self.T_world_object.parent_frame != "world"

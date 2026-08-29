@@ -23,6 +23,7 @@ from .contracts.planning import (
     Box,
     Capsule,
     JointLimits,
+    LocalMotionStrategy,
     PlanningBudgets,
     PlanningEndEffectorConfig,
     PlanningObjectConfig,
@@ -165,17 +166,18 @@ class Task2Config:
             )
         return PlanningDependencies(
             create_vamp=partial(VampBackend, config=backend.vamp),
-            create_ik=lambda robot_model, random_seed: create_ik_solver(
+            create_ik=lambda robot_model: create_ik_solver(
                 backend.ik_backend,
                 robot_model,
                 self.planning_policy,
                 backend.ik,
-                random_seed=random_seed,
             ),
             create_ruckig=partial(RuckigTimeParameterizer, config=backend.ruckig),
             ik_solution_count=backend.ik_solution_count,
             pregrasp_ik_solution_count=backend.pregrasp_ik_solution_count,
             placement_sample_count=backend.placement_sample_count,
+            vamp_sample_offset_start=backend.vamp.sample_offset_start,
+            vamp_sample_offset_stride=backend.vamp.sample_offset_stride,
         )
 
 
@@ -234,7 +236,11 @@ def load_task2_config(path: str | Path) -> Task2Config:
         planning_backends=backends,
         planning_budgets=PlanningBudgets(
             _integer(budgets, "maximum_candidates", "pipeline.planning_budgets"),
-            _integer(budgets, "seeds_per_candidate", "pipeline.planning_budgets"),
+            _integer(
+                budgets,
+                "search_attempts_per_candidate",
+                "pipeline.planning_budgets",
+            ),
             _number(budgets, "stage_timeout_s", "pipeline.planning_budgets"),
             _number(budgets, "total_timeout_s", "pipeline.planning_budgets"),
         ),
@@ -384,7 +390,33 @@ def _parse_objects(
                 _list(plan_payload, "attached_geometry", f"objects.{object_type}.planning")
             )
         )
-        plan_config = PlanningObjectConfig(object_type, geometries)
+        transition = plan_payload.get("approach_contact_transition_m")
+        plan_config = PlanningObjectConfig(
+            object_type,
+            geometries,
+            LocalMotionStrategy(
+                _string(
+                    plan_payload,
+                    "approach_motion_strategy",
+                    f"objects.{object_type}.planning",
+                )
+            ),
+            LocalMotionStrategy(
+                _string(
+                    plan_payload,
+                    "payload_motion_strategy",
+                    f"objects.{object_type}.planning",
+                )
+            ),
+            (
+                _as_number(
+                    transition,
+                    f"objects.{object_type}.planning.approach_contact_transition_m",
+                )
+                if transition is not None
+                else None
+            ),
+        )
         plan_config.validate()
         planning.append(plan_config)
     return tuple(targeting), tuple(planning)

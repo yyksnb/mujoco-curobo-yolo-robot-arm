@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import MethodType
 
+import numpy as np
+
 from task2.backends.curobo_ik import CuroboIKSolver
 from task2.contracts import JointLimits, RigidTransform, RobotModel, RobotState
 from task2.ik import IKConstraints, IKResult, IKSolution
@@ -103,3 +105,44 @@ def test_curobo_solver_keeps_valid_first_batch_bounded() -> None:
 
     assert result.success
     assert calls == 1
+
+
+def test_curobo_raw_seed_cache_does_not_cache_scene_validator_decisions() -> None:
+    model = _model()
+    solver = object.__new__(CuroboIKSolver)
+    solver._model = model
+    solver._seed_count = 1
+    solver._seed_batch_count = 1
+    target = RigidTransform(
+        "base",
+        "tcp",
+        (
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+    )
+    seed = RobotState(model.joint_names, (0.0, 0.0))
+    solution = IKSolution(RobotState(model.joint_names, (0.2, 0.0)), 0.0, 0.0)
+    solver._seed_batch_cache = {
+        (
+            np.asarray(target.matrix, dtype=np.float64).tobytes(),
+            (seed.positions_rad,),
+        ): IKResult((solution,), None, "cached raw result")
+    }
+
+    rejected = solver.solve(
+        (target,),
+        (seed,),
+        IKConstraints(0.001, 0.01, 1, lambda state: False),
+    )
+    accepted = solver.solve(
+        (target,),
+        (seed,),
+        IKConstraints(0.001, 0.01, 1, lambda state: True),
+    )
+
+    assert not rejected.success
+    assert accepted.success
+    assert accepted.solutions == (solution,)

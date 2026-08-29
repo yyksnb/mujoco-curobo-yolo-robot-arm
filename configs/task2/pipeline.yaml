@@ -12,6 +12,6 @@ pipeline:
     maximum_candidates: 72
   planning_budgets:
     maximum_candidates: 8
-    seeds_per_candidate: 2
+    search_attempts_per_candidate: 2
     stage_timeout_s: 120.0
     total_timeout_s: 600.0

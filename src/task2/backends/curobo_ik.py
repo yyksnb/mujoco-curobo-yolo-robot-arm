@@ -20,6 +20,7 @@ class CuroboIKConfig:
         robot_config_path: Path,
         kinematics_path: Path,
         asset_root_path: Path,
+        random_seed: int,
         seed_count: int,
         seed_batch_count: int,
     ) -> None:
@@ -27,11 +28,17 @@ class CuroboIKConfig:
         self.robot_config_path = robot_config_path
         self.kinematics_path = kinematics_path
         self.asset_root_path = asset_root_path
+        self.random_seed = random_seed
         self.seed_count = seed_count
         self.seed_batch_count = seed_batch_count
 
     def validate(self) -> None:
-        if not self.version or self.seed_count <= 0 or self.seed_batch_count <= 0:
+        if (
+            not self.version
+            or self.random_seed < 0
+            or self.seed_count <= 0
+            or self.seed_batch_count <= 0
+        ):
             raise ValueError("cuRobo version, seed count, and seed batch count must be explicit")
         if (
             not self.robot_config_path.is_file()
@@ -58,6 +65,7 @@ def parse_curobo_ik_config(
         asset_root_path=_config_path(
             end_effector_profile, "asset_root", "cuRobo IK profile", base_dir
         ),
+        random_seed=_config_integer(payload, "random_seed", "cuRobo IK"),
         seed_count=_config_integer(payload, "seed_count", "cuRobo IK"),
         seed_batch_count=_config_integer(payload, "seed_batch_count", "cuRobo IK"),
     )
@@ -76,8 +84,6 @@ class CuroboIKSolver:
         robot_model: RobotModel,
         planning_policy: PlanningPolicy,
         config: CuroboIKConfig,
-        *,
-        random_seed: int,
     ):
         config.validate()
         seed_count = config.seed_count
@@ -130,7 +136,7 @@ class CuroboIKSolver:
                 num_seeds=config.seed_count,
                 position_tolerance=planning_policy.ik_position_tolerance_m,
                 orientation_tolerance=planning_policy.ik_orientation_tolerance_rad,
-                random_seed=random_seed,
+                random_seed=config.random_seed,
                 self_collision_check=True,
                 load_collision_spheres=True,
                 use_cuda_graph=False,
@@ -147,6 +153,9 @@ class CuroboIKSolver:
         self._model = robot_model
         self._seed_count = seed_count
         self._seed_batch_count = seed_batch_count
+        self._seed_batch_cache: dict[
+            tuple[bytes, tuple[tuple[float, ...], ...]], IKResult
+        ] = {}
         self.version = version
 
     def solve(
@@ -211,6 +220,13 @@ class CuroboIKSolver:
         target: RigidTransform,
         seed_states: Sequence[RobotState],
     ) -> IKResult:
+        cache_key = (
+            np.asarray(target.matrix, dtype=np.float64).tobytes(),
+            tuple(state.positions_rad for state in seed_states),
+        )
+        cached = self._seed_batch_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
             from curobo.types import GoalToolPose, JointState, Pose
 
@@ -265,8 +281,15 @@ class CuroboIKSolver:
             )
         )
         if not solutions:
-            return IKResult((), IKErrorCode.NO_SOLUTION, "cuRobo found no valid IK solution in seed batch")
-        return IKResult(tuple(solutions), None, "cuRobo IK seed batch succeeded")
+            result = IKResult(
+                (),
+                IKErrorCode.NO_SOLUTION,
+                "cuRobo found no valid IK solution in seed batch",
+            )
+        else:
+            result = IKResult(tuple(solutions), None, "cuRobo IK seed batch succeeded")
+        self._seed_batch_cache[cache_key] = result
+        return result
 
 
 def _distance(

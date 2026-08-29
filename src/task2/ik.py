@@ -58,8 +58,6 @@ def create_ik_solver(
     robot_model: RobotModel,
     planning_policy: PlanningPolicy,
     backend_config: object,
-    *,
-    random_seed: int,
 ) -> IKSolver:
     if backend == "curobo":
         from .backends.curobo_ik import CuroboIKConfig, CuroboIKSolver
@@ -70,7 +68,6 @@ def create_ik_solver(
             robot_model,
             planning_policy,
             backend_config,
-            random_seed=random_seed,
         )
     raise BackendUnavailableError(f"IK backend {backend!r} is not registered")
 

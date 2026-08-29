@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -23,13 +24,18 @@ from task2.backends.vamp import (
     VampPlan,
     _convex_contact_groups,
     _outward_convex_faces,
+    _prepared_convex_polyhedron,
+    _prepared_polyhedra_intersect,
     _sphere_intersects_geometry,
 )
 from task2.config import load_task2_config
 from task2.contracts import (
     AllowedContact,
+    AttachedGeometry,
     Box,
+    Capsule,
     ConvexHull,
+    LocalMotionStrategy,
     PlacementGoal,
     PlacementGoalKind,
     PlacementOrientationConstraint,
@@ -51,7 +57,9 @@ from task2.planning import (
     _OrientationPathMetrics,
     PlanningDependencies,
     _cartesian_continuation_route,
+    _compact_joint_path,
     _farthest_collision_valid_shortcut,
+    _joint_path_length,
     _pregrasp_path_quality_key,
     _sampled_orientation_deviation,
 )
@@ -71,12 +79,26 @@ class _FakeVamp:
         self.plan_calls = []
 
     def environment(self, scene, **kwargs):
-        return kwargs
+        return {"scene": scene, **kwargs}
 
-    def plan(self, start, goal, environment, *, seed):
+    def plan(self, start, goal, environment, *, sample_offset):
         self.plan_environments.append(environment)
-        self.plan_calls.append((tuple(start), tuple(goal), environment, seed))
+        self.plan_calls.append((tuple(start), tuple(goal), environment, sample_offset))
         return VampPlan((tuple(start), tuple(goal)), 0.001, 1)
+
+    def plan_to_any(self, start, goals, environment, *, sample_offset):
+        plans = tuple(
+            (self.plan(start, goal, environment, sample_offset=sample_offset), index)
+            for index, goal in enumerate(goals)
+        )
+        result, selected_index = min(
+            plans,
+            key=lambda item: (
+                _joint_path_length(item[0].path),
+                item[1],
+            ),
+        )
+        return replace(result, selected_goal_index=selected_index)
 
     def configuration_valid(self, configuration, environment):
         return True
@@ -168,7 +190,7 @@ class _ReturnedKnotVamp(_FixedOrientationVamp):
         super().__init__(robot_model, rotation)
         self.loaded_midpoints = []
 
-    def plan(self, start, goal, environment, *, seed):
+    def plan(self, start, goal, environment, *, sample_offset):
         if environment.get("attached_geometry") and start != goal:
             midpoint = tuple(
                 0.5 * (left + right) + (0.02 if index == 3 else 0.0)
@@ -176,7 +198,7 @@ class _ReturnedKnotVamp(_FixedOrientationVamp):
             )
             self.loaded_midpoints.append(midpoint)
             return VampPlan((tuple(start), midpoint, tuple(goal)), 0.001, 1)
-        return super().plan(start, goal, environment, seed=seed)
+        return super().plan(start, goal, environment, sample_offset=sample_offset)
 
 
 class _LiftEndpointVamp(_FixedOrientationVamp):
@@ -185,12 +207,18 @@ class _LiftEndpointVamp(_FixedOrientationVamp):
         self.reject_minimum = reject_minimum
         self.loaded_plan_starts = []
 
-    def plan(self, start, goal, environment, *, seed):
+    def plan(self, start, goal, environment, *, sample_offset):
         if environment.get("attached_geometry"):
+            if environment["scene"].snapshot_id.endswith(
+                ".lift_without_source_support"
+            ):
+                return super().plan(
+                    start, goal, environment, sample_offset=sample_offset
+                )
             self.loaded_plan_starts.append(tuple(start))
             if self.reject_minimum and len(self.loaded_plan_starts) == 1:
                 raise BackendOperationError("minimum LIFT endpoint is blocked")
-        return super().plan(start, goal, environment, seed=seed)
+        return super().plan(start, goal, environment, sample_offset=sample_offset)
 
 
 class _LiftEndpointCostVamp(_FixedOrientationVamp):
@@ -200,18 +228,22 @@ class _LiftEndpointCostVamp(_FixedOrientationVamp):
         self.loaded_plan_count = 0
         self.egress_starts = []
 
-    def plan(self, start, goal, environment, *, seed):
+    def plan(self, start, goal, environment, *, sample_offset):
         if not environment.get("attached_geometry"):
-            return super().plan(start, goal, environment, seed=seed)
+            return super().plan(start, goal, environment, sample_offset=sample_offset)
+        if environment["scene"].snapshot_id.endswith(
+            ".lift_without_source_support"
+        ):
+            return super().plan(start, goal, environment, sample_offset=sample_offset)
         is_egress = self.loaded_plan_count % 2 == 0
         self.loaded_plan_count += 1
         if not is_egress:
-            return super().plan(start, goal, environment, seed=seed)
+            return super().plan(start, goal, environment, sample_offset=sample_offset)
         endpoint_index = len(self.egress_starts)
         self.egress_starts.append(tuple(start))
         detour = (endpoint_index == 0) != self.minimum_is_better
         if not detour:
-            return super().plan(start, goal, environment, seed=seed)
+            return super().plan(start, goal, environment, sample_offset=sample_offset)
         midpoint = list(
             0.5 * (left + right) for left, right in zip(start, goal)
         )
@@ -219,19 +251,21 @@ class _LiftEndpointCostVamp(_FixedOrientationVamp):
         return VampPlan((tuple(start), tuple(midpoint), tuple(goal)), 0.001, 1)
 
 
-class _SeedRouteVamp(_FixedOrientationVamp):
-    def __init__(self, robot_model, rotation, detour_seed):
+class _OffsetRouteVamp(_FixedOrientationVamp):
+    def __init__(self, robot_model, rotation, detour_sample_offset):
         super().__init__(robot_model, rotation)
-        self.detour_seed = detour_seed
+        self.detour_sample_offset = detour_sample_offset
         self.detour_midpoints = []
         self.direct_midpoints = []
 
-    def plan(self, start, goal, environment, *, seed):
+    def plan(self, start, goal, environment, *, sample_offset):
         if environment.get("attached_geometry") and start != goal:
+            self.plan_environments.append(environment)
+            self.plan_calls.append((tuple(start), tuple(goal), environment, sample_offset))
             midpoint = tuple(
                 0.5 * (left + right) for left, right in zip(start, goal)
             )
-            if seed == self.detour_seed:
+            if sample_offset == self.detour_sample_offset:
                 midpoint = tuple(
                     value + (0.3 if index == 0 else 0.0)
                     for index, value in enumerate(midpoint)
@@ -244,7 +278,7 @@ class _SeedRouteVamp(_FixedOrientationVamp):
                 )
                 self.direct_midpoints.append(midpoint)
             return VampPlan((tuple(start), midpoint, tuple(goal)), 0.001, 1)
-        return super().plan(start, goal, environment, seed=seed)
+        return super().plan(start, goal, environment, sample_offset=sample_offset)
 
 
 class _InteriorRotationVamp(_FakeVamp):
@@ -657,7 +691,6 @@ def _request(object_type: str = "marker") -> PlanningRequest:
         CONFIG.planning_object(object_type),
         PROFILE.planning,
         CONFIG.planning_policy,
-        7,
         PlanningBudgets(1, 1, 2.0, 10.0),
     )
 
@@ -666,7 +699,7 @@ def _fake_dependencies() -> PlanningDependencies:
     backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
     return PlanningDependencies(
         lambda robot_model: _FakeVamp(robot_model),
-        lambda robot_model, random_seed: _FakeIK(robot_model),
+        lambda robot_model: _FakeIK(robot_model),
         lambda robot_model: RuckigTimeParameterizer(robot_model, backend.ruckig),
         backend.ik_solution_count,
         backend.pregrasp_ik_solution_count,
@@ -787,7 +820,7 @@ def _final_validation_dependencies(
     )
     dependencies = PlanningDependencies(
         lambda robot_model: vamp,
-        lambda robot_model, random_seed: _FakeIK(robot_model),
+        lambda robot_model: _FakeIK(robot_model),
         lambda robot_model: _FinalValidationRuckig(
             RuckigTimeParameterizer(robot_model, backend.ruckig), vamp
         ),
@@ -841,7 +874,7 @@ def test_exact_placement_orientation_is_strictly_used_for_place_ik() -> None:
     recorder = _RecordingIK(request.robot_model)
     dependencies = replace(
         _fake_dependencies(),
-        create_ik=lambda robot_model, random_seed: recorder,
+        create_ik=lambda robot_model: recorder,
     )
 
     result = plan(request, dependencies=dependencies)
@@ -877,7 +910,7 @@ def test_orientation_free_placement_preserves_grasp_orientation_and_continuity()
     dependencies = replace(
         _fake_dependencies(),
         create_vamp=lambda robot_model: fixed_vamp,
-        create_ik=lambda robot_model, random_seed: recorder,
+        create_ik=lambda robot_model: recorder,
     )
 
     result = plan(request, dependencies=dependencies)
@@ -1032,7 +1065,7 @@ def test_cartesian_route_preserves_the_globally_smoother_ik_branch() -> None:
     )
 
 
-def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> None:
+def test_plan_selects_collision_valid_search_attempt_without_tcp_detours() -> None:
     baseline = _request()
     candidate = baseline.candidates[0]
     request = replace(
@@ -1046,12 +1079,17 @@ def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> No
             baseline.planning_policy,
             cartesian_translation_step_m=1.0,
         ),
+        object_config=replace(
+            baseline.object_config,
+            approach_motion_strategy=LocalMotionStrategy.STAGED_PORTAL,
+            payload_motion_strategy=LocalMotionStrategy.STAGED_PORTAL,
+        ),
         budgets=PlanningBudgets(1, 2, 5.0, 20.0),
     )
-    vamp = _SeedRouteVamp(
+    vamp = _OffsetRouteVamp(
         request.robot_model,
         np.asarray(candidate.T_world_tcp.matrix, dtype=np.float64)[:3, :3],
-        request.random_seed,
+        0,
     )
     dependencies = replace(
         _fake_dependencies(),
@@ -1062,7 +1100,8 @@ def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> No
 
     assert result.success, result.message
     assert result.trajectory is not None
-    assert result.metadata["selected_seed"] == request.random_seed + 1
+    assert result.metadata["selected_search_attempt"] == 1
+    assert result.metadata["selected_sample_offset"] == 1
     selected_loaded_knots = tuple(
         knot.positions_rad
         for knot in result.trajectory.knots
@@ -1072,6 +1111,58 @@ def test_plan_selects_the_collision_valid_seed_route_without_tcp_detours() -> No
     assert vamp.direct_midpoints
     assert any(point in selected_loaded_knots for point in vamp.direct_midpoints)
     assert not any(point in selected_loaded_knots for point in vamp.detour_midpoints)
+    lift_offsets = {
+        call[3]
+        for call in vamp.plan_calls
+        if call[2]["scene"].snapshot_id.endswith(".lift_without_source_support")
+    }
+    assert 1 in lift_offsets
+
+
+def test_formal_backend_uses_non_overlapping_deterministic_search_ranges() -> None:
+    backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
+    dependencies = CONFIG.planning_dependencies(PROFILE)
+
+    assert backend.ik.random_seed == 19
+    assert dependencies.vamp_sample_offset_start == 19
+    assert dependencies.vamp_sample_offset_stride >= backend.vamp.max_samples
+    offsets = tuple(
+        dependencies.vamp_sample_offset_start
+        + attempt * dependencies.vamp_sample_offset_stride
+        for attempt in range(CONFIG.planning_budgets.search_attempts_per_candidate)
+    )
+    assert offsets == (19, 40019)
+
+
+def test_plan_screens_equal_priority_candidates_by_nearest_pregrasp_ik() -> None:
+    baseline = _request()
+    candidate = baseline.candidates[0]
+    far = replace(
+        candidate,
+        candidate_id=f"{candidate.candidate_id}.far",
+        T_world_pregrasp=_pose("world", candidate.T_world_pregrasp.child_frame, (4.0, 0.0, 0.2)),
+    )
+    near = replace(
+        candidate,
+        candidate_id=f"{candidate.candidate_id}.near",
+        T_world_pregrasp=_pose("world", candidate.T_world_pregrasp.child_frame, (0.1, 0.0, 0.2)),
+    )
+    request = replace(
+        baseline,
+        candidates=(far, near),
+        budgets=PlanningBudgets(2, 1, 5.0, 20.0),
+    )
+
+    result = plan(request, dependencies=_fake_dependencies())
+
+    assert result.success, result.message
+    assert result.metadata["selected_candidate_id"] == near.candidate_id
+
+
+def test_compact_joint_path_removes_repeated_branch_boundary_state() -> None:
+    path = ((0.0, 0.0), (0.1, 0.2), (0.1, 0.2), (0.2, 0.3))
+
+    assert _compact_joint_path(path) == (path[0], path[1], path[3])
 
 
 def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() -> None:
@@ -1088,6 +1179,11 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
             payload_tcp_max_angular_velocity_rad_s=1000.0,
             payload_tcp_max_translation_velocity_m_s=1000.0,
             payload_tcp_max_translation_acceleration_m_s2=1000.0,
+        ),
+        object_config=replace(
+            baseline.object_config,
+            approach_motion_strategy=LocalMotionStrategy.STAGED_PORTAL,
+            payload_motion_strategy=LocalMotionStrategy.STAGED_PORTAL,
         ),
         vertical_transit_corridor=VerticalTransitCorridor(
             "test_portal",
@@ -1173,13 +1269,25 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
     unloaded_plan_calls = [
         call
         for call in vamp.plan_calls
-        if not call[2].get("attached_geometry")
+        if call[2].get("T_tcp_object") is None
     ]
-    # PREGRASP evaluates the branch-preserving route and the explicit forward
-    # Cartesian route to the same portal state.  The final PLACE edge may use
-    # loaded VAMP, but EGRESS does not.
-    assert len(loaded_plan_environments) == 1
-    assert len(unloaded_plan_calls) == 2
+    # LIFT reaches each vertical semantic target through a loaded joint-space
+    # route.  Before support departure those routes exclude only the declared
+    # source support; non-support scene geometry remains present.
+    lift_environments = [
+        environment
+        for environment in loaded_plan_environments
+        if environment["scene"].snapshot_id.endswith(
+            ".lift_without_source_support"
+        )
+    ]
+    assert lift_environments
+    assert all(
+        geometry.collision_group != request.source_support_group
+        for environment in lift_environments
+        for geometry in environment["scene"].geometries
+    )
+    assert len(unloaded_plan_calls) >= 2
     assert {call[0] == request.initial_state.positions_rad for call in unloaded_plan_calls} == {
         False,
         True,
@@ -1272,11 +1380,45 @@ def test_vamp_backend_returns_a_valid_direct_motion_before_running_rrtc() -> Non
     backend._model = model
     backend._robot = robot
 
-    result = backend.plan(start, tuple(raw_goal), object(), seed=19)
+    result = backend.plan(start, tuple(raw_goal), object(), sample_offset=19)
 
     assert result.path == (start, expected_goal)
     assert result.iterations == 0
     assert len(robot.validated) == 1
+
+
+def test_vamp_backend_multi_goal_direct_motion_selects_the_shortest_goal() -> None:
+    model = _request().robot_model
+    start = model.default_joint_positions
+    farther = list(start)
+    farther[1] += 0.2
+    nearer = list(start)
+    nearer[1] += 0.05
+
+    class _DirectRobot:
+        @staticmethod
+        def validate_motion(left, right, environment, check_bounds):
+            del left, right, environment, check_bounds
+            return True
+
+        @staticmethod
+        def rrtc(*args, **kwargs):
+            raise AssertionError("RRTC must not run when direct goals are valid")
+
+    backend = object.__new__(VampBackend)
+    backend._model = model
+    backend._robot = _DirectRobot()
+
+    result = backend.plan_to_any(
+        start,
+        (tuple(farther), tuple(nearer)),
+        object(),
+        sample_offset=19,
+    )
+
+    assert result.path == (start, tuple(nearer))
+    assert result.selected_goal_index == 1
+    assert result.iterations == 0
 
 
 def test_orientation_free_route_preserves_vamp_returned_knots_for_ruckig() -> None:
@@ -1458,7 +1600,11 @@ def test_approach_rejects_early_target_contact_but_allows_terminal_transition() 
     request = _request()
     early = plan(
         request,
-        dependencies=_approach_contact_dependencies(contact_distance_m=0.012),
+        dependencies=_approach_contact_dependencies(
+            contact_distance_m=(
+                request.planning_policy.approach_contact_transition_m + 0.002
+            )
+        ),
     )
     assert not early.success
     assert early.attempts[-1].stage is TrajectoryStage.APPROACH
@@ -1472,6 +1618,19 @@ def test_approach_rejects_early_target_contact_but_allows_terminal_transition() 
         dependencies=_approach_contact_dependencies(contact_distance_m=0.008),
     )
     assert terminal.success, terminal.message
+
+    object_transition_request = replace(
+        request,
+        object_config=replace(
+            request.object_config,
+            approach_contact_transition_m=0.03,
+        ),
+    )
+    object_terminal = plan(
+        object_transition_request,
+        dependencies=_approach_contact_dependencies(contact_distance_m=0.012),
+    )
+    assert object_terminal.success, object_terminal.message
 
     coarse_request = replace(
         request,
@@ -1491,7 +1650,11 @@ def test_approach_rejects_early_target_contact_but_allows_terminal_transition() 
     ("proxy_contact_distance_m", "physical_contact", "expected_success"),
     (
         (0.008, False, True),
-        (0.012, False, False),
+        (
+            CONFIG.planning_policy.approach_contact_transition_m + 0.002,
+            False,
+            False,
+        ),
         (0.008, True, False),
     ),
 )
@@ -1555,6 +1718,34 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         ("right_pad", (0.0, -0.042, 0.0)),
     )
     assert CONFIG.planning_policy.approach_contact_transition_m == 0.01
+    assert (
+        CONFIG.planning_object("masking_tape").approach_contact_transition_m
+        == 0.03
+    )
+    assert CONFIG.planning_object("marker").approach_contact_transition_m is None
+    marker_geometry = CONFIG.planning_object("marker").attached_geometry
+    assert len(marker_geometry) == 1
+    assert isinstance(marker_geometry[0].geometry, Capsule)
+    assert marker_geometry[0].geometry.radius_m == pytest.approx(0.009)
+    assert marker_geometry[0].geometry.length_m == pytest.approx(0.122)
+    assert (
+        CONFIG.planning_object("masking_tape").approach_motion_strategy
+        is LocalMotionStrategy.STAGED_PORTAL
+    )
+    assert CONFIG.planning_object("masking_tape").payload_motion_strategy is (
+        LocalMotionStrategy.STAGED_PORTAL
+    )
+    assert CONFIG.planning_object("marker").approach_motion_strategy is (
+        LocalMotionStrategy.CONTINUOUS_CARTESIAN
+    )
+    assert {
+        CONFIG.planning_object(object_type).approach_motion_strategy
+        for object_type in ("marker", "rivet_gun", "standard_part")
+    } == {LocalMotionStrategy.CONTINUOUS_CARTESIAN}
+    assert {
+        CONFIG.planning_object(object_type).payload_motion_strategy
+        for object_type in ("marker", "rivet_gun", "standard_part")
+    } == {LocalMotionStrategy.CONTINUOUS_CARTESIAN}
     assert CONFIG.planning_policy.pregrasp_joint_path_detour_ratio_limit == 3.0
     assert CONFIG.planning_policy.payload_tcp_max_angular_velocity_rad_s == 0.44
     assert CONFIG.planning_policy.payload_tcp_max_translation_velocity_m_s == 0.20
@@ -1572,6 +1763,57 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
     assert CONFIG.planning_policy.trajectory_validation_actuator_position_step_m == 0.001
     assert CONFIG.planning_policy.trajectory_validation_swept_point_step_m == 0.002
     assert CONFIG.planning_policy.trajectory_validation_max_samples == 20000
+
+
+def test_native_attachment_spheres_apply_object_local_geometry_pose() -> None:
+    fake_backend = SimpleNamespace(
+        tcp_pose=lambda _configuration: RigidTransform(
+            "base",
+            "tcp",
+            (
+                (1.0, 0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        _vamp=SimpleNamespace(Sphere=lambda center, radius: (tuple(center), radius)),
+    )
+    T_tcp_object = RigidTransform(
+        "tcp",
+        "object",
+        (
+            (1.0, 0.0, 0.0, 0.10),
+            (0.0, 1.0, 0.0, 0.20),
+            (0.0, 0.0, 1.0, 0.30),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+    )
+    attached = AttachedGeometry(
+        "offset_sphere",
+        RigidTransform(
+            "object",
+            "offset_sphere",
+            (
+                (1.0, 0.0, 0.0, 0.01),
+                (0.0, 1.0, 0.0, 0.02),
+                (0.0, 0.0, 1.0, 0.03),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        Sphere(0.04),
+    )
+
+    spheres = VampBackend._attachment_spheres(
+        fake_backend,
+        (0.0,),
+        T_tcp_object,
+        (attached,),
+    )
+
+    assert len(spheres) == 1
+    assert spheres[0][0] == pytest.approx((0.11, 0.22, 0.33))
+    assert spheres[0][1] == pytest.approx(0.04)
 
 
 def test_forearm_proxy_sphere_is_not_shrunk_and_tracks_the_formal_distal_surface() -> None:
@@ -1761,7 +2003,7 @@ def test_plan_continues_after_a_geometric_route_ruckig_rejection() -> None:
     request = _request()
     request = replace(
         request,
-        budgets=replace(request.budgets, seeds_per_candidate=2),
+        budgets=replace(request.budgets, search_attempts_per_candidate=2),
     )
 
     result = plan(request, dependencies=dependencies)
@@ -2168,6 +2410,43 @@ def test_convex_hull_semantic_collision_uses_exact_surface() -> None:
     assert contacts == frozenset(("inside", "face"))
 
 
+def test_box_attachment_semantic_collision_uses_exact_oriented_geometry() -> None:
+    slender = SceneGeometry(
+        "slender",
+        "attached_object",
+        "attached_object",
+        _pose("base", "slender"),
+        Box((0.08, 0.01, 0.01)),
+    )
+    separated = SceneGeometry(
+        "separated",
+        "tank",
+        "tank_environment",
+        _pose("base", "separated", (0.0, 0.02, 0.0)),
+        Box((0.08, 0.01, 0.01)),
+    )
+    intersecting = SceneGeometry(
+        "intersecting",
+        "tank",
+        "tank_environment",
+        _pose("base", "intersecting", (0.0, 0.009, 0.0)),
+        Box((0.08, 0.01, 0.01)),
+    )
+
+    slender_polyhedron = _prepared_convex_polyhedron(slender)
+    separated_polyhedron = _prepared_convex_polyhedron(separated)
+    intersecting_polyhedron = _prepared_convex_polyhedron(intersecting)
+    assert slender_polyhedron is not None
+    assert separated_polyhedron is not None
+    assert intersecting_polyhedron is not None
+    assert not _prepared_polyhedra_intersect(
+        slender_polyhedron, separated_polyhedron
+    )
+    assert _prepared_polyhedra_intersect(
+        slender_polyhedron, intersecting_polyhedron
+    )
+
+
 def test_plan_preserves_request_config_and_backend_failure_codes() -> None:
     request = _request()
     invalid_request = replace(
@@ -2241,7 +2520,7 @@ def test_public_plan_unwraps_continuous_joint_across_pi() -> None:
     )
     dependencies = replace(
         _fake_dependencies(),
-        create_ik=lambda robot_model, random_seed: _WrappedContinuousIK(
+        create_ik=lambda robot_model: _WrappedContinuousIK(
             robot_model
         ),
     )
@@ -2310,7 +2589,6 @@ def test_standard_part_real_quick_planning_regression() -> None:
     request = replace(
         _request("standard_part"),
         budgets=PlanningBudgets(1, 1, 120.0, 300.0),
-        random_seed=19,
     )
     result = plan(request, dependencies=CONFIG.planning_dependencies(PROFILE))
     assert result.success, f"{result.error_code}: {result.message}"

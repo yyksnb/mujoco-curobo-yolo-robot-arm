@@ -18,6 +18,7 @@ from .backends.ruckig import (
 from .backends.vamp import VampBackend
 from .contracts import (
     GraspCandidate,
+    LocalMotionStrategy,
     PlacementGoal,
     PlacementGoalKind,
     PlacementOrientationConstraint,
@@ -31,6 +32,7 @@ from .contracts import (
     RobotModel,
     RobotState,
     SceneGeometry,
+    SceneSnapshot,
     TrajectoryKnot,
     TrajectoryPolynomialSection,
     TrajectorySegment,
@@ -104,17 +106,21 @@ _PAYLOAD_STAGES = frozenset(
 @dataclass(frozen=True)
 class PlanningDependencies:
     create_vamp: Callable[[object], VampBackend]
-    create_ik: Callable[[object, int], IKSolver]
+    create_ik: Callable[[object], IKSolver]
     create_ruckig: Callable[[object], RuckigTimeParameterizer]
     ik_solution_count: int
     pregrasp_ik_solution_count: int
     placement_sample_count: int
+    vamp_sample_offset_start: int = 0
+    vamp_sample_offset_stride: int = 1
 
     def validate(self) -> None:
         if (
             self.ik_solution_count <= 0
             or self.pregrasp_ik_solution_count <= 0
             or self.placement_sample_count <= 0
+            or self.vamp_sample_offset_start < 0
+            or self.vamp_sample_offset_stride <= 0
         ):
             raise ValueError("Planning backend solution and placement counts must be positive")
 
@@ -140,7 +146,7 @@ def plan(
         return PlanningResult.failed(PlanningErrorCode.INVALID_REQUEST, str(exc))
     try:
         vamp = dependencies.create_vamp(request.robot_model)
-        ik_solver = dependencies.create_ik(request.robot_model, request.random_seed)
+        ik_solver = dependencies.create_ik(request.robot_model)
         ruckig = dependencies.create_ruckig(request.robot_model)
     except BackendUnavailableError as exc:
         return PlanningResult.failed(PlanningErrorCode.BACKEND_UNAVAILABLE, str(exc))
@@ -149,12 +155,48 @@ def plan(
 
     started = monotonic()
     attempts: list[PlanningAttempt] = []
-    candidates = request.candidates[: request.budgets.maximum_candidates]
+    try:
+        candidates = request.candidates[: request.budgets.maximum_candidates]
+        ordered_candidates = _order_candidates_by_pregrasp_ik_distance(
+            request,
+            candidates,
+            ik_solver,
+            vamp,
+            dependencies.pregrasp_ik_solution_count,
+        )
+        candidates = ordered_candidates
+    except BackendUnavailableError as exc:
+        return PlanningResult.failed(
+            PlanningErrorCode.BACKEND_UNAVAILABLE,
+            str(exc),
+            metadata=_metadata(request, vamp.version, ik_solver.version, ruckig.version),
+        )
+    except _RouteFailure as failure:
+        return PlanningResult.failed(
+            failure.code,
+            failure.message,
+            metadata=_metadata(request, vamp.version, ik_solver.version, ruckig.version),
+        )
+    except BackendOperationError as exc:
+        return PlanningResult.failed(
+            PlanningErrorCode.BACKEND_ERROR,
+            f"Planning backend error: {exc}",
+            metadata=_metadata(request, vamp.version, ik_solver.version, ruckig.version),
+        )
+    except (RuntimeError, TypeError, ValueError, OSError) as exc:
+        return PlanningResult.failed(
+            PlanningErrorCode.BACKEND_ERROR,
+            f"Planning backend error: {exc}",
+            metadata=_metadata(request, vamp.version, ik_solver.version, ruckig.version),
+        )
     last_failure: _RouteFailure | None = None
     for candidate in candidates:
-        candidate_routes: list[tuple[int, _Route]] = []
-        for seed_offset in range(request.budgets.seeds_per_candidate):
-            seed = request.random_seed + seed_offset
+        candidate_routes: list[tuple[int, int, _Route]] = []
+        for search_attempt in range(request.budgets.search_attempts_per_candidate):
+            sample_offset = (
+                dependencies.vamp_sample_offset_start
+                + search_attempt * dependencies.vamp_sample_offset_stride
+            )
             if monotonic() - started >= request.budgets.total_timeout_s:
                 if candidate_routes:
                     break
@@ -169,7 +211,7 @@ def plan(
                 routes = _build_route(
                     request,
                     candidate,
-                    seed,
+                    sample_offset,
                     ik_solver,
                     vamp,
                     ruckig,
@@ -185,7 +227,7 @@ def plan(
                     attempts.append(
                         PlanningAttempt(
                             candidate.candidate_id,
-                            seed,
+                            sample_offset,
                             failure.stage,
                             monotonic() - attempt_started,
                             failure.code,
@@ -214,12 +256,14 @@ def plan(
                     tuple(attempts),
                     _metadata(request, vamp.version, ik_solver.version, ruckig.version),
                 )
-            candidate_routes.extend((seed, route) for route in routes)
+            candidate_routes.extend(
+                (search_attempt, sample_offset, route) for route in routes
+            )
         if not candidate_routes:
             continue
-        for selected_seed, route in sorted(
+        for selected_search_attempt, selected_sample_offset, route in sorted(
             candidate_routes,
-            key=lambda item: _route_selection_key(item[1], request, item[0]),
+            key=lambda item: _route_selection_key(item[2], request, item[0]),
         ):
             parameterization_started = monotonic()
             try:
@@ -240,7 +284,7 @@ def plan(
                 attempts.append(
                     PlanningAttempt(
                         candidate.candidate_id,
-                        selected_seed,
+                        selected_sample_offset,
                         exc.stage,
                         monotonic() - parameterization_started,
                         PlanningErrorCode.RUCKIG_FAILED,
@@ -281,7 +325,7 @@ def plan(
                 attempts.append(
                     PlanningAttempt(
                         candidate.candidate_id,
-                        selected_seed,
+                        selected_sample_offset,
                         exc.stage,
                         monotonic() - parameterization_started,
                         failure.code,
@@ -299,7 +343,7 @@ def plan(
                 attempts.append(
                     PlanningAttempt(
                         candidate.candidate_id,
-                        selected_seed,
+                        selected_sample_offset,
                         failure.stage,
                         monotonic() - parameterization_started,
                         failure.code,
@@ -330,7 +374,7 @@ def plan(
                 attempts.append(
                     PlanningAttempt(
                         candidate.candidate_id,
-                        selected_seed,
+                        selected_sample_offset,
                         exc.stage,
                         monotonic() - parameterization_started,
                         PlanningErrorCode.RUCKIG_FAILED,
@@ -347,7 +391,7 @@ def plan(
                 attempts.append(
                     PlanningAttempt(
                         candidate.candidate_id,
-                        selected_seed,
+                        selected_sample_offset,
                         exc.stage,
                         monotonic() - parameterization_started,
                         PlanningErrorCode.RUCKIG_FAILED,
@@ -383,7 +427,7 @@ def plan(
                 attempts.append(
                     PlanningAttempt(
                         candidate.candidate_id,
-                        selected_seed,
+                        selected_sample_offset,
                         failure.stage,
                         monotonic() - validation_started,
                         failure.code,
@@ -416,7 +460,8 @@ def plan(
                 request, vamp.version, ik_solver.version, ruckig.version
             )
             metadata["selected_candidate_id"] = candidate.candidate_id
-            metadata["selected_seed"] = selected_seed
+            metadata["selected_search_attempt"] = selected_search_attempt
+            metadata["selected_sample_offset"] = selected_sample_offset
             return PlanningResult.succeeded(
                 trajectory,
                 route.T_world_object_goal,
@@ -440,10 +485,105 @@ def plan(
     )
 
 
+def _approach_contact_transition_m(request: PlanningRequest) -> float:
+    object_value = request.object_config.approach_contact_transition_m
+    return (
+        object_value
+        if object_value is not None
+        else request.planning_policy.approach_contact_transition_m
+    )
+
+
+def _order_candidates_by_pregrasp_ik_distance(
+    request: PlanningRequest,
+    candidates: tuple[GraspCandidate, ...],
+    ik_solver: IKSolver,
+    vamp: VampBackend,
+    maximum_solutions: int,
+) -> tuple[GraspCandidate, ...]:
+    """Prefer a nearby valid symmetry candidate without reordering templates."""
+    if len(candidates) < 2:
+        return candidates
+    template_order: dict[str, int] = {}
+    for candidate in candidates:
+        template_order.setdefault(candidate.template_id, len(template_order))
+    target_geometries = tuple(
+        item
+        for item in request.scene.geometries
+        if item.object_id == request.target_object_id
+    )
+    environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(request.target_object_id,),
+    )
+    initial = np.asarray(request.initial_state.positions_rad, dtype=np.float64)
+    scored = []
+    for index, candidate in enumerate(candidates):
+        pregrasp_pose = compose(
+            inverse(request.T_world_base),
+            reframe(
+                candidate.T_world_pregrasp,
+                child_frame=request.robot_model.tcp_frame,
+            ),
+        )
+        distance = float("inf")
+        try:
+            solutions = _solve_ik(
+                ik_solver,
+                request,
+                pregrasp_pose,
+                request.initial_state,
+                TrajectoryStage.PREGRASP,
+                maximum_solutions,
+                solution_validator=lambda state, candidate=candidate: _pregrasp_solution_valid(
+                    state,
+                    request,
+                    vamp,
+                    environment,
+                    target_geometries,
+                    candidate.grasp_command.pregrasp_opening_m,
+                ),
+            )
+        except _RouteFailure as failure:
+            if failure.code not in (
+                PlanningErrorCode.IK_CANDIDATES_EXHAUSTED,
+                PlanningErrorCode.CONTINUOUS_IK_FAILED,
+                PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+            ):
+                raise
+        else:
+            distance = min(
+                float(
+                    np.linalg.norm(
+                        np.asarray(
+                            request.robot_model.unwrap_positions(
+                                state.positions_rad,
+                                request.initial_state.positions_rad,
+                            ),
+                            dtype=np.float64,
+                        )
+                        - initial
+                    )
+                )
+                for state in solutions
+            )
+        scored.append(
+            (
+                -candidate.quality_score,
+                template_order[candidate.template_id],
+                distance,
+                index,
+                candidate,
+            )
+        )
+    return tuple(item[-1] for item in sorted(scored, key=lambda item: item[:-1]))
+
+
 def _build_route(
     request: PlanningRequest,
     candidate: GraspCandidate,
-    seed: int,
+    sample_offset: int,
     ik_solver: IKSolver,
     vamp: VampBackend,
     ruckig: RuckigTimeParameterizer,
@@ -501,12 +641,14 @@ def _build_route(
             corridor,
             corridor.ingress_top_offset_m,
             request.robot_model.tcp_frame,
+            request.object_config.approach_motion_strategy,
         )
         corridor_lower_world = _vertical_corridor_pose(
             candidate.T_world_tcp,
             corridor,
             corridor.ingress_bottom_offset_m,
             request.robot_model.tcp_frame,
+            request.object_config.approach_motion_strategy,
         )
         corridor_upper = compose(inverse(request.T_world_base), corridor_upper_world)
         corridor_lower = compose(inverse(request.T_world_base), corridor_lower_world)
@@ -546,13 +688,13 @@ def _build_route(
         required_fractions=_approach_transition_fractions(
             pregrasp_pose,
             grasp_pose,
-            request.planning_policy.approach_contact_transition_m,
+            _approach_contact_transition_m(request),
         ),
     )
     approach_poses = interpolated_approach[1:]
     approach_contact_allowances = _approach_contact_allowances(
         interpolated_approach,
-        request.planning_policy.approach_contact_transition_m,
+        _approach_contact_transition_m(request),
         frozenset(candidate.expected_contacts),
     )
 
@@ -633,7 +775,7 @@ def _build_route(
                     initial,
                     route_goal.positions_rad,
                     free_environment,
-                    seed=seed,
+                    sample_offset=sample_offset,
                 ).path
             else:
                 assert corridor_upper is not None
@@ -646,7 +788,7 @@ def _build_route(
                     corridor_upper,
                     route_goal.positions_rad,
                     free_environment,
-                    seed,
+                    sample_offset,
                     total_started,
                     ik_solution_count,
                     )
@@ -691,23 +833,43 @@ def _build_route(
             continue
         approach_started = monotonic()
         try:
-            selected_approach = _continuous_ik(
-                request,
-                candidate,
-                ik_solver,
-                vamp,
-                tuple(approach_poses),
-                RobotState(
-                    request.robot_model.joint_names,
-                    candidate_pregrasp_path[-1],
-                ),
-                target_geometries,
-                environment_geometries,
-                approach_contact_allowances,
-                TrajectoryStage.APPROACH,
-                total_started,
-                ik_solution_count,
+            approach_seed = RobotState(
+                request.robot_model.joint_names,
+                candidate_pregrasp_path[-1],
             )
+            if (
+                request.object_config.approach_motion_strategy
+                is LocalMotionStrategy.STAGED_PORTAL
+            ):
+                selected_approach = _staged_approach_route(
+                    request,
+                    candidate,
+                    ik_solver,
+                    vamp,
+                    tuple(approach_poses),
+                    approach_seed,
+                    target_geometries,
+                    environment_geometries,
+                    approach_contact_allowances,
+                    sample_offset,
+                    total_started,
+                    ik_solution_count,
+                )
+            else:
+                selected_approach = _continuous_ik(
+                    request,
+                    candidate,
+                    ik_solver,
+                    vamp,
+                    tuple(approach_poses),
+                    approach_seed,
+                    target_geometries,
+                    environment_geometries,
+                    approach_contact_allowances,
+                    TrajectoryStage.APPROACH,
+                    total_started,
+                    ik_solution_count,
+                )
         except _RouteFailure as failure:
             approach_elapsed += monotonic() - approach_started
             _check_stage_budget(
@@ -772,12 +934,12 @@ def _build_route(
         raise _RouteFailure(
             PlanningErrorCode.VAMP_SEARCH_FAILED,
             TrajectoryStage.PREGRASP,
-            "VAMP found no collision-valid PREGRASP route for this candidate and seed",
+            "VAMP found no collision-valid PREGRASP route for this candidate and sample offset",
         )
     attempts.append(
         PlanningAttempt(
             candidate.candidate_id,
-            seed,
+            sample_offset,
             TrajectoryStage.PREGRASP,
             pregrasp_elapsed,
             None,
@@ -899,20 +1061,40 @@ def _build_route(
         request.planning_policy.cartesian_translation_step_m,
         request.planning_policy.cartesian_rotation_step_rad,
     )[1:]
-    lift_states = _continuous_ik(
-        request,
-        candidate,
-        ik_solver,
-        vamp,
-        tuple(lift_poses),
-        grasp_state,
-        (),
-        environment_geometries,
-        (),
-        TrajectoryStage.LIFT,
-        total_started,
-        ik_solution_count,
-    )
+    if (
+        request.object_config.payload_motion_strategy
+        is LocalMotionStrategy.STAGED_PORTAL
+    ):
+        lift_states = _staged_lift_route(
+            request,
+            candidate,
+            ik_solver,
+            vamp,
+            tuple(lift_poses),
+            grasp_state,
+            (),
+            environment_geometries,
+            (),
+            TrajectoryStage.LIFT,
+            sample_offset,
+            total_started,
+            ik_solution_count,
+        )
+    else:
+        lift_states = _continuous_ik(
+            request,
+            candidate,
+            ik_solver,
+            vamp,
+            tuple(lift_poses),
+            grasp_state,
+            (),
+            environment_geometries,
+            (),
+            TrajectoryStage.LIFT,
+            total_started,
+            ik_solution_count,
+        )
     waypoints.extend(
         GeometricWaypoint(TrajectoryStage.LIFT, state.positions_rad, dict(channels))
         for state in lift_states
@@ -960,6 +1142,7 @@ def _build_route(
                 corridor,
                 corridor.egress_top_offset_m,
                 request.robot_model.tcp_frame,
+                request.object_config.payload_motion_strategy,
             )
             world_placement_pose = _with_orientation(
                 world_placement_pose,
@@ -994,7 +1177,7 @@ def _build_route(
                     strict_loaded_environment,
                     tuple(waypoints),
                     channels,
-                    seed,
+                    sample_offset,
                     attempts,
                     total_started,
                     ik_solution_count,
@@ -1033,7 +1216,7 @@ def _build_route(
                             grasp_pose,
                             strict_loaded_environment,
                             candidate.candidate_id,
-                            seed,
+                            sample_offset,
                             TrajectoryStage.EGRESS,
                             attempts,
                             total_started,
@@ -1058,7 +1241,7 @@ def _build_route(
                                 attempts.append(
                                     PlanningAttempt(
                                         candidate.candidate_id,
-                                        seed,
+                                        sample_offset,
                                         failure.stage,
                                         monotonic() - free_search_started,
                                         failure.code,
@@ -1083,7 +1266,7 @@ def _build_route(
                                 grasp_pose,
                                 strict_loaded_environment,
                                 candidate.candidate_id,
-                                seed,
+                                sample_offset,
                                 TrajectoryStage.PLACE,
                                 attempts,
                                 total_started,
@@ -1154,7 +1337,7 @@ def _build_route(
                         attempts.append(
                             PlanningAttempt(
                                 candidate.candidate_id,
-                                seed,
+                                sample_offset,
                                 exc.stage,
                                 monotonic() - free_search_started,
                                 PlanningErrorCode.RUCKIG_FAILED,
@@ -1240,7 +1423,7 @@ def _build_route(
                     preplace.positions_rad,
                     strict_loaded_environment,
                     candidate.candidate_id,
-                    seed,
+                    sample_offset,
                     TrajectoryStage.EGRESS,
                     attempts,
                     total_started,
@@ -1252,7 +1435,7 @@ def _build_route(
                     place_state.positions_rad,
                     strict_loaded_environment,
                     candidate.candidate_id,
-                    seed,
+                    sample_offset,
                     TrajectoryStage.PLACE,
                     attempts,
                     total_started,
@@ -1527,7 +1710,7 @@ def _vertical_transit_global_route(
     corridor_upper: RigidTransform,
     corridor_goal: tuple[float, ...],
     environment,
-    seed: int,
+    sample_offset: int,
     total_started: float,
     ik_solution_count: int,
 ) -> tuple[tuple[tuple[float, ...], ...], str]:
@@ -1592,7 +1775,12 @@ def _vertical_transit_global_route(
 
     try:
         branch_path = _compact_joint_path(
-            vamp.plan(initial, corridor_goal, environment, seed=seed).path
+            vamp.plan(
+                initial,
+                corridor_goal,
+                environment,
+                sample_offset=sample_offset,
+            ).path
         )
         branch_metrics = _sampled_orientation_deviation(
             branch_path,
@@ -1635,7 +1823,10 @@ def _vertical_transit_global_route(
                     request.robot_model,
                     connector_prefix,
                     vamp.plan(
-                        connector_prefix[-1], corridor_goal, environment, seed=seed
+                        connector_prefix[-1],
+                        corridor_goal,
+                        environment,
+                        sample_offset=sample_offset,
                     ).path[1:],
                 )
             )
@@ -1685,7 +1876,7 @@ def _vertical_transit_free_route(
     strict_loaded_environment,
     waypoints: tuple[GeometricWaypoint, ...],
     channels: dict[str, float],
-    seed: int,
+    sample_offset: int,
     attempts: list[PlanningAttempt],
     total_started: float,
     ik_solution_count: int,
@@ -1707,16 +1898,40 @@ def _vertical_transit_free_route(
         corridor,
         corridor.egress_transition_offset_m,
         request.robot_model.tcp_frame,
+        request.object_config.payload_motion_strategy,
     )
     upper_world = _vertical_corridor_pose(
         candidate.T_world_tcp,
         corridor,
         corridor.egress_top_offset_m,
         request.robot_model.tcp_frame,
+        request.object_config.payload_motion_strategy,
     )
+    retreat_poses: tuple[RigidTransform, ...] = ()
+    diagonal_start = world_lift_pose
+    if (
+        request.object_config.payload_motion_strategy
+        is LocalMotionStrategy.STAGED_PORTAL
+    ):
+        retreat_world = reframe(
+            candidate.T_world_pregrasp,
+            child_frame=request.robot_model.tcp_frame,
+        )
+        if (
+            float(retreat_world.matrix[2][3])
+            > float(world_lift_pose.matrix[2][3]) + 1e-9
+        ):
+            retreat_poses = _interpolate_poses(
+                world_lift_pose,
+                retreat_world,
+                corridor.egress_waypoint_step_m,
+                request.planning_policy.cartesian_rotation_step_rad,
+            )[1:]
+            diagonal_start = retreat_world
     corridor_world_poses = (
+        *retreat_poses,
         *_interpolate_poses(
-            world_lift_pose,
+            diagonal_start,
             transition_world,
             corridor.egress_waypoint_step_m,
             request.planning_policy.cartesian_rotation_step_rad,
@@ -1767,7 +1982,7 @@ def _vertical_transit_free_route(
     attempts.append(
         PlanningAttempt(
             candidate.candidate_id,
-            seed,
+            sample_offset,
             TrajectoryStage.EGRESS,
             monotonic() - route_started,
             None,
@@ -1796,7 +2011,7 @@ def _vertical_transit_free_route(
             grasp_pose,
             strict_loaded_environment,
             candidate.candidate_id,
-            seed,
+            sample_offset,
             TrajectoryStage.PLACE,
             attempts,
             total_started,
@@ -1842,6 +2057,305 @@ def _vertical_transit_free_route(
             candidate_place,
         ),
     )
+
+
+def _staged_approach_route(
+    request: PlanningRequest,
+    candidate: GraspCandidate,
+    ik_solver: IKSolver,
+    vamp: VampBackend,
+    poses: tuple[RigidTransform, ...],
+    seed_state: RobotState,
+    target_geometries: tuple[SceneGeometry, ...],
+    environment_geometries: tuple[SceneGeometry, ...],
+    allowed_target_contacts: tuple[_TargetContactAllowance, ...],
+    sample_offset: int,
+    total_started: float,
+    ik_solution_count: int,
+) -> tuple[RobotState, ...]:
+    transition_distance_m = _approach_contact_transition_m(request)
+    if not poses:
+        return _continuous_ik(
+            request,
+            candidate,
+            ik_solver,
+            vamp,
+            poses,
+            seed_state,
+            target_geometries,
+            environment_geometries,
+            allowed_target_contacts,
+            TrajectoryStage.APPROACH,
+            total_started,
+            ik_solution_count,
+        )
+
+    grasp_matrix = np.asarray(poses[-1].matrix, dtype=np.float64)
+    staging_matrix = grasp_matrix.copy()
+    staging_matrix[:3, 3] -= (
+        transition_distance_m * grasp_matrix[:3, 2]
+    )
+    staging_pose = RigidTransform(
+        poses[-1].parent_frame,
+        poses[-1].child_frame,
+        tuple(tuple(float(value) for value in row) for row in staging_matrix),
+    )  # type: ignore[arg-type]
+    started = monotonic()
+    staging_environment = vamp.environment(
+        request.scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(request.target_object_id,),
+    )
+    solutions = _solve_ik(
+        ik_solver,
+        request,
+        staging_pose,
+        seed_state,
+        TrajectoryStage.APPROACH,
+        ik_solution_count,
+        solution_validator=lambda state: _pregrasp_solution_valid(
+            state,
+            request,
+            vamp,
+            staging_environment,
+            target_geometries,
+            candidate.grasp_command.pregrasp_opening_m,
+        ),
+    )
+    target_contact_rejected = False
+    remaining = list(enumerate(solutions))
+    staging_path = None
+    while remaining:
+        try:
+            path, selected_index = _vamp_plan_to_any(
+                vamp,
+                seed_state.positions_rad,
+                tuple(solution.positions_rad for _, solution in remaining),
+                staging_environment,
+                sample_offset=sample_offset,
+            )
+        except BackendOperationError:
+            break
+        if _path_has_forbidden_target_contact(
+            path,
+            target_geometries,
+            candidate.grasp_command.pregrasp_opening_m,
+            vamp,
+            request.T_world_base,
+        ):
+            target_contact_rejected = True
+            del remaining[selected_index]
+            continue
+        staging_path = _compact_joint_path(path)
+        _check_stage_budget(
+            request,
+            monotonic() - started,
+            total_started,
+            TrajectoryStage.APPROACH,
+        )
+        break
+    if staging_path is None:
+        raise _RouteFailure(
+            (
+                PlanningErrorCode.STAGE_COLLISION_VIOLATION
+                if target_contact_rejected
+                else PlanningErrorCode.VAMP_SEARCH_FAILED
+            ),
+            TrajectoryStage.APPROACH,
+            (
+                "route to contact staging has forbidden early target contact"
+                if target_contact_rejected
+                else "VAMP found no collision-valid route to contact staging"
+            ),
+        )
+    local_interpolation = _interpolate_poses(
+        staging_pose,
+        poses[-1],
+        request.planning_policy.cartesian_translation_step_m,
+        request.planning_policy.cartesian_rotation_step_rad,
+    )
+    local_poses = local_interpolation[1:]
+    if not local_poses:
+        return tuple(
+            RobotState(request.robot_model.joint_names, positions)
+            for positions in staging_path[1:]
+        )
+    local_states = _continuous_ik(
+        request,
+        candidate,
+        ik_solver,
+        vamp,
+        local_poses,
+        RobotState(request.robot_model.joint_names, staging_path[-1]),
+        target_geometries,
+        environment_geometries,
+        _approach_contact_allowances(
+            local_interpolation,
+            transition_distance_m,
+            frozenset(candidate.expected_contacts),
+        ),
+        TrajectoryStage.APPROACH,
+        total_started,
+        ik_solution_count,
+    )
+    combined = _compact_joint_path(
+        (
+            *staging_path[1:],
+            *(state.positions_rad for state in local_states),
+        )
+    )
+    return tuple(
+        RobotState(request.robot_model.joint_names, positions)
+        for positions in combined
+    )
+
+
+def _vamp_plan_to_any(
+    vamp: VampBackend,
+    start: tuple[float, ...],
+    goals: tuple[tuple[float, ...], ...],
+    environment,
+    *,
+    sample_offset: int,
+) -> tuple[tuple[tuple[float, ...], ...], int]:
+    """Plan one native VAMP search to any collision-valid goal."""
+    result = vamp.plan_to_any(
+        start,
+        goals,
+        environment,
+        sample_offset=sample_offset,
+    )
+    return result.path, result.selected_goal_index
+
+
+def _staged_lift_route(
+    request: PlanningRequest,
+    candidate: GraspCandidate,
+    ik_solver: IKSolver,
+    vamp: VampBackend,
+    poses: tuple[RigidTransform, ...],
+    seed_state: RobotState,
+    target_geometries: tuple[SceneGeometry, ...],
+    environment_geometries: tuple[SceneGeometry, ...],
+    allowed_target_contacts: tuple[_TargetContactAllowance, ...],
+    stage: TrajectoryStage,
+    sample_offset: int,
+    total_started: float,
+    ik_solution_count: int,
+) -> tuple[RobotState, ...]:
+    if stage is not TrajectoryStage.LIFT:
+        raise ValueError("staged LIFT route requires the LIFT stage")
+    if target_geometries or allowed_target_contacts:
+        raise ValueError("staged LIFT route does not accept target-contact inputs")
+    support_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group == request.source_support_group
+    )
+    non_support_geometries = tuple(
+        item
+        for item in environment_geometries
+        if item.collision_group != request.source_support_group
+    )
+    departure_scene = SceneSnapshot(
+        f"{request.scene.snapshot_id}.lift_without_source_support",
+        request.scene.world_frame,
+        non_support_geometries,
+    )
+    departure_environment = vamp.environment(
+        departure_scene,
+        T_world_base=request.T_world_base,
+        excluded_object_ids=(),
+        T_tcp_object=candidate.T_tcp_object,
+        attached_geometry=request.object_config.attached_geometry,
+    )
+    states: list[RobotState] = []
+    current = seed_state
+    support_departed = False
+    started = monotonic()
+    for pose_index, pose in enumerate(poses):
+        solutions = _solve_ik(
+            ik_solver,
+            request,
+            pose,
+            current,
+            stage,
+            ik_solution_count,
+        )
+        routes = []
+        for solution_index, solution in enumerate(solutions):
+            if not _has_joint_margin(solution, request):
+                continue
+            environment = departure_environment
+            if not vamp.configuration_valid(solution.positions_rad, environment):
+                continue
+            try:
+                path = _compact_joint_path(
+                    vamp.plan(
+                        current.positions_rad,
+                        solution.positions_rad,
+                        environment,
+                        sample_offset=sample_offset,
+                    ).path
+                )
+            except BackendOperationError:
+                continue
+            route_departed = support_departed
+            route_valid = True
+            for left, right in zip(path, path[1:]):
+                next_departed = _lift_departure_motion_is_valid(
+                    left,
+                    right,
+                    route_departed,
+                    request,
+                    candidate,
+                    vamp,
+                    environment_geometries,
+                    support_geometries,
+                    non_support_geometries,
+                )
+                if next_departed is None:
+                    route_valid = False
+                    break
+                route_departed = next_departed
+            if route_valid:
+                routes.append(
+                    (
+                        _joint_path_length(path),
+                        solution_index,
+                        path,
+                        route_departed,
+                    )
+                )
+            _check_stage_budget(
+                request,
+                monotonic() - started,
+                total_started,
+                stage,
+            )
+        if not routes:
+            raise _RouteFailure(
+                PlanningErrorCode.CONTINUOUS_IK_FAILED,
+                stage,
+                "no collision-valid joint route reached LIFT Cartesian sample "
+                f"{pose_index + 1}/{len(poses)}",
+            )
+        _, _, path, support_departed = min(
+            routes,
+            key=lambda item: (item[0], item[1]),
+        )
+        states.extend(
+            RobotState(request.robot_model.joint_names, positions)
+            for positions in path[1:]
+        )
+        current = RobotState(request.robot_model.joint_names, path[-1])
+    if not support_departed:
+        raise _RouteFailure(
+            PlanningErrorCode.STAGE_COLLISION_VIOLATION,
+            stage,
+            "attached object did not depart the declared source support during LIFT",
+        )
+    return tuple(states)
 
 
 def _continuous_ik(
@@ -2295,20 +2809,27 @@ def _vamp_stage(
     goal: tuple[float, ...],
     environment,
     candidate_id: str,
-    seed: int,
+    sample_offset: int,
     stage: TrajectoryStage,
     attempts: list[PlanningAttempt],
     total_started: float,
 ) -> tuple[tuple[float, ...], ...]:
     started = monotonic()
     try:
-        result = vamp.plan(start, goal, environment, seed=seed)
+        result = vamp.plan(start, goal, environment, sample_offset=sample_offset)
     except BackendOperationError as exc:
         raise _RouteFailure(PlanningErrorCode.VAMP_SEARCH_FAILED, stage, str(exc)) from exc
     elapsed = monotonic() - started
     _check_stage_budget(request, elapsed, total_started, stage)
     attempts.append(
-        PlanningAttempt(candidate_id, seed, stage, elapsed, None, f"VAMP {stage.value} succeeded")
+        PlanningAttempt(
+            candidate_id,
+            sample_offset,
+            stage,
+            elapsed,
+            None,
+            f"VAMP {stage.value} succeeded",
+        )
     )
     return result.path
 
@@ -2400,7 +2921,7 @@ def _orientation_preferred_vamp_stage(
     preferred_orientation: RigidTransform,
     environment,
     candidate_id: str,
-    seed: int,
+    sample_offset: int,
     stage: TrajectoryStage,
     attempts: list[PlanningAttempt],
     total_started: float,
@@ -2427,7 +2948,7 @@ def _orientation_preferred_vamp_stage(
                 start,
                 solution.positions_rad,
                 environment,
-                seed=seed,
+                sample_offset=sample_offset,
             ).path
         except BackendOperationError as exc:
             planner_failures.append(str(exc))
@@ -2490,7 +3011,7 @@ def _orientation_preferred_vamp_stage(
     attempts.append(
         PlanningAttempt(
             candidate_id,
-            seed,
+            sample_offset,
             stage,
             elapsed,
             None,
@@ -3300,7 +3821,7 @@ def _validate_time_parameterized_trajectory(
                     opening_m,
                     request.T_world_base,
                     use_physical_pad_hulls=grasp_distance_m
-                    <= request.planning_policy.approach_contact_transition_m + 1e-12,
+                    <= _approach_contact_transition_m(request) + 1e-12,
                 )
                 if non_support_contacts or support_contacts:
                     raise _RouteFailure(
@@ -3347,7 +3868,7 @@ def _validate_time_parameterized_trajectory(
                         np.linalg.norm(tcp_position - grasp_position)
                     )
                     if grasp_distance_m <= (
-                        request.planning_policy.approach_contact_transition_m + 1e-12
+                        _approach_contact_transition_m(request) + 1e-12
                     ):
                         allowed_target_contacts = expected_contacts
                 elif stage is TrajectoryStage.GRASP:
@@ -3844,10 +4365,16 @@ def _vertical_corridor_pose(
     corridor: VerticalTransitCorridor,
     z_offset_m: float,
     child_frame: str,
+    strategy: LocalMotionStrategy,
 ) -> RigidTransform:
     rotation = np.asarray(grasp_pose.matrix, dtype=np.float64)[:3, :3]
     approach = np.asarray((0.0, 0.0, -1.0), dtype=np.float64)
-    closing = rotation[:, 0] - float(np.dot(rotation[:, 0], approach)) * approach
+    closing_column = (
+        1 if strategy is LocalMotionStrategy.STAGED_PORTAL else 0
+    )
+    closing = rotation[:, closing_column] - float(
+        np.dot(rotation[:, closing_column], approach)
+    ) * approach
     closing_norm = float(np.linalg.norm(closing))
     if closing_norm <= 1e-9:
         raise _RouteFailure(
@@ -3856,9 +4383,13 @@ def _vertical_corridor_pose(
             "vertical transit approach is parallel to the candidate closing axis",
         )
     closing /= closing_norm
-    lateral = np.cross(approach, closing)
     matrix = np.eye(4, dtype=np.float64)
-    matrix[:3, :3] = np.column_stack((closing, lateral, approach))
+    if strategy is LocalMotionStrategy.STAGED_PORTAL:
+        tcp_x = np.cross(closing, approach)
+        matrix[:3, :3] = np.column_stack((tcp_x, closing, approach))
+    else:
+        tcp_y = np.cross(approach, closing)
+        matrix[:3, :3] = np.column_stack((closing, tcp_y, approach))
     matrix[:3, 3] = (
         corridor.portal_world_xy_m[0],
         corridor.portal_world_xy_m[1],
@@ -4040,7 +4571,7 @@ def _radical_inverse(index: int, base: int) -> float:
 def _route_selection_key(
     route: _Route,
     request: PlanningRequest,
-    seed: int,
+    search_attempt: int,
 ) -> tuple[float, ...]:
     positions = tuple(item.positions_rad for item in route.waypoints)
     length = sum(
@@ -4069,11 +4600,11 @@ def _route_selection_key(
             route.payload_cumulative_translation_m,
             route.orientation_preference_cost_rad,
             length,
-            seed,
+            search_attempt,
             request,
         )
         return (*key[:-1], -minimum_margin, key[-1])
-    return length, -minimum_margin, seed
+    return length, -minimum_margin, search_attempt
 
 
 def _check_stage_budget(
@@ -4116,10 +4647,9 @@ def _metadata(
             "ik": f"curobo-{ik_version}",
             "ruckig": ruckig_version,
         },
-        "random_seed": request.random_seed,
         "budgets": {
             "maximum_candidates": request.budgets.maximum_candidates,
-            "seeds_per_candidate": request.budgets.seeds_per_candidate,
+            "search_attempts_per_candidate": request.budgets.search_attempts_per_candidate,
             "stage_timeout_s": request.budgets.stage_timeout_s,
             "total_timeout_s": request.budgets.total_timeout_s,
         },
