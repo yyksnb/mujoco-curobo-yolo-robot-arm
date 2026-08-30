@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from math import ceil, cos, pi, sin, sqrt
+from math import ceil, cos, inf, nextafter, pi, sin, sqrt
 from time import monotonic
 from typing import Callable
 
@@ -4080,8 +4080,11 @@ def _trajectory_segment_validation_samples(
         )
         for index in range(section_sample_count + 1):
             sample_times.add(
-                section.start_time_s
-                + section.duration_s * index / section_sample_count
+                _normalize_segment_sample_time(
+                    segment,
+                    section.start_time_s
+                    + section.duration_s * index / section_sample_count,
+                )
             )
         if len(sample_times) > maximum_sample_count:
             raise _RouteFailure(
@@ -4107,6 +4110,15 @@ def _trajectory_segment_validation_samples(
             maximum_sample_count,
         )
     return tuple(segment.sample(time_s) for time_s in sorted(sample_times))
+
+
+def _normalize_segment_sample_time(
+    segment: TrajectorySegment,
+    local_time_s: float,
+) -> float:
+    if local_time_s == nextafter(segment.duration_s, inf):
+        return segment.duration_s
+    return local_time_s
 
 
 def _refine_trajectory_times_by_swept_motion(

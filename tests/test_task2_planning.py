@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import inf, nextafter
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,7 @@ from task2.planning import (
     _compact_joint_path,
     _farthest_collision_valid_shortcut,
     _joint_path_length,
+    _normalize_segment_sample_time,
     _pregrasp_path_quality_key,
     _sampled_orientation_deviation,
 )
@@ -68,6 +70,15 @@ from task2.planning import (
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = load_task2_config(ROOT / "configs/task2/pipeline.yaml")
 PROFILE = CONFIG.end_effectors[0]
+
+
+def test_segment_validation_normalizes_only_one_ulp_endpoint_roundoff():
+    segment = SimpleNamespace(duration_s=0.40476199999999996)
+    one_ulp_high = nextafter(segment.duration_s, inf)
+    two_ulps_high = nextafter(one_ulp_high, inf)
+
+    assert _normalize_segment_sample_time(segment, one_ulp_high) == segment.duration_s
+    assert _normalize_segment_sample_time(segment, two_ulps_high) == two_ulps_high
 
 
 class _FakeVamp:
