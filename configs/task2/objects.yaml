@@ -85,7 +85,8 @@ objects:
             force_margin_n: 3.700000
     planning:
       approach_motion_strategy: continuous_cartesian
-      payload_motion_strategy: continuous_cartesian
+      payload_motion_strategy: adaptive_portal
+      payload_initial_vertical_clearance_m: 0.010
       attached_geometry:
         - geometry_id: marker_body_capsule
           T_object_geometry: {parent_frame: object, child_frame: marker_body_capsule, translation_m: [-0.000085271, 0.0, 0.008015441], quaternion_wxyz: [0.707106781, 0.0, 0.707106781, 0.0]}
@@ -142,6 +143,7 @@ objects:
       approach_motion_strategy: staged_portal
       payload_motion_strategy: staged_portal
       approach_contact_transition_m: 0.030
+      payload_initial_vertical_clearance_m: 0.0
       attached_geometry:
         - geometry_id: masking_tape_ring_00
           T_object_geometry: {parent_frame: object, child_frame: masking_tape_ring_00, translation_m: [0.028976000, 0.000000000, 0.010000000], quaternion_wxyz: [1.000000000, 0.0, 0.0, 0.000000000]}
@@ -271,6 +273,7 @@ objects:
     planning:
       approach_motion_strategy: continuous_cartesian
       payload_motion_strategy: continuous_cartesian
+      payload_initial_vertical_clearance_m: 0.0
       attached_geometry:
         - geometry_id: rivet_gun_proxy_00
           T_object_geometry: {parent_frame: object, child_frame: rivet_gun_proxy_00, translation_m: [0.046962383, -0.015460274, 0.013999021], quaternion_wxyz: [0.667637079, -0.232939327, 0.667637079, 0.232939327]}
@@ -400,6 +403,7 @@ objects:
     planning:
       approach_motion_strategy: continuous_cartesian
       payload_motion_strategy: continuous_cartesian
+      payload_initial_vertical_clearance_m: 0.0
       attached_geometry:
         - geometry_id: standard_part_body
           T_object_geometry: {parent_frame: object, child_frame: standard_part_body, translation_m: [0.0, 0.0, 0.002695], quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]}

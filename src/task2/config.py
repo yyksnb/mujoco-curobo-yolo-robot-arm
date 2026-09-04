@@ -416,6 +416,10 @@ def _parse_objects(
                 if transition is not None
                 else None
             ),
+            _as_number(
+                plan_payload.get("payload_initial_vertical_clearance_m"),
+                f"objects.{object_type}.planning.payload_initial_vertical_clearance_m",
+            ),
         )
         plan_config.validate()
         planning.append(plan_config)
@@ -475,6 +479,30 @@ def _parse_template(value: object, object_type: str, index: int) -> GraspTemplat
                 adaptive_item,
                 "pregrasp_distance_m",
                 f"{path}.portal_adaptive_approach",
+            ),
+            (
+                tuple(
+                    _as_number(
+                        value,
+                        f"{path}.portal_adaptive_approach.contact_axis_offsets_rad",
+                    )
+                    for value in _as_list(
+                        adaptive_item["contact_axis_offsets_rad"],
+                        f"{path}.portal_adaptive_approach.contact_axis_offsets_rad",
+                    )
+                )
+                if adaptive_item.get("contact_axis_offsets_rad") is not None
+                else None
+            ),
+            tuple(
+                _as_number(
+                    value,
+                    f"{path}.portal_adaptive_approach.secondary_contact_axis_offsets_rad",
+                )
+                for value in _as_list(
+                    adaptive_item.get("secondary_contact_axis_offsets_rad", []),
+                    f"{path}.portal_adaptive_approach.secondary_contact_axis_offsets_rad",
+                )
             ),
         )
     return GraspTemplateConfig(

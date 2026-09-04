@@ -8,8 +8,8 @@ policy:
   preplace_offset_m: 0.12
   joint_limit_margin_rad: 0.005
   pregrasp_joint_path_detour_ratio_limit: 3.0
-  payload_tcp_max_angular_velocity_rad_s: 0.44
-  payload_tcp_max_translation_velocity_m_s: 0.20
+  payload_tcp_max_angular_velocity_rad_s: 0.66
+  payload_tcp_max_translation_velocity_m_s: 0.30
   payload_tcp_max_translation_acceleration_m_s2: 2.00
   payload_motion_validation_time_step_s: 0.01
   trajectory_validation_joint_step_rad: 0.01
@@ -66,7 +66,7 @@ backends:
     vamp:
       version: 0.6.4
       sample_offset_start: 19
-      sample_offset_stride: 40000
+      sample_offset_stride: 240000
       range_rad: 0.5
       dynamic_domain: false
       max_iterations: 20000

@@ -376,6 +376,7 @@ class AttachedGeometry:
 class LocalMotionStrategy(str, Enum):
     CONTINUOUS_CARTESIAN = "continuous_cartesian"
     STAGED_PORTAL = "staged_portal"
+    ADAPTIVE_PORTAL = "adaptive_portal"
 
 
 @dataclass(frozen=True)
@@ -385,6 +386,7 @@ class PlanningObjectConfig:
     approach_motion_strategy: LocalMotionStrategy
     payload_motion_strategy: LocalMotionStrategy
     approach_contact_transition_m: float | None = None
+    payload_initial_vertical_clearance_m: float = 0.0
 
     def validate(self) -> None:
         if not self.object_type or not self.attached_geometry:
@@ -400,6 +402,13 @@ class PlanningObjectConfig:
         ):
             raise ValueError(
                 "object approach contact transition must be finite and positive"
+            )
+        if (
+            not isfinite(self.payload_initial_vertical_clearance_m)
+            or self.payload_initial_vertical_clearance_m < 0.0
+        ):
+            raise ValueError(
+                "object payload initial vertical clearance must be finite and non-negative"
             )
 
 

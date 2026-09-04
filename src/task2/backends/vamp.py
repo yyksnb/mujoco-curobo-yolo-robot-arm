@@ -560,17 +560,9 @@ class VampBackend:
         if not result.solved:
             raise BackendOperationError("VAMP path simplification failed")
         elapsed = monotonic() - started
-        path_array = np.asarray(result.path.numpy(), dtype=np.float64)
-        if path_array.ndim != 2 or path_array.shape[1] != len(self._model.joint_names):
-            raise BackendOperationError("VAMP returned a malformed path")
-        path_rows = tuple(tuple(float(value) for value in row) for row in path_array)
-        path = []
-        reference = start
-        for row in path_rows:
-            unwrapped = self._model.unwrap_positions(row, reference)
-            path.append(unwrapped)
-            reference = unwrapped
-        path = tuple(path)
+        simplified_path_array = np.asarray(result.path.numpy(), dtype=np.float64)
+        simplified_path = self._unwrapped_native_path(simplified_path_array, start)
+        path = self._validated_native_path(simplified_path, environment)
         if not path:
             raise BackendOperationError("VAMP returned an empty path")
         endpoint = path[-1]
@@ -595,6 +587,39 @@ class VampBackend:
             elapsed_s=elapsed,
             iterations=planning_iterations,
             selected_goal_index=selected_goal_index,
+        )
+
+    def _unwrapped_native_path(
+        self,
+        path_array: np.ndarray,
+        start: tuple[float, ...],
+    ) -> tuple[tuple[float, ...], ...]:
+        if (
+            path_array.ndim != 2
+            or path_array.shape[1] != len(self._model.joint_names)
+        ):
+            raise BackendOperationError("VAMP returned a malformed path")
+        path = []
+        reference = start
+        for row in path_array:
+            unwrapped = self._model.unwrap_positions(
+                tuple(float(value) for value in row), reference
+            )
+            path.append(unwrapped)
+            reference = unwrapped
+        if not path:
+            raise BackendOperationError("VAMP returned an empty path")
+        return tuple(path)
+
+    def _validated_native_path(
+        self,
+        simplified_path: tuple[tuple[float, ...], ...],
+        environment,
+    ) -> tuple[tuple[float, ...], ...]:
+        if self.path_valid(simplified_path, environment):
+            return simplified_path
+        raise BackendOperationError(
+            "VAMP simplified path failed native validation"
         )
 
     def configuration_valid(self, configuration: tuple[float, ...], environment) -> bool:
