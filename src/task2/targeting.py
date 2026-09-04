@@ -189,17 +189,30 @@ def _build_portal_adaptive_candidates(
         adaptive.maximum_tilt_rad,
         atan2(radial_norm, context.vertical_span_m),
     )
-    fallback_tilt = min(
+    margin_tilt = min(
         adaptive.maximum_tilt_rad,
         nominal_tilt + adaptive.tilt_margin_rad,
     )
     tilt_values = tuple(
-        dict.fromkeys((nominal_tilt, 0.5 * (nominal_tilt + fallback_tilt), fallback_tilt))
+        dict.fromkeys(
+            (
+                *((0.0,) if adaptive.contact_axis_offsets_rad is not None else ()),
+                nominal_tilt,
+                0.5 * (nominal_tilt + margin_tilt),
+                margin_tilt,
+            )
+        )
     )
-    axis_count = round(pi / adaptive.contact_axis_step_rad)
+    axis_values = _portal_contact_axes(template, adaptive.contact_axis_step_rad)
+    secondary_offsets = adaptive.secondary_contact_axis_offsets_rad
+    primary_axis_offsets = tuple(
+        offset
+        for _, offset in axis_values
+        if all(abs(offset - secondary) > 1e-12 for secondary in secondary_offsets)
+    )
+    maximum_primary_axis_offset = max(abs(offset) for offset in primary_axis_offsets)
     ranked = []
-    for axis_index in range(axis_count):
-        axis_rad = axis_index * adaptive.contact_axis_step_rad
+    for axis_index, (axis_rad, axis_offset_rad) in enumerate(axis_values):
         closing_object = (cos(axis_rad), sin(axis_rad), 0.0)
         closing_world = _normalized(_matvec(world_object_rotation, closing_object))
         vertical = _normalized(_subtract((0.0, 0.0, -1.0), _scale(closing_world, -closing_world[2])))
@@ -257,17 +270,123 @@ def _build_portal_adaptive_candidates(
                 )
                 ranked.append(
                     (
-                        (
-                            -access_score,
-                            axis_index,
-                            tilt_index,
-                            sign_index,
+                        _bounded_portal_candidate_rank(
+                            axis_offset_rad=axis_offset_rad,
+                            maximum_primary_axis_offset_rad=maximum_primary_axis_offset,
+                            secondary_axis=any(
+                                abs(axis_offset_rad - secondary) <= 1e-12
+                                for secondary in secondary_offsets
+                            ),
+                            tilt_rad=tilt_rad,
+                            nominal_tilt_rad=nominal_tilt,
+                            tilt_margin_rad=adaptive.tilt_margin_rad,
+                            maximum_tilt_rad=adaptive.maximum_tilt_rad,
+                            axis_index=axis_index,
+                            tilt_index=tilt_index,
+                            sign_index=sign_index,
+                            access_score=access_score,
                         ),
                         candidate,
                     )
                 )
     ranked.sort(key=lambda item: item[0])
     return tuple(candidate for _, candidate in ranked)
+
+
+def _bounded_portal_candidate_rank(
+    *,
+    axis_offset_rad: float,
+    maximum_primary_axis_offset_rad: float,
+    secondary_axis: bool,
+    tilt_rad: float,
+    nominal_tilt_rad: float,
+    tilt_margin_rad: float,
+    maximum_tilt_rad: float,
+    axis_index: int,
+    tilt_index: int,
+    sign_index: int,
+    access_score: float,
+) -> tuple[float | int, ...]:
+    nominal_axis = abs(axis_offset_rad) <= 1e-12
+    nominal_tilt = abs(tilt_rad - nominal_tilt_rad) <= 1e-12
+    maximum_primary_skew = (
+        not nominal_axis
+        and not secondary_axis
+        and abs(abs(axis_offset_rad) - maximum_primary_axis_offset_rad) <= 1e-12
+    )
+    lower_boundary_limited = nominal_tilt_rad <= tilt_margin_rad + 1e-12
+    upper_boundary_limited = (
+        nominal_tilt_rad + tilt_margin_rad >= maximum_tilt_rad - 1e-12
+    )
+    if (
+        upper_boundary_limited
+        and not nominal_axis
+        and not secondary_axis
+        and nominal_tilt
+    ):
+        tier = 0
+    elif lower_boundary_limited and nominal_axis and sign_index == 0 and tilt_rad > 1e-12:
+        tier = 0
+    elif not nominal_axis and not secondary_axis and nominal_tilt:
+        tier = 1
+    elif (
+        maximum_primary_skew
+        and sign_index == 0
+        and tilt_rad > nominal_tilt_rad + 1e-12
+    ):
+        tier = 2
+    elif secondary_axis and nominal_tilt:
+        tier = 3
+    else:
+        tier = 4
+    axis_magnitude_rank = (
+        -abs(axis_offset_rad)
+        if not nominal_axis and nominal_tilt
+        else abs(axis_offset_rad)
+    )
+    if nominal_tilt:
+        return (
+            0,
+            tier,
+            tilt_index,
+            sign_index,
+            axis_magnitude_rank,
+            axis_index,
+            -access_score,
+        )
+    # Keep bounded prefixes representative: try the nearest alternate tilt at
+    # the widest closing-axis offsets before spending budget on denser samples.
+    return (
+        1,
+        abs(tilt_rad - nominal_tilt_rad),
+        sign_index,
+        -abs(axis_offset_rad),
+        axis_index,
+        tier,
+        -access_score,
+    )
+
+
+def _portal_contact_axes(
+    template: GraspTemplateConfig,
+    step_rad: float,
+) -> tuple[tuple[float, float], ...]:
+    adaptive = template.portal_adaptive_approach
+    assert adaptive is not None
+    offsets = adaptive.contact_axis_offsets_rad
+    if offsets is None:
+        return tuple(
+            (axis_index * step_rad, 0.0)
+            for axis_index in range(round(pi / step_rad))
+        )
+
+    closing_axis = tuple(template.T_object_tcp.matrix[row][1] for row in range(3))
+    if abs(closing_axis[2]) > 1e-9:
+        raise ValueError(
+            "bounded portal-adaptive contact axes require a horizontal nominal closing axis"
+        )
+    nominal_rad = atan2(closing_axis[1], closing_axis[0]) % pi
+    return tuple(((nominal_rad + offset) % pi, offset) for offset in offsets)
 
 
 def _candidate_from_transform(

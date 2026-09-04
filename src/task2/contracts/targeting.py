@@ -64,6 +64,8 @@ class PortalAdaptiveApproachConfig:
     tilt_margin_rad: float
     maximum_tilt_rad: float
     pregrasp_distance_m: float
+    contact_axis_offsets_rad: tuple[float, ...] | None = None
+    secondary_contact_axis_offsets_rad: tuple[float, ...] = ()
 
     def validate(self) -> None:
         values = (
@@ -85,6 +87,24 @@ class PortalAdaptiveApproachConfig:
             raise ValueError("portal-adaptive maximum tilt must be within (0, pi/2)")
         if self.pregrasp_distance_m <= 0.0:
             raise ValueError("portal-adaptive pregrasp distance must be positive")
+        if self.contact_axis_offsets_rad is not None:
+            offsets = self.contact_axis_offsets_rad
+            if not offsets or any(
+                not isfinite(offset) or not -pi / 2.0 < offset < pi / 2.0
+                for offset in offsets
+            ):
+                raise ValueError(
+                    "portal-adaptive contact-axis offsets must be finite within (-pi/2, pi/2)"
+                )
+        if self.secondary_contact_axis_offsets_rad:
+            if self.contact_axis_offsets_rad is None or any(
+                all(abs(secondary - allowed) > 1e-12 for allowed in self.contact_axis_offsets_rad)
+                for secondary in self.secondary_contact_axis_offsets_rad
+            ):
+                raise ValueError(
+                    "secondary portal-adaptive contact-axis offsets must be selected "
+                    "from contact_axis_offsets_rad"
+                )
 
 
 @dataclass(frozen=True)
@@ -159,9 +179,13 @@ class GraspTemplateConfig:
             raise ValueError(f"{self.template_id} template_priority must be finite")
         self.diagnostics.validate()
         if self.portal_adaptive_approach is not None:
-            if not isinstance(self.yaw_symmetry, ContinuousYawSymmetry):
+            if (
+                self.portal_adaptive_approach.contact_axis_offsets_rad is None
+                and not isinstance(self.yaw_symmetry, ContinuousYawSymmetry)
+            ):
                 raise ValueError(
-                    f"{self.template_id} portal-adaptive approach requires continuous yaw symmetry"
+                    f"{self.template_id} unrestricted portal-adaptive approach requires "
+                    "continuous yaw symmetry"
                 )
             self.portal_adaptive_approach.validate()
 

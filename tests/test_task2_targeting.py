@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
-from math import cos, pi, radians, sin
+from math import cos, degrees, pi, radians, sin
 from pathlib import Path
+from struct import unpack
 
 import pytest
 
@@ -49,7 +50,7 @@ def _request(object_type: str, *, x_m: float = 0.4) -> TargetingRequest:
 
 def test_calibrated_templates_preserve_candidates_and_commands() -> None:
     expected = {
-        "marker": (2, 0.013014206, 0.75, "marker_parallel_body"),
+        "marker": (3, 0.011, 4.0, "marker_parallel_body"),
         "masking_tape": (4, 0.074333332, 2.0, "masking_tape_parallel_outer_wall"),
         "rivet_gun": (3, 0.011946974, 24.0, "rivet_gun_parallel_handle"),
         "standard_part": (4, 0.002745694, 0.30, "standard_part_parallel_shaft"),
@@ -203,6 +204,186 @@ def test_masking_tape_portal_access_generates_outward_tilted_candidates() -> Non
         assert distance == pytest.approx(0.06)
         assert ".axis_f64_" in candidate.candidate_id
         assert ".tilt_f64_" in candidate.candidate_id
+
+
+def test_marker_portal_access_preserves_closing_axis_and_uses_wide_pregrasp() -> None:
+    request = replace(
+        _request("marker", x_m=0.8),
+        T_world_object=RigidTransform(
+            "world",
+            "object",
+            (
+                (cos(pi / 7.0), -sin(pi / 7.0), 0.0, 0.8),
+                (sin(pi / 7.0), cos(pi / 7.0), 0.0, 0.7),
+                (0.0, 0.0, 1.0, 0.003),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        maximum_candidates=64,
+        access_context=TargetingAccessContext((0.425, 0.6), 0.51),
+    )
+    result = target(request)
+    assert result.success and len(result.candidates) == 57
+    nominal_closing = (0.0, 1.0, 0.0)
+    distinct_axes = set()
+    center_adaptive = [
+        candidate
+        for candidate in result.candidates
+        if candidate.template_id == "marker_parallel_body_portal_tilt"
+    ]
+    assert len(center_adaptive) == 56
+    assert all(
+        candidate.grasp_command.target_opening_m == pytest.approx(0.011)
+        for candidate in center_adaptive
+    )
+    assert {
+        round(
+            abs(
+                sum(
+                    candidate.T_object_tcp.matrix[row][1] * nominal_closing[row]
+                    for row in range(3)
+                )
+            ),
+            9,
+        )
+        for candidate in center_adaptive
+    } == {
+        1.0,
+        round(cos(15.0 * pi / 180.0), 9),
+        round(cos(25.0 * pi / 180.0), 9),
+        round(cos(35.0 * pi / 180.0), 9),
+    }
+    for candidate in center_adaptive:
+        closing = tuple(candidate.T_object_tcp.matrix[row][1] for row in range(3))
+        distinct_axes.add(tuple(round(value, 9) for value in closing))
+        alignment = abs(sum(a * b for a, b in zip(closing, nominal_closing)))
+        assert any(
+            alignment == pytest.approx(expected, abs=1e-9)
+            for expected in (
+                1.0,
+                cos(15.0 * pi / 180.0),
+                cos(25.0 * pi / 180.0),
+                cos(35.0 * pi / 180.0),
+            )
+        )
+        assert candidate.grasp_command.pregrasp_opening_m == pytest.approx(0.084)
+        assert candidate.T_object_tcp.matrix[0][3] == pytest.approx(0.006204)
+        assert candidate.T_object_tcp.matrix[2][3] == pytest.approx(0.00741914)
+        distance = sum(
+            (
+                candidate.T_world_pregrasp.matrix[row][3]
+                - candidate.T_world_tcp.matrix[row][3]
+            )
+            ** 2
+            for row in range(3)
+        ) ** 0.5
+        assert distance == pytest.approx(0.06)
+        assert candidate.grasp_command.grip_force_limit_n == pytest.approx(4.0)
+        assert candidate.grasp_command.dwell_s == pytest.approx(1.0)
+    assert len(distinct_axes) == 14
+    ranked_axis_tilt_sign = []
+    for candidate in center_adaptive[:16]:
+        axis_hex = candidate.candidate_id.split(".axis_f64_", 1)[1].split(".", 1)[0]
+        tilt_hex = candidate.candidate_id.split(".tilt_f64_", 1)[1].split(".", 1)[0]
+        ranked_axis_tilt_sign.append(
+            (
+                round(degrees(unpack(">d", bytes.fromhex(axis_hex))[0])),
+                degrees(unpack(">d", bytes.fromhex(tilt_hex))[0]),
+                candidate.candidate_id.rsplit(".sign_", 1)[1],
+            )
+        )
+    assert [axis for axis, _, _ in ranked_axis_tilt_sign[:8]] == [
+        65,
+        115,
+        75,
+        105,
+        65,
+        115,
+        75,
+        105,
+    ]
+    assert all(
+        tilt == pytest.approx(ranked_axis_tilt_sign[0][1])
+        for _, tilt, _ in ranked_axis_tilt_sign[:14]
+    )
+    assert [axis for axis, _, _ in ranked_axis_tilt_sign[8:14]] == [
+        55,
+        125,
+        55,
+        125,
+        90,
+        90,
+    ]
+    assert {
+        (axis, sign) for axis, _, sign in ranked_axis_tilt_sign[:14]
+    } == {
+        (axis, sign)
+        for axis in (55, 65, 75, 90, 105, 115, 125)
+        for sign in ("m", "p")
+    }
+    assert [axis for axis, _, _ in ranked_axis_tilt_sign[14:16]] == [55, 125]
+    assert all(
+        tilt > ranked_axis_tilt_sign[0][1]
+        for _, tilt, _ in ranked_axis_tilt_sign[14:16]
+    )
+    assert ranked_axis_tilt_sign[14][1] == pytest.approx(
+        ranked_axis_tilt_sign[15][1]
+    )
+    assert ranked_axis_tilt_sign[14][1] < 45.0
+
+    near_request = replace(
+        request,
+        T_world_object=RigidTransform(
+            "world",
+            "object",
+            (
+                (cos(pi / 2.0), -sin(pi / 2.0), 0.0, 0.37),
+                (sin(pi / 2.0), cos(pi / 2.0), 0.0, 0.70),
+                (0.0, 0.0, 1.0, 0.003),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+    )
+    near_candidates = [
+        candidate
+        for candidate in target(near_request).candidates
+        if candidate.template_id == "marker_parallel_body_portal_tilt"
+    ]
+    first_axis_hex = near_candidates[0].candidate_id.split(
+        ".axis_f64_", 1
+    )[1].split(".", 1)[0]
+    first_tilt_hex = near_candidates[0].candidate_id.split(
+        ".tilt_f64_", 1
+    )[1].split(".", 1)[0]
+    assert degrees(
+        unpack(">d", bytes.fromhex(first_axis_hex))[0]
+    ) == pytest.approx(90.0)
+    assert 0.0 < degrees(unpack(">d", bytes.fromhex(first_tilt_hex))[0]) < 15.0
+
+    interior_request = replace(
+        request,
+        T_world_object=RigidTransform(
+            "world",
+            "object",
+            (
+                (1.0, 0.0, 0.0, 0.64),
+                (0.0, 1.0, 0.0, 0.70),
+                (0.0, 0.0, 1.0, 0.003),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+    )
+    interior_candidates = [
+        candidate
+        for candidate in target(interior_request).candidates
+        if candidate.template_id == "marker_parallel_body_portal_tilt"
+    ]
+    interior_axis_hex = interior_candidates[0].candidate_id.split(
+        ".axis_f64_", 1
+    )[1].split(".", 1)[0]
+    assert abs(
+        degrees(unpack(">d", bytes.fromhex(interior_axis_hex))[0]) - 90.0
+    ) == pytest.approx(25.0)
 
 
 def test_targeting_failure_codes_are_stable() -> None:
