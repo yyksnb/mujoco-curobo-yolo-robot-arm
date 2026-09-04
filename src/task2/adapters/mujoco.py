@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite, sqrt
+from math import isclose, isfinite, sqrt
 from pathlib import Path
 from struct import pack, unpack
 from typing import Any, Mapping
@@ -300,11 +300,8 @@ def read_activated_joint_state(
         data = mujoco.MjData(model)
     except Exception as exc:
         raise ModelLoadError(f"MuJoCo model load failed during tool activation: {exc}") from exc
-    positions = []
-    for binding in robot_config.joint_bindings:
-        if binding.joint_name in provided:
-            positions.append(provided[binding.joint_name])
-            continue
+    runtime_joint_ids = {}
+    for binding, limits in zip(robot_config.joint_bindings, robot_model.joint_limits):
         joint_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_JOINT, binding.runtime_joint_name
         )
@@ -312,6 +309,47 @@ def read_activated_joint_state(
             raise ControlInterfaceError(
                 f"activated MuJoCo model has no joint {binding.runtime_joint_name!r}"
             )
+        runtime_joint_ids[binding.joint_name] = joint_id
+        runtime_limited = bool(model.jnt_limited[joint_id])
+        if limits.continuous:
+            if runtime_limited:
+                raise ControlInterfaceError(
+                    f"continuous RobotModel joint {binding.joint_name} is limited in MuJoCo"
+                )
+            continue
+        if not runtime_limited:
+            raise ControlInterfaceError(
+                f"bounded RobotModel joint {binding.joint_name} is unlimited in MuJoCo"
+            )
+        runtime_minimum, runtime_maximum = (
+            float(value) for value in model.jnt_range[joint_id]
+        )
+        if not (
+            isclose(
+                runtime_minimum,
+                limits.minimum_position_rad,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            and isclose(
+                runtime_maximum,
+                limits.maximum_position_rad,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ControlInterfaceError(
+                f"MuJoCo joint limits for {binding.joint_name} "
+                f"[{runtime_minimum}, {runtime_maximum}] do not match RobotModel "
+                f"[{limits.minimum_position_rad}, {limits.maximum_position_rad}]"
+            )
+
+    positions = []
+    for binding in robot_config.joint_bindings:
+        if binding.joint_name in provided:
+            positions.append(provided[binding.joint_name])
+            continue
+        joint_id = runtime_joint_ids[binding.joint_name]
         positions.append(float(data.qpos[int(model.jnt_qposadr[joint_id])]))
     result = RobotState(robot_model.joint_names, tuple(positions))
     result.validate(robot_model)

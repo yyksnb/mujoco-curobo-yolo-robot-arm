@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from task2.adapters.mujoco import MuJoCoExecutorAdapter
+from task2.adapters.mujoco import MuJoCoExecutorAdapter, read_activated_joint_state
 from task2.adapters.errors import ControlInterfaceError
 from task2.config import load_task2_config
 from task2.contracts import (
@@ -23,6 +23,8 @@ from task2.contracts import (
     PlanningResult,
     RigidTransform,
     RuntimeObservation,
+    RobotModel,
+    RobotState,
     SceneObjectBinding,
     TrajectoryEvent,
     TrajectoryKnot,
@@ -52,6 +54,52 @@ def test_reusable_mujoco_assets_do_not_embed_gravity_compensation():
     ):
         model = mujoco.MjModel.from_xml_path(str(asset))
         assert not any(float(value) for value in model.body_gravcomp)
+
+
+def test_mujoco_runtime_joint_limits_match_formal_robot_model():
+    config = load_task2_config(ROOT / "configs/task2/pipeline.yaml")
+    profile = config.end_effectors[0]
+    robot_model = config.robot_model(profile)
+    robot_config = config.mujoco_robots[profile.profile_id]
+
+    state = read_activated_joint_state(
+        robot_config,
+        robot_model,
+        RobotState(robot_model.joint_names, robot_model.default_joint_positions),
+    )
+
+    assert state.joint_names == robot_model.joint_names
+
+
+def test_mujoco_runtime_rejects_joint_limits_that_differ_from_robot_model():
+    config = load_task2_config(ROOT / "configs/task2/pipeline.yaml")
+    profile = config.end_effectors[0]
+    robot_model = config.robot_model(profile)
+    robot_config = config.mujoco_robots[profile.profile_id]
+    joint_limits = list(robot_model.joint_limits)
+    joint_limits[1] = replace(
+        joint_limits[1],
+        minimum_position_rad=-2.24,
+        maximum_position_rad=2.24,
+    )
+    mismatched_model = RobotModel(
+        robot_model.model_id,
+        robot_model.base_frame,
+        robot_model.tcp_frame,
+        robot_model.joint_names,
+        tuple(joint_limits),
+        robot_model.default_joint_positions,
+    )
+
+    with pytest.raises(ControlInterfaceError, match="do not match RobotModel"):
+        read_activated_joint_state(
+            robot_config,
+            mismatched_model,
+            RobotState(
+                mismatched_model.joint_names,
+                mismatched_model.default_joint_positions,
+            ),
+        )
 
 
 def _pose(parent: str, child: str, xyz=(0.0, 0.0, 0.0)) -> RigidTransform:
