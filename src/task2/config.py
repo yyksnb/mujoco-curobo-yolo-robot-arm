@@ -40,6 +40,7 @@ from .contracts.targeting import (
     PortalAdaptiveApproachConfig,
     TargetingDiagnosticsConfig,
     TargetingObjectConfig,
+    TiltBandedGraspOffsetConfig,
 )
 from .ik import create_ik_solver
 from .planning import PlanningDependencies
@@ -459,6 +460,35 @@ def _parse_template(value: object, object_type: str, index: int) -> GraspTemplat
         adaptive_item = _as_mapping(
             adaptive_payload, f"{path}.portal_adaptive_approach"
         )
+        offset_payload = adaptive_item.get("tilt_banded_grasp_offset")
+        tilt_banded_offset = None
+        if offset_payload is not None:
+            offset_item = _as_mapping(
+                offset_payload,
+                f"{path}.portal_adaptive_approach.tilt_banded_grasp_offset",
+            )
+            tilt_banded_offset = TiltBandedGraspOffsetConfig(
+                _vector(
+                    offset_item,
+                    "axis_object",
+                    f"{path}.portal_adaptive_approach.tilt_banded_grasp_offset",
+                ),
+                _number(
+                    offset_item,
+                    "transition_tilt_rad",
+                    f"{path}.portal_adaptive_approach.tilt_banded_grasp_offset",
+                ),
+                _number(
+                    offset_item,
+                    "below_transition_offset_m",
+                    f"{path}.portal_adaptive_approach.tilt_banded_grasp_offset",
+                ),
+                _number(
+                    offset_item,
+                    "at_or_above_transition_offset_m",
+                    f"{path}.portal_adaptive_approach.tilt_banded_grasp_offset",
+                ),
+            )
         adaptive = PortalAdaptiveApproachConfig(
             _number(
                 adaptive_item,
@@ -502,6 +532,20 @@ def _parse_template(value: object, object_type: str, index: int) -> GraspTemplat
                 for value in _as_list(
                     adaptive_item.get("secondary_contact_axis_offsets_rad", []),
                     f"{path}.portal_adaptive_approach.secondary_contact_axis_offsets_rad",
+                )
+            ),
+            tilt_banded_offset,
+            tuple(
+                _vector(
+                    {"offset": value},
+                    "offset",
+                    f"{path}.portal_adaptive_approach.grasp_translation_offsets_object_m",
+                )
+                for value in _as_list(
+                    adaptive_item.get(
+                        "grasp_translation_offsets_object_m", [[0.0, 0.0, 0.0]]
+                    ),
+                    f"{path}.portal_adaptive_approach.grasp_translation_offsets_object_m",
                 )
             ),
         )

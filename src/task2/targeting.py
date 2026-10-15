@@ -205,6 +205,12 @@ def _build_portal_adaptive_candidates(
     )
     axis_values = _portal_contact_axes(template, adaptive.contact_axis_step_rad)
     secondary_offsets = adaptive.secondary_contact_axis_offsets_rad
+    preferred_post_transition_tilt = None
+    if adaptive.tilt_banded_grasp_offset is not None:
+        transition = adaptive.tilt_banded_grasp_offset.transition_tilt_rad
+        midpoint_tilt = 0.5 * (nominal_tilt + margin_tilt)
+        if nominal_tilt < transition <= midpoint_tilt:
+            preferred_post_transition_tilt = midpoint_tilt
     primary_axis_offsets = tuple(
         offset
         for _, offset in axis_values
@@ -241,25 +247,24 @@ def _build_portal_adaptive_candidates(
                 for row in range(3):
                     for column in range(3):
                         matrix[row][column] = tcp_rotation_object[row][column]
-                T_object_tcp = type(template.T_object_tcp)(
-                    template.T_object_tcp.parent_frame,
-                    template.T_object_tcp.child_frame,
-                    tuple(tuple(float(value) for value in row) for row in matrix),
-                )
+                offset = adaptive.tilt_banded_grasp_offset
+                depth_band = ""
+                if offset is not None:
+                    below_transition = tilt_rad < offset.transition_tilt_rad
+                    translation_m = (
+                        offset.below_transition_offset_m
+                        if below_transition
+                        else offset.at_or_above_transition_offset_m
+                    )
+                    for row in range(3):
+                        matrix[row][3] += offset.axis_object[row] * translation_m
+                    depth_band = (
+                        ".tilt_band_below"
+                        if below_transition
+                        else ".tilt_band_at_or_above"
+                    )
                 yaw_rad = _wrap_yaw(
                     axis_rad if closing_sign > 0.0 else axis_rad + pi
-                )
-                candidate = _candidate_from_transform(
-                    request,
-                    template,
-                    yaw_rad,
-                    T_object_tcp,
-                    pregrasp_distance_m=adaptive.pregrasp_distance_m,
-                    id_suffix=(
-                        f"axis_f64_{pack('>d', axis_rad).hex()}."
-                        f"tilt_f64_{pack('>d', tilt_rad).hex()}."
-                        f"sign_{'p' if closing_sign > 0.0 else 'm'}"
-                    ),
                 )
                 verticality = max(0.0, min(1.0, -approach_world[2]))
                 access_score = (
@@ -268,27 +273,58 @@ def _build_portal_adaptive_candidates(
                     + 0.05
                     + 0.20 * verticality
                 )
-                ranked.append(
-                    (
-                        _bounded_portal_candidate_rank(
-                            axis_offset_rad=axis_offset_rad,
-                            maximum_primary_axis_offset_rad=maximum_primary_axis_offset,
-                            secondary_axis=any(
-                                abs(axis_offset_rad - secondary) <= 1e-12
-                                for secondary in secondary_offsets
-                            ),
-                            tilt_rad=tilt_rad,
-                            nominal_tilt_rad=nominal_tilt,
-                            tilt_margin_rad=adaptive.tilt_margin_rad,
-                            maximum_tilt_rad=adaptive.maximum_tilt_rad,
-                            axis_index=axis_index,
-                            tilt_index=tilt_index,
-                            sign_index=sign_index,
-                            access_score=access_score,
-                        ),
-                        candidate,
-                    )
+                base_rank = _bounded_portal_candidate_rank(
+                    axis_offset_rad=axis_offset_rad,
+                    maximum_primary_axis_offset_rad=maximum_primary_axis_offset,
+                    secondary_axis=any(
+                        abs(axis_offset_rad - secondary) <= 1e-12
+                        for secondary in secondary_offsets
+                    ),
+                    tilt_rad=tilt_rad,
+                    nominal_tilt_rad=nominal_tilt,
+                    tilt_margin_rad=adaptive.tilt_margin_rad,
+                    maximum_tilt_rad=adaptive.maximum_tilt_rad,
+                    axis_index=axis_index,
+                    tilt_index=tilt_index,
+                    sign_index=sign_index,
+                    access_score=access_score,
+                    preferred_post_transition_tilt_rad=(
+                        preferred_post_transition_tilt
+                    ),
                 )
+                for grasp_offset_index, grasp_offset in enumerate(
+                    adaptive.grasp_translation_offsets_object_m
+                ):
+                    candidate_matrix = [list(row) for row in matrix]
+                    for row in range(3):
+                        candidate_matrix[row][3] += grasp_offset[row]
+                    T_object_tcp = type(template.T_object_tcp)(
+                        template.T_object_tcp.parent_frame,
+                        template.T_object_tcp.child_frame,
+                        tuple(
+                            tuple(float(value) for value in row)
+                            for row in candidate_matrix
+                        ),
+                    )
+                    offset_suffix = ""
+                    if any(abs(value) > 1e-12 for value in grasp_offset):
+                        offset_suffix = ".grasp_offset_f64_" + ".".join(
+                            pack(">d", float(value)).hex() for value in grasp_offset
+                        )
+                    candidate = _candidate_from_transform(
+                        request,
+                        template,
+                        yaw_rad,
+                        T_object_tcp,
+                        pregrasp_distance_m=adaptive.pregrasp_distance_m,
+                        id_suffix=(
+                            f"axis_f64_{pack('>d', axis_rad).hex()}."
+                            f"tilt_f64_{pack('>d', tilt_rad).hex()}."
+                            f"sign_{'p' if closing_sign > 0.0 else 'm'}"
+                            f"{depth_band}{offset_suffix}"
+                        ),
+                    )
+                    ranked.append((base_rank + (grasp_offset_index,), candidate))
     ranked.sort(key=lambda item: item[0])
     return tuple(candidate for _, candidate in ranked)
 
@@ -306,6 +342,7 @@ def _bounded_portal_candidate_rank(
     tilt_index: int,
     sign_index: int,
     access_score: float,
+    preferred_post_transition_tilt_rad: float | None,
 ) -> tuple[float | int, ...]:
     nominal_axis = abs(axis_offset_rad) <= 1e-12
     nominal_tilt = abs(tilt_rad - nominal_tilt_rad) <= 1e-12
@@ -318,6 +355,16 @@ def _bounded_portal_candidate_rank(
     upper_boundary_limited = (
         nominal_tilt_rad + tilt_margin_rad >= maximum_tilt_rad - 1e-12
     )
+    if (
+        preferred_post_transition_tilt_rad is not None
+        and abs(tilt_rad - preferred_post_transition_tilt_rad) <= 1e-12
+    ):
+        return (
+            -1,
+            -access_score,
+            axis_index,
+            sign_index,
+        )
     if (
         upper_boundary_limited
         and not nominal_axis

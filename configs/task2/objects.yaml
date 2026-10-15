@@ -91,6 +91,116 @@ objects:
         - geometry_id: marker_body_capsule
           T_object_geometry: {parent_frame: object, child_frame: marker_body_capsule, translation_m: [-0.000085271, 0.0, 0.008015441], quaternion_wxyz: [0.707106781, 0.0, 0.707106781, 0.0]}
           capsule: {radius_m: 0.009, length_m: 0.122}
+  drill_bit:
+    targeting:
+      templates:
+        - template_id: drill_bit_parallel_smooth_shank_portal
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [0.0, 1.0, 0.0, 0.0]
+              - [1.0, 0.0, 0.0, -0.010]
+              - [0.0, 0.0, -1.0, 0.003]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: discrete
+            group: C2
+            axis: approach_axis_object
+            axis_vector: [0.0, 0.0, -1.0]
+            values_rad: [0.0, 3.141592654]
+          portal_adaptive_approach:
+            contact_axis_step_rad: 0.2617993877991494
+            contact_axis_offsets_rad: [0.0, -0.2617993877991494, 0.2617993877991494, -0.4363323129985824, 0.4363323129985824, -0.6108652381980153, 0.6108652381980153]
+            secondary_contact_axis_offsets_rad: [-0.6108652381980153, 0.6108652381980153]
+            tilt_margin_rad: 0.2617993877991494
+            maximum_tilt_rad: 0.7853981633974483
+            pregrasp_distance_m: 0.060
+            tilt_banded_grasp_offset:
+              axis_object: [0.0, 0.0, 1.0]
+              transition_tilt_rad: 0.6108652381980153
+              below_transition_offset_m: -0.001
+              at_or_above_transition_offset_m: 0.0
+            grasp_translation_offsets_object_m: [[0.0, 0.0, 0.0], [0.0, 0.015, 0.0]]
+          pregrasp_opening_m: 0.016
+          target_opening_m: 0.00000
+          grip_force_limit_n: 120.0
+          minimum_retention_force_n: 0.40
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 2.0
+          diagnostics:
+            contact_margin_m: 0.076
+            opening_margin_m: 0.008
+            force_margin_n: 119.6
+        - template_id: drill_bit_parallel_smooth_shank_skew
+          end_effector_family: parallel_gripper
+          calibration: simulation_nominal
+          T_object_tcp:
+            parent_frame: object
+            child_frame: tcp_at_grasp
+            matrix:
+              - [0.0, 1.0, 0.0, 0.0]
+              - [1.0, 0.0, 0.0, -0.010]
+              - [0.0, 0.0, -1.0, 0.003]
+              - [0.0, 0.0, 0.0, 1.0]
+          T_tcp_pregrasp:
+            parent_frame: tcp_at_grasp
+            child_frame: tcp_at_pregrasp
+            matrix:
+              - [1.0, 0.0, 0.0, 0.0]
+              - [0.0, 1.0, 0.0, 0.0]
+              - [0.0, 0.0, 1.0, -0.12]
+              - [0.0, 0.0, 0.0, 1.0]
+          yaw_symmetry:
+            kind: discrete
+            group: C2
+            axis: approach_axis_object
+            axis_vector: [0.0, 0.0, -1.0]
+            values_rad: [0.0, 3.141592654]
+          portal_adaptive_approach:
+            contact_axis_step_rad: 0.2617993877991494
+            contact_axis_offsets_rad: [-0.2617993877991494, 0.2617993877991494]
+            secondary_contact_axis_offsets_rad: []
+            tilt_margin_rad: 0.2617993877991494
+            maximum_tilt_rad: 0.7853981633974483
+            pregrasp_distance_m: 0.060
+            tilt_banded_grasp_offset:
+              axis_object: [0.0, 0.0, 1.0]
+              transition_tilt_rad: 0.6108652381980153
+              below_transition_offset_m: -0.001
+              at_or_above_transition_offset_m: 0.0
+          pregrasp_opening_m: 0.016
+          target_opening_m: 0.00464
+          grip_force_limit_n: 120.0
+          minimum_retention_force_n: 0.40
+          closing_speed_m_s: 0.014
+          dwell_s: 0.25
+          expected_contact_groups: [left_pad, right_pad]
+          template_priority: 1.0
+          diagnostics:
+            contact_margin_m: 0.076
+            opening_margin_m: 0.008
+            force_margin_n: 119.6
+    planning:
+      approach_motion_strategy: continuous_cartesian
+      payload_motion_strategy: adaptive_portal
+      payload_initial_vertical_clearance_m: 0.020
+      attached_geometry:
+        - geometry_id: drill_bit_body_capsule
+          T_object_geometry: {parent_frame: object, child_frame: drill_bit_body_capsule, translation_m: [0.0, 0.0, 0.003], quaternion_wxyz: [0.707106781, -0.707106781, 0.0, 0.0]}
+          capsule: {radius_m: 0.0055, length_m: 0.071}
   masking_tape:
     targeting:
       templates:

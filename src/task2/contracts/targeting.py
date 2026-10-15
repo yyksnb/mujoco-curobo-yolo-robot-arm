@@ -59,6 +59,28 @@ class TargetingDiagnosticsConfig:
 
 
 @dataclass(frozen=True)
+class TiltBandedGraspOffsetConfig:
+    axis_object: Vector3
+    transition_tilt_rad: float
+    below_transition_offset_m: float
+    at_or_above_transition_offset_m: float
+
+    def validate(self) -> None:
+        _validate_unit_vector(
+            "tilt_banded_grasp_offset.axis_object", self.axis_object
+        )
+        values = (
+            self.transition_tilt_rad,
+            self.below_transition_offset_m,
+            self.at_or_above_transition_offset_m,
+        )
+        if not all(isfinite(value) for value in values):
+            raise ValueError("tilt-banded grasp offset values must be finite")
+        if not 0.0 < self.transition_tilt_rad < pi / 2.0:
+            raise ValueError("tilt-banded transition must be within (0, pi/2)")
+
+
+@dataclass(frozen=True)
 class PortalAdaptiveApproachConfig:
     contact_axis_step_rad: float
     tilt_margin_rad: float
@@ -66,6 +88,8 @@ class PortalAdaptiveApproachConfig:
     pregrasp_distance_m: float
     contact_axis_offsets_rad: tuple[float, ...] | None = None
     secondary_contact_axis_offsets_rad: tuple[float, ...] = ()
+    tilt_banded_grasp_offset: TiltBandedGraspOffsetConfig | None = None
+    grasp_translation_offsets_object_m: tuple[Vector3, ...] = ((0.0, 0.0, 0.0),)
 
     def validate(self) -> None:
         values = (
@@ -105,6 +129,20 @@ class PortalAdaptiveApproachConfig:
                     "secondary portal-adaptive contact-axis offsets must be selected "
                     "from contact_axis_offsets_rad"
                 )
+        if not self.grasp_translation_offsets_object_m:
+            raise ValueError("portal-adaptive grasp translation offsets must not be empty")
+        seen_offsets = set()
+        for offset in self.grasp_translation_offsets_object_m:
+            if len(offset) != 3 or not all(isfinite(value) for value in offset):
+                raise ValueError(
+                    "portal-adaptive grasp translation offsets must contain finite xyz values"
+                )
+            key = tuple(float(value) for value in offset)
+            if key in seen_offsets:
+                raise ValueError("portal-adaptive grasp translation offsets must be unique")
+            seen_offsets.add(key)
+        if self.tilt_banded_grasp_offset is not None:
+            self.tilt_banded_grasp_offset.validate()
 
 
 @dataclass(frozen=True)
@@ -247,10 +285,14 @@ class EndEffectorTargetingConfig:
 def _validate_axis(name: str, vector: Vector3) -> None:
     if name != "approach_axis_object":
         raise ValueError("yaw axis must be approach_axis_object")
+    _validate_unit_vector("yaw axis_vector", vector)
+
+
+def _validate_unit_vector(name: str, vector: Vector3) -> None:
     if len(vector) != 3 or not all(isfinite(value) for value in vector):
-        raise ValueError("yaw axis_vector must contain three finite values")
+        raise ValueError(f"{name} must contain three finite values")
     if abs(sqrt(sum(value * value for value in vector)) - 1.0) > 1e-6:
-        raise ValueError("yaw axis_vector must be normalized")
+        raise ValueError(f"{name} must be normalized")
 
 
 class TargetingErrorCode(str, Enum):

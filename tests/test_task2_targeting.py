@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
-from math import cos, degrees, pi, radians, sin
+from math import acos, cos, degrees, pi, radians, sin
 from pathlib import Path
 from struct import unpack
 
@@ -50,6 +50,7 @@ def _request(object_type: str, *, x_m: float = 0.4) -> TargetingRequest:
 
 def test_calibrated_templates_preserve_candidates_and_commands() -> None:
     expected = {
+        "drill_bit": (4, 0.00000, 120.0, "drill_bit_parallel_smooth_shank_portal"),
         "marker": (3, 0.011, 4.0, "marker_parallel_body"),
         "masking_tape": (4, 0.074333332, 2.0, "masking_tape_parallel_outer_wall"),
         "rivet_gun": (3, 0.011946974, 24.0, "rivet_gun_parallel_handle"),
@@ -89,6 +90,111 @@ def test_calibrated_templates_preserve_candidates_and_commands() -> None:
             assert set(candidate.expected_contacts) <= set(
                 request.end_effector_config.capabilities.contact_groups
             )
+
+
+def test_drill_bit_portal_candidates_adapt_depth_to_approach_tilt() -> None:
+    request = replace(
+        _request("drill_bit", x_m=0.8),
+        T_world_object=RigidTransform(
+            "world",
+            "object",
+            (
+                (1.0, 0.0, 0.0, 0.8),
+                (0.0, 1.0, 0.0, 0.7),
+                (0.0, 0.0, 1.0, 0.003),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        maximum_candidates=128,
+        access_context=TargetingAccessContext((0.425, 0.6), 0.51),
+    )
+
+    result = target(request)
+
+    assert result.success and len(result.candidates) == 128
+    assert all(
+        candidate.template_id == "drill_bit_parallel_smooth_shank_portal"
+        for candidate in result.candidates[:112]
+    )
+    assert all(
+        candidate.template_id == "drill_bit_parallel_smooth_shank_skew"
+        for candidate in result.candidates[112:]
+    )
+    assert {
+        round(
+            abs(candidate.T_object_tcp.matrix[0][1]),
+            9,
+        )
+        for candidate in result.candidates[:112]
+    } == {
+        1.0,
+        round(cos(radians(15.0)), 9),
+        round(cos(radians(25.0)), 9),
+        round(cos(radians(35.0)), 9),
+    }
+    for candidate in result.candidates:
+        tilt_rad = acos(-candidate.T_world_tcp.matrix[2][2])
+        below_transition = tilt_rad < radians(35.0)
+        assert candidate.T_object_tcp.matrix[2][3] == pytest.approx(
+            0.002 if below_transition else 0.003
+        )
+        assert (
+            "tilt_band_below" if below_transition else "tilt_band_at_or_above"
+        ) in candidate.candidate_id
+        assert candidate.grasp_command.pregrasp_opening_m == pytest.approx(0.016)
+        assert candidate.grasp_command.target_opening_m == pytest.approx(
+            0.00000
+            if candidate.template_id == "drill_bit_parallel_smooth_shank_portal"
+            else 0.00464
+        )
+        assert candidate.T_object_tcp.matrix[1][3] == pytest.approx(
+            0.005 if "grasp_offset_f64_" in candidate.candidate_id else -0.010
+        )
+        distance = sum(
+            (
+                candidate.T_world_pregrasp.matrix[row][3]
+                - candidate.T_world_tcp.matrix[row][3]
+            )
+            ** 2
+            for row in range(3)
+        ) ** 0.5
+        assert distance == pytest.approx(0.06)
+
+    transition_request = replace(
+        request,
+        T_world_object=RigidTransform(
+            "world",
+            "object",
+            (
+                (1.0, 0.0, 0.0, 0.37),
+                (0.0, 1.0, 0.0, 0.30),
+                (0.0, 0.0, 1.0, 0.003),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        maximum_candidates=28,
+    )
+    transition_candidates = target(transition_request).candidates
+    assert len(transition_candidates) == 28
+    assert all(
+        "tilt_band_at_or_above" in candidate.candidate_id
+        for candidate in transition_candidates[:28]
+    )
+    assert len(
+        {
+            candidate.candidate_id.split(".axis_f64_", 1)[1].split(".", 1)[0]
+            for candidate in transition_candidates[:28]
+        }
+    ) == 7
+    assert {
+        candidate.candidate_id.split(".sign_", 1)[1].split(".", 1)[0]
+        for candidate in transition_candidates[:28]
+    } == {"m", "p"}
+    for nominal, shifted in zip(
+        transition_candidates[:28:2], transition_candidates[1:28:2]
+    ):
+        assert nominal.T_object_tcp.matrix[1][3] == pytest.approx(-0.010)
+        assert shifted.T_object_tcp.matrix[1][3] == pytest.approx(0.005)
 
 
 def test_standard_part_mid_pos10_template_contract() -> None:

@@ -8,6 +8,7 @@ from .targeting import (
     TargetingAccessContext,
     TargetingDiagnosticsConfig,
     TargetingObjectConfig,
+    TiltBandedGraspOffsetConfig,
 )
 from .geometry import Matrix4, RigidTransform, Vector3, compose, inverse
 from .execution import (
@@ -92,6 +93,7 @@ __all__ = [
     "TargetingObjectConfig",
     "TargetingRequest",
     "TargetingResult",
+    "TiltBandedGraspOffsetConfig",
     "Vector3",
     "compose",
     "inverse",
