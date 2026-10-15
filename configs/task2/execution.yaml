@@ -54,6 +54,10 @@ adapters:
           left_pad: [robot_task2_tool_left_pad_collision]
           right_pad: [robot_task2_tool_right_pad_collision]
     objects:
+      drill_bit:
+        runtime_body_name: target_drill_bit
+        runtime_free_joint_name: target_drill_bit_freejoint
+        runtime_collision_geom_names: [target_drill_bit_collision_000, target_drill_bit_collision_001, target_drill_bit_collision_002, target_drill_bit_collision_003, target_drill_bit_collision_004, target_drill_bit_collision_005, target_drill_bit_collision_006, target_drill_bit_collision_007, target_drill_bit_collision_008, target_drill_bit_collision_009, target_drill_bit_collision_010, target_drill_bit_collision_011, target_drill_bit_collision_012, target_drill_bit_collision_013, target_drill_bit_collision_014, target_drill_bit_collision_015]
       marker:
         runtime_body_name: target_marker
         runtime_free_joint_name: target_marker_freejoint

@@ -17,6 +17,11 @@
           friction="0.45 0.004 0.0001" solref="0.006 1"
           solimp="0.95 0.99 0.001 0.5 2"/>
       </default>
+      <default class="target_drill_bit_collision">
+        <geom pos="-0.004000000 -0.040000000 -0.000037047"
+          friction="0.35 0.003 0.0001" solref="0.004 1"
+          solimp="0.95 0.99 0.001 0.5 2"/>
+      </default>
       <default class="target_rivet_gun_collision">
         <geom pos="0.032206425 0.019703770 0.013947060" euler="0 90 0"
           friction="0.35 0.003 0.0001" solref="0.004 1"

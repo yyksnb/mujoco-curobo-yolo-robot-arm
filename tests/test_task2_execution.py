@@ -528,6 +528,7 @@ def test_mujoco_adapter_preserves_formal_control_and_gravity_semantics():
             adapter.apply_control(replace(command, velocities_rad_s=(0.0,)))
 
         core_bodies = (
+            "target_drill_bit",
             "target_marker",
             "target_rivet_gun",
             "target_standard_part",
@@ -651,7 +652,6 @@ def test_mujoco_adapter_preserves_formal_control_and_gravity_semantics():
                 ) >= 0
         for name in (
             "target_hex_key",
-            "target_drill_bit",
             "target_glove",
             "target_notebook",
         ):
@@ -660,7 +660,6 @@ def test_mujoco_adapter_preserves_formal_control_and_gravity_semantics():
             ) == -1
         for name in (
             "target_hex_key_mesh",
-            "target_drill_bit_mesh",
             "target_glove_mesh",
             "target_notebook_mesh",
         ):

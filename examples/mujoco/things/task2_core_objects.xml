@@ -1,4 +1,31 @@
 <mujocoinclude>
+  <body name="target_drill_bit" pos="0.70 0.45 0.025" euler="0 0 0">
+    <freejoint name="target_drill_bit_freejoint"/>
+    <inertial pos="1.96384543523e-09 0.00217480014932 0.00299993660922"
+      quat="0.707106781187 0.707106781187 0 0"
+      mass="0.0234906971786"
+      diaginertia="1.15172085552e-05 1.15238015201e-05 9.08474173326e-08"/>
+    <geom name="target_drill_bit_visual" class="target_object_visual" type="mesh" mesh="target_drill_bit_mesh"
+      pos="-0.004000000 -0.040000000 -0.000037047"
+      material="target_drill_bit"/>
+    <geom name="target_drill_bit_collision_000" class="target_drill_bit_collision" mesh="target_drill_bit_collision_000_mesh"/>
+    <geom name="target_drill_bit_collision_001" class="target_drill_bit_collision" mesh="target_drill_bit_collision_001_mesh"/>
+    <geom name="target_drill_bit_collision_002" class="target_drill_bit_collision" mesh="target_drill_bit_collision_002_mesh"/>
+    <geom name="target_drill_bit_collision_003" class="target_drill_bit_collision" mesh="target_drill_bit_collision_003_mesh"/>
+    <geom name="target_drill_bit_collision_004" class="target_drill_bit_collision" mesh="target_drill_bit_collision_004_mesh"/>
+    <geom name="target_drill_bit_collision_005" class="target_drill_bit_collision" mesh="target_drill_bit_collision_005_mesh"/>
+    <geom name="target_drill_bit_collision_006" class="target_drill_bit_collision" mesh="target_drill_bit_collision_006_mesh"/>
+    <geom name="target_drill_bit_collision_007" class="target_drill_bit_collision" mesh="target_drill_bit_collision_007_mesh"/>
+    <geom name="target_drill_bit_collision_008" class="target_drill_bit_collision" mesh="target_drill_bit_collision_008_mesh"/>
+    <geom name="target_drill_bit_collision_009" class="target_drill_bit_collision" mesh="target_drill_bit_collision_009_mesh"/>
+    <geom name="target_drill_bit_collision_010" class="target_drill_bit_collision" mesh="target_drill_bit_collision_010_mesh"/>
+    <geom name="target_drill_bit_collision_011" class="target_drill_bit_collision" mesh="target_drill_bit_collision_011_mesh"/>
+    <geom name="target_drill_bit_collision_012" class="target_drill_bit_collision" mesh="target_drill_bit_collision_012_mesh"/>
+    <geom name="target_drill_bit_collision_013" class="target_drill_bit_collision" mesh="target_drill_bit_collision_013_mesh"/>
+    <geom name="target_drill_bit_collision_014" class="target_drill_bit_collision" mesh="target_drill_bit_collision_014_mesh"/>
+    <geom name="target_drill_bit_collision_015" class="target_drill_bit_collision" mesh="target_drill_bit_collision_015_mesh"/>
+  </body>
+
   <body name="target_marker" pos="0.50 0.25 0.025" euler="0 0 0">
     <freejoint name="target_marker_freejoint"/>
     <inertial pos="0.0113691881616 -3.8882748788e-07 0.00920583283537"
