@@ -1,0 +1,11 @@
+robot:
+  model_id: gen3
+  base_frame: base_link
+  joints:
+    - {name: joint_1, continuous: true, position_rad: [-3.141592654, 3.141592654], velocity_rad_s: 1.3963, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: 0.0}
+    - {name: joint_2, position_rad: [-2.249729406, 2.249729406], velocity_rad_s: 1.3963, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: 0.26179939}
+    - {name: joint_3, continuous: true, position_rad: [-3.141592654, 3.141592654], velocity_rad_s: 1.3963, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: 3.14159265}
+    - {name: joint_4, position_rad: [-2.579596634, 2.579596634], velocity_rad_s: 1.3963, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: -2.26892803}
+    - {name: joint_5, continuous: true, position_rad: [-3.141592654, 3.141592654], velocity_rad_s: 1.2218, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: 0.0}
+    - {name: joint_6, position_rad: [-2.09963109, 2.09963109], velocity_rad_s: 1.2218, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: 0.95993109}
+    - {name: joint_7, continuous: true, position_rad: [-3.141592654, 3.141592654], velocity_rad_s: 1.2218, acceleration_rad_s2: 2.0, jerk_rad_s3: 500.0, default_rad: 1.57079633}

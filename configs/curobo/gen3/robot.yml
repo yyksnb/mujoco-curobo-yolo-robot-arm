@@ -1,0 +1,96 @@
+# Generated with cuRobo RobotBuilder from gen3_camera.urdf.
+# Sphere fit: density=1.5, seed=21; self-collision pruning: 10,000 samples.
+robot_cfg:
+  kinematics:
+    urdf_path: configs/curobo/gen3/gen3_camera.urdf
+    asset_root_path: .
+    base_link: base_link
+    tool_frames: [wrist_camera]
+    # base_link is the fixed mounting interface and intentionally contacts the tank mount.
+    collision_link_names: &collision_links
+      [shoulder_link, half_arm_1_link, half_arm_2_link, forearm_link,
+       spherical_wrist_1_link, spherical_wrist_2_link, bracelet_link]
+    mesh_link_names:
+      [base_link, shoulder_link, half_arm_1_link, half_arm_2_link, forearm_link,
+       spherical_wrist_1_link, spherical_wrist_2_link, bracelet_link]
+    collision_sphere_buffer: 0.0
+    collision_spheres:
+      shoulder_link:
+        - {center: [-0.013805, -0.011477, -0.031480], radius: 0.041256}
+        - {center: [-0.005009, 0.021030, -0.024743], radius: 0.034128}
+        - {center: [0.017688, -0.005330, -0.029994], radius: 0.039308}
+        - {center: [0.000395, -0.019423, -0.087863], radius: 0.042931}
+        - {center: [0.040419, -0.026809, -0.063298], radius: 0.005336}
+        - {center: [-0.022852, -0.017688, -0.133017], radius: 0.032014}
+        - {center: [0.024294, -0.015730, -0.131181], radius: 0.032599}
+        - {center: [-0.004890, -0.021912, -0.151218], radius: 0.036077}
+        - {center: [0.040842, -0.030177, -0.101342], radius: 0.004094}
+        - {center: [-0.039438, 0.018422, -0.105573], radius: 0.004747}
+        - {center: [-0.041853, -0.031601, -0.088068], radius: 0.003747}
+      half_arm_1_link:
+        - {center: [-0.000974, -0.084305, -0.030771], radius: 0.033852}
+        - {center: [-0.006197, 0.024383, -0.016009], radius: 0.024655}
+        - {center: [0.015188, -0.008616, -0.024423], radius: 0.032107}
+        - {center: [-0.020365, 0.008068, -0.027172], radius: 0.034809}
+        - {center: [0.002269, -0.168823, -0.009785], radius: 0.055708}
+        - {center: [-0.014289, -0.034764, -0.031546], radius: 0.034818}
+        - {center: [0.014378, 0.013579, -0.031115], radius: 0.033623}
+        - {center: [-0.045845, -0.222223, -0.003167], radius: 0.008704}
+        - {center: [0.001505, -0.133014, -0.020421], radius: 0.042408}
+        - {center: [0.030603, -0.044223, -0.037186], radius: 0.014125}
+      half_arm_2_link:
+        - {center: [-0.018637, -0.021082, -0.188751], radius: 0.037208}
+        - {center: [-0.001281, -0.022346, -0.226675], radius: 0.037698}
+        - {center: [-0.004022, -0.003286, -0.043701], radius: 0.059302}
+        - {center: [0.021258, -0.023829, -0.193859], radius: 0.036272}
+        - {center: [0.004559, -0.025663, -0.128423], radius: 0.038169}
+      forearm_link:
+        - {center: [-0.002957, -0.173842, -0.004830], radius: 0.049268}
+        - {center: [0.001409, -0.146022, -0.020881], radius: 0.035643}
+        - {center: [0.000746, -0.132590, -0.017540], radius: 0.035710}
+        - {center: [0.016014, -0.013315, -0.026718], radius: 0.030930}
+        - {center: [-0.021397, -0.015316, -0.022102], radius: 0.029428}
+        - {center: [-0.015549, 0.015059, -0.026303], radius: 0.035543}
+        - {center: [-0.025076, -0.054627, -0.046170], radius: 0.011673}
+        - {center: [0.014060, 0.016947, -0.029614], radius: 0.033658}
+        - {center: [0.005952, -0.040292, -0.037186], radius: 0.029253}
+        - {center: [0.001620, -0.083454, -0.033781], radius: 0.033012}
+      spherical_wrist_1_link:
+        - {center: [-0.000631, -0.002582, -0.029718], radius: 0.040952}
+        - {center: [-0.024384, -0.031781, -0.049984], radius: 0.015179}
+        - {center: [-0.026883, -0.031400, -0.072436], radius: 0.011760}
+        - {center: [-0.000214, -0.003212, -0.139179], radius: 0.012711}
+        - {center: [0.009576, -0.025915, -0.102826], radius: 0.041917}
+        - {center: [-0.016470, -0.023160, -0.104102], radius: 0.034511}
+      spherical_wrist_2_link:
+        - {center: [0.003118, -0.082301, 0.002084], radius: 0.048075}
+        - {center: [-0.002782, -0.032338, -0.024733], radius: 0.032602}
+        - {center: [-0.012816, -0.000423, -0.024082], radius: 0.032548}
+        - {center: [0.012888, 0.005944, -0.025016], radius: 0.033842}
+        - {center: [0.015340, -0.072435, 0.012441], radius: 0.022043}
+      bracelet_link:
+        - {center: [-0.022834, -0.054794, -0.051945], radius: 0.022841}
+        - {center: [0.009169, -0.042113, -0.052060], radius: 0.015031}
+        - {center: [0.001597, 0.011789, -0.028589], radius: 0.049088}
+        - {center: [0.008361, -0.064684, -0.052653], radius: 0.013432}
+        - {center: [0.030473, -0.059044, -0.051665], radius: 0.016056}
+        - {center: [-0.030965, -0.018696, -0.055757], radius: 0.001931}
+    self_collision_ignore:
+      shoulder_link: [half_arm_1_link, half_arm_2_link, forearm_link]
+      half_arm_1_link: [half_arm_2_link, spherical_wrist_1_link]
+      half_arm_2_link: [forearm_link, spherical_wrist_1_link, spherical_wrist_2_link]
+      forearm_link: [spherical_wrist_1_link, spherical_wrist_2_link, bracelet_link]
+      spherical_wrist_1_link: [spherical_wrist_2_link, bracelet_link]
+      spherical_wrist_2_link: [bracelet_link]
+      bracelet_link: [wrist_camera]
+    self_collision_buffer: {shoulder_link: 0.0, half_arm_1_link: 0.0,
+      half_arm_2_link: 0.0, forearm_link: 0.0, spherical_wrist_1_link: 0.0,
+      spherical_wrist_2_link: 0.0, bracelet_link: 0.0}
+    cspace:
+      joint_names: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6, joint_7]
+      default_joint_position: [0.0, 0.26179939, 3.14159265, -2.26892803, 0.0, 0.95993109, 1.57079633]
+      max_acceleration: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+      max_jerk: [500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0]
+      cspace_distance_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      null_space_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      position_limit_clip: 0.0

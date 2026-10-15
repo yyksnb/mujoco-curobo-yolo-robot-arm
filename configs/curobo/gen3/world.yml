@@ -1,0 +1,7 @@
+# Tank pose expressed in the Gen3 base_link frame. The transform is the
+# inverse of gen3_mount in examples/mujoco/gen3_with_tank.xml.
+mesh:
+  tank:
+    file_path: examples/mujoco/tank/ZNJQRBS-YOUXIANG.stl
+    pose: [0.95, -0.43, -0.5, 0.7071067811865476, 0.0, 0.0, 0.7071067811865475]
+    scale: [0.001, 0.001, 0.001]

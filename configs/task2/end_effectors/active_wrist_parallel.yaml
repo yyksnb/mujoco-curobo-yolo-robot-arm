@@ -1,0 +1,20 @@
+end_effector:
+  profile_id: parallel_gripper
+  family: parallel_gripper
+  combined_model_id: gen3_active_wrist_parallel
+  tcp_frame: task2_tool_tcp
+  capabilities:
+    opening_command_range_m: [0.0, 0.084]
+    grip_force_limit_range_n: [0.0, 120.0]
+    maximum_closing_speed_m_s: 0.014
+    contact_groups: [left_pad, right_pad]
+  joints:
+    - {name: task2_tool_wrist_pitch, position_rad: [-1.6580628, 1.6580628], velocity_rad_s: 5.236, acceleration_rad_s2: 3.0, jerk_rad_s3: 200.0, default_rad: 0.0}
+  planning:
+    actuator_position_channel: parallel_gripper.opening_m
+    actuator_force_limit_channel: parallel_gripper.force_limit_n
+    open_position_m: 0.084
+    contact_groups: [left_pad, right_pad]
+    backend_profile: active_wrist_parallel
+  execution:
+    adapter_profile: active_wrist_parallel

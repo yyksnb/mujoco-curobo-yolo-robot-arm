@@ -1,0 +1,93 @@
+policy:
+  ik_position_tolerance_m: 0.003
+  ik_orientation_tolerance_rad: 0.03
+  cartesian_translation_step_m: 0.01
+  cartesian_rotation_step_rad: 0.08
+  approach_contact_transition_m: 0.01
+  lift_distance_m: 0.12
+  preplace_offset_m: 0.12
+  joint_limit_margin_rad: 0.005
+  pregrasp_joint_path_detour_ratio_limit: 3.0
+  pregrasp_tcp_path_detour_ratio_limit: 2.25
+  egress_tcp_path_detour_ratio_limit: 2.25
+  egress_portal_maximum_joint_edge_rad: 1.9
+  payload_tcp_max_angular_velocity_rad_s: 0.66
+  payload_tcp_max_translation_velocity_m_s: 0.30
+  payload_tcp_max_translation_acceleration_m_s2: 2.00
+  payload_motion_validation_time_step_s: 0.01
+  trajectory_validation_joint_step_rad: 0.01
+  trajectory_validation_tcp_translation_step_m: 0.002
+  trajectory_validation_tcp_rotation_step_rad: 0.02
+  trajectory_validation_actuator_position_step_m: 0.001
+  trajectory_validation_swept_point_step_m: 0.002
+  trajectory_validation_max_samples: 20000
+backends:
+  vamp_curobo_ruckig:
+    end_effector_profiles:
+      active_wrist_parallel:
+        kinematics_asset: ../../configs/curobo/gen3/gen3_active_wrist_parallel.urdf
+        curobo_config_asset: ../../configs/curobo/gen3/task2_active_wrist_parallel.yml
+        asset_root: ../..
+        vamp_robot_module: gen3so101activewrist
+        vamp_robot_sphere_count: 436
+        vamp_tool_fraction_midpoint: 0.5
+        maximum_gripper_opening_m: 0.084
+        source_support_contact_hull_clearance_m: 0.00010
+        collision_sphere_groups:
+          - {group: left_carriage_structure, first_sphere: 148, sphere_count: 4, translation_per_closed_fraction_m: [0.0, 0.042, 0.0], sweep_radius_inflation_m: 0.0, reference_closed_fraction: 1.0}
+          - {group: right_carriage_structure, first_sphere: 152, sphere_count: 4, translation_per_closed_fraction_m: [0.0, -0.042, 0.0], sweep_radius_inflation_m: 0.0, reference_closed_fraction: 1.0}
+          - {group: left_finger_structure, first_sphere: 156, sphere_count: 12, translation_per_closed_fraction_m: [0.0, 0.042, 0.0], sweep_radius_inflation_m: 0.0, reference_closed_fraction: 0.0}
+          - {group: right_finger_structure, first_sphere: 168, sphere_count: 12, translation_per_closed_fraction_m: [0.0, -0.042, 0.0], sweep_radius_inflation_m: 0.0, reference_closed_fraction: 0.0}
+          - {group: left_pad, first_sphere: 180, sphere_count: 128, translation_per_closed_fraction_m: [0.0, 0.042, 0.0], sweep_radius_inflation_m: 0.021}
+          - {group: right_pad, first_sphere: 308, sphere_count: 128, translation_per_closed_fraction_m: [0.0, -0.042, 0.0], sweep_radius_inflation_m: 0.021}
+        source_support_contact_hulls:
+          - group: left_pad
+            translation_per_closed_fraction_m: [0.0, 0.042, 0.0]
+            vertices_at_maximum_opening_m:
+              - [0.014, -0.050, -0.030]
+              - [0.014, -0.042, -0.030]
+              - [-0.014, -0.050, -0.030]
+              - [-0.014, -0.042, -0.030]
+              - [0.0055, -0.050, -0.001]
+              - [0.0055, -0.042, -0.001]
+              - [-0.0055, -0.050, -0.001]
+              - [-0.0055, -0.042, -0.001]
+          - group: right_pad
+            translation_per_closed_fraction_m: [0.0, -0.042, 0.0]
+            vertices_at_maximum_opening_m:
+              - [0.014, 0.042, -0.030]
+              - [0.014, 0.050, -0.030]
+              - [-0.014, 0.042, -0.030]
+              - [-0.014, 0.050, -0.030]
+              - [0.0055, 0.042, -0.001]
+              - [0.0055, 0.050, -0.001]
+              - [-0.0055, 0.042, -0.001]
+              - [-0.0055, 0.050, -0.001]
+        collision_sphere_calibrations:
+          - {sphere_index: 22, center_at_default_m: [0.114356, -0.034096, 0.706641], radius_m: 0.037193}
+          - {sphere_index: 45, center_at_default_m: [0.275690, -0.019505, 0.428311], radius_m: 0.035516}
+          - {sphere_index: 46, center_at_default_m: [0.287652, -0.005146, 0.399621], radius_m: 0.010515}
+          - {sphere_index: 180, center_at_default_m: [0.643443, -0.008751, 0.405724], radius_m: 0.026419}
+          - {sphere_index: 307, center_at_default_m: [0.668818, 0.005874, 0.411724], radius_m: 0.024911}
+          - {sphere_index: 308, center_at_default_m: [0.643443, -0.008751, 0.461724], radius_m: 0.026419}
+          - {sphere_index: 435, center_at_default_m: [0.668818, 0.005874, 0.455724], radius_m: 0.024911}
+    vamp:
+      version: 0.6.4
+      sample_offset_start: 19
+      sample_offset_stride: 240000
+      range_rad: 0.5
+      dynamic_domain: false
+      max_iterations: 20000
+      max_samples: 40000
+      simplify_iterations: 4
+    ik:
+      backend: curobo
+      curobo_version: 0.8.0
+      random_seed: 19
+      solution_count: 8
+      pregrasp_solution_count: 16
+      seed_count: 32
+      seed_batch_count: 14
+    ruckig:
+      version: 0.19.4
+    placement_sample_count: 17

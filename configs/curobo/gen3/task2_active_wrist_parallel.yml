@@ -1,0 +1,81 @@
+robot_cfg:
+  kinematics:
+    urdf_path: configs/curobo/gen3/gen3_active_wrist_parallel.urdf
+    asset_root_path: .
+    base_link: base_link
+    tool_frames: [task2_tool_tcp]
+    collision_link_names:
+      - shoulder_link
+      - half_arm_1_link
+      - half_arm_2_link
+      - forearm_link
+      - spherical_wrist_1_link
+      - spherical_wrist_2_link
+      - bracelet_link
+      - task2_tool_adapter
+      - task2_tool_wrist
+      - task2_tool_tcp
+      - task2_tool_left_pad_collision
+      - task2_tool_right_pad_collision
+    mesh_link_names:
+      - base_link
+      - shoulder_link
+      - half_arm_1_link
+      - half_arm_2_link
+      - forearm_link
+      - spherical_wrist_1_link
+      - spherical_wrist_2_link
+      - bracelet_link
+    extra_links:
+      task2_tool_left_pad_collision:
+        fixed_transform: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+        joint_name: task2_tool_left_pad_collision_joint
+        joint_type: FIXED
+        link_name: task2_tool_left_pad_collision
+        parent_link_name: task2_tool_tcp
+      task2_tool_right_pad_collision:
+        fixed_transform: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+        joint_name: task2_tool_right_pad_collision_joint
+        joint_type: FIXED
+        link_name: task2_tool_right_pad_collision
+        parent_link_name: task2_tool_tcp
+    collision_sphere_buffer: 0.001
+    collision_spheres: task2_active_wrist_parallel_spheres.yml
+    self_collision_ignore:
+      shoulder_link: [half_arm_1_link, half_arm_2_link, forearm_link]
+      half_arm_1_link: [half_arm_2_link, spherical_wrist_1_link]
+      half_arm_2_link: [forearm_link, spherical_wrist_1_link, spherical_wrist_2_link]
+      forearm_link: [spherical_wrist_1_link, spherical_wrist_2_link, bracelet_link]
+      spherical_wrist_1_link: [spherical_wrist_2_link, bracelet_link]
+      spherical_wrist_2_link: [bracelet_link, task2_tool_adapter]
+      bracelet_link: [task2_tool_adapter]
+      task2_tool_adapter: [task2_tool_wrist]
+      task2_tool_wrist:
+        [task2_tool_tcp, task2_tool_left_pad_collision, task2_tool_right_pad_collision]
+      task2_tool_tcp: [task2_tool_left_pad_collision, task2_tool_right_pad_collision]
+      task2_tool_left_pad_collision: [task2_tool_right_pad_collision]
+    self_collision_buffer:
+      shoulder_link: 0.0
+      half_arm_1_link: 0.0
+      half_arm_2_link: 0.0
+      forearm_link: 0.0
+      spherical_wrist_1_link: 0.0
+      spherical_wrist_2_link: 0.0
+      bracelet_link: 0.0
+      task2_tool_adapter: 0.0
+      task2_tool_wrist: 0.0
+      task2_tool_tcp: 0.0
+      task2_tool_left_pad_collision: 0.0
+      task2_tool_right_pad_collision: 0.0
+    cspace:
+      joint_names:
+        [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6, joint_7,
+         task2_tool_wrist_pitch]
+      default_joint_position:
+        [0.0, 0.26179939, 3.14159265, -2.26892803, 0.0, 0.95993109,
+         1.57079633, 0.0]
+      max_acceleration: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0]
+      max_jerk: [500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 200.0]
+      cspace_distance_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      null_space_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      position_limit_clip: 0.0

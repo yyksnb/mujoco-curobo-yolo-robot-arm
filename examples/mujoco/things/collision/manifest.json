@@ -1,0 +1,86 @@
+{
+  "schema": "target_object_collision_assets/v1",
+  "canonical_mjcf": "../../gen3_with_tank.xml",
+  "asset_include": "../target_object_assets.xml",
+  "body_include": "../target_objects.xml",
+  "semantics": {
+    "visual_geom_suffix": "_visual",
+    "collision_geom_token": "_collision_",
+    "visual_geoms_collide": false,
+    "collision_geoms_are_massless": true,
+    "collision_geoms_are_the_only_target_contact_geometry": true
+  },
+  "generator": {
+    "name": "CoACD",
+    "version": "1.0.11",
+    "input_loader": "trimesh.load_mesh(process=True)",
+    "trimesh_version": "4.12.2",
+    "notes": [
+      "max_ch_vertex is inactive because decimate is false; original CoACD hull vertices are preserved."
+    ],
+    "settings": {
+      "threshold": 0.025,
+      "max_convex_hull": 16,
+      "preprocess_mode": "auto",
+      "preprocess_resolution": 50,
+      "resolution": 2000,
+      "mcts_nodes": 20,
+      "mcts_iterations": 100,
+      "mcts_max_depth": 3,
+      "merge": true,
+      "decimate": false,
+      "max_ch_vertex": 64,
+      "seed": 0
+    }
+  },
+  "objects": {
+    "target_hex_key": {
+      "source": "../Wrench.STL",
+      "source_sha256": "a2a96e697d3efa76c46c60edb2e94e3efb8d10dd30d753129f8c677ab3ce7ad8",
+      "scale": [0.001, 0.001, 0.001],
+      "part_count": 3
+    },
+    "target_drill_bit": {
+      "source": "../drill.STL",
+      "source_sha256": "7031e80a4c1bca4b3616e8ea805a82ac55a39fe469782ceb238f508123ed47dc",
+      "scale": [0.001, 0.001, 0.001],
+      "part_count": 16
+    },
+    "target_glove": {
+      "source": "../Glove.stl",
+      "source_sha256": "bea4874e9e8162b9a3031ab63e412df61758d6a93437e9ef0642c52f99536921",
+      "scale": [0.01, 0.01, 0.01],
+      "part_count": 16
+    },
+    "target_notebook": {
+      "source": "../Hard.STL",
+      "source_sha256": "34ff3a353a2d024811be5110e844d70d0f34c436d5b6c93ff22c8786fd63fff0",
+      "scale": [0.0008, 0.0008, 0.0008],
+      "part_count": 2
+    },
+    "target_marker": {
+      "source": "../Sharpie.stl",
+      "source_sha256": "edeadd86d3a1c494e6d2be71c945de1121d57fae7332cefff4c1801b34d2e1ef",
+      "scale": [0.001, 0.001, 0.001],
+      "part_count": 2
+    },
+    "target_rivet_gun": {
+      "source": "../Glue.STL",
+      "source_sha256": "e5bc132004f5e81301644093f97cb211eaf8dba5b42c5d9bed4f748cbf7a902c",
+      "scale": [0.3, 0.3, 0.3],
+      "part_count": 16
+    },
+    "target_standard_part": {
+      "source": "../Screw.stl",
+      "source_sha256": "b1d3c45e3c1297e2e7d2a0b35738198e6346d4cc184228de9c945a51bff252fb",
+      "scale": [0.001, 0.001, 0.001],
+      "part_count": 16
+    },
+    "target_tape": {
+      "source": "../tape.STL",
+      "source_sha256": "7755305346a107fa69b49f88004e54b47f2af926ec6378154b5360bda97caca1",
+      "scale": [0.004, 0.004, 0.004],
+      "part_count": 13
+    }
+  }
+}

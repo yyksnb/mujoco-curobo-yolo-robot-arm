@@ -1,0 +1,480 @@
+diff --git a/src/impl/vamp/bindings/python/environment.cc b/src/impl/vamp/bindings/python/environment.cc
+index 53bbf43..385eb57 100644
+--- a/src/impl/vamp/bindings/python/environment.cc
++++ b/src/impl/vamp/bindings/python/environment.cc
+@@ -13,6 +13,9 @@
+ #include <nanobind/eigen/dense.h>
+ #include <nanobind/ndarray.h>
+
++#include <cmath>
++#include <stdexcept>
++
+ namespace nb = nanobind;
+ namespace vc = vamp::collision;
+ namespace vf = vamp::collision::factory;
+@@ -97,6 +100,83 @@ void vamp::binding::init_environment(nanobind::module_ &pymodule)
+         .def_ro("min_distance", &vc::Cuboid<float>::min_distance)
+         .def_rw("name", &vc::Cuboid<float>::name);
+
++    nb::class_<vc::ConvexMesh<float>>(pymodule, "ConvexMesh")
++        .def(
++            "__init__",
++            [](vc::ConvexMesh<float> *q,
++               const std::vector<std::array<float, 3>> &vertices,
++               const std::vector<std::array<std::size_t, 3>> &faces,
++               const std::array<float, 3> &bounds_center,
++               const std::array<float, 3> &bounds_euler_xyz,
++               const std::array<float, 3> &bounds_half_extents,
++               float margin)
++            {
++                if (vertices.empty() or faces.empty())
++                {
++                    throw std::invalid_argument("convex mesh vertices and faces must not be empty");
++                }
++                if (not std::isfinite(margin) or margin < 0.F)
++                {
++                    throw std::invalid_argument("convex mesh margin must be finite and non-negative");
++                }
++                auto expanded_half_extents = bounds_half_extents;
++                for (auto &extent : expanded_half_extents)
++                {
++                    if (not std::isfinite(extent) or extent <= 0.F)
++                    {
++                        throw std::invalid_argument("convex mesh bounds must be positive and finite");
++                    }
++                    extent += margin;
++                }
++                std::vector<vc::Triangle<float>> triangles;
++                triangles.reserve(faces.size());
++                for (const auto &face : faces)
++                {
++                    if (face[0] >= vertices.size() or face[1] >= vertices.size() or
++                        face[2] >= vertices.size())
++                    {
++                        throw std::invalid_argument("convex mesh face index is out of range");
++                    }
++                    const auto &a = vertices[face[0]];
++                    const auto &b = vertices[face[1]];
++                    const auto &c = vertices[face[2]];
++                    const auto abx = b[0] - a[0];
++                    const auto aby = b[1] - a[1];
++                    const auto abz = b[2] - a[2];
++                    const auto acx = c[0] - a[0];
++                    const auto acy = c[1] - a[1];
++                    const auto acz = c[2] - a[2];
++                    const auto nx = aby * acz - abz * acy;
++                    const auto ny = abz * acx - abx * acz;
++                    const auto nz = abx * acy - aby * acx;
++                    const auto normal_length = std::sqrt(nx * nx + ny * ny + nz * nz);
++                    if (not std::isfinite(normal_length) or normal_length <= 1e-9F)
++                    {
++                        throw std::invalid_argument("convex mesh contains a degenerate face");
++                    }
++                    triangles.emplace_back(
++                        a[0],
++                        a[1],
++                        a[2],
++                        b[0],
++                        b[1],
++                        b[2],
++                        c[0],
++                        c[1],
++                        c[2],
++                        nx / normal_length,
++                        ny / normal_length,
++                        nz / normal_length);
++                }
++                new (q) vc::ConvexMesh<float>(
++                    vf::cuboid::array(bounds_center, bounds_euler_xyz, expanded_half_extents),
++                    triangles,
++                    margin);
++            },
++            "Constructor from a closed convex triangle mesh and oriented broad-phase bounds.")
++        .def_ro("min_distance", &vc::ConvexMesh<float>::min_distance)
++        .def_rw("name", &vc::ConvexMesh<float>::name);
++
+     pymodule.def("make_heightfield", &vf::heightfield::array);
+
+     nb::class_<vc::HeightField<float>>(pymodule, "HeightField")
+@@ -131,6 +211,13 @@ void vamp::binding::init_environment(nanobind::module_ &pymodule)
+                 }
+                 e.sort();
+             })
++        .def(
++            "add_convex_mesh",
++            [](vc::Environment<float> &e, const vc::ConvexMesh<float> &mesh)
++            {
++                e.convex_meshes.emplace_back(mesh);
++                e.sort();
++            })
+         .def(
+             "add_capsule",
+             [](vc::Environment<float> &e, const vc::Cylinder<float> &s)
+@@ -168,6 +255,7 @@ void vamp::binding::init_environment(nanobind::module_ &pymodule)
+         .def_ro("spheres", &vc::Environment<float>::spheres)
+         .def_ro("cuboids", &vc::Environment<float>::cuboids)
+         .def_ro("z_aligned_cuboids", &vc::Environment<float>::z_aligned_cuboids)
++        .def_ro("convex_meshes", &vc::Environment<float>::convex_meshes)
+         .def_ro("capsules", &vc::Environment<float>::capsules)
+         .def_ro("z_aligned_capsules", &vc::Environment<float>::z_aligned_capsules)
+         .def_ro("heightfields", &vc::Environment<float>::heightfields)
+diff --git a/src/impl/vamp/collision/environment.hh b/src/impl/vamp/collision/environment.hh
+index a380bf8..fc503e3 100644
+--- a/src/impl/vamp/collision/environment.hh
++++ b/src/impl/vamp/collision/environment.hh
+@@ -20,6 +20,7 @@ namespace vamp::collision
+         std::vector<Cylinder<DataT>> cylinders;
+         std::vector<Cuboid<DataT>> cuboids;
+         std::vector<Cuboid<DataT>> z_aligned_cuboids;
++        std::vector<ConvexMesh<DataT>> convex_meshes;
+         std::vector<HeightField<DataT>> heightfields;
+         std::vector<CAPT> pointclouds;
+         std::optional<Attachment<DataT>> attachments;
+@@ -34,6 +35,7 @@ namespace vamp::collision
+           , cylinders(other.cylinders.begin(), other.cylinders.end())
+           , cuboids(other.cuboids.begin(), other.cuboids.end())
+           , z_aligned_cuboids(other.z_aligned_cuboids.begin(), other.z_aligned_cuboids.end())
++          , convex_meshes(other.convex_meshes.begin(), other.convex_meshes.end())
+           , heightfields(other.heightfields.begin(), other.heightfields.end())
+           , pointclouds(other.pointclouds.begin(), other.pointclouds.end())
+           , attachments(other.template clone_attachments<DataT>())
+@@ -66,6 +68,10 @@ namespace vamp::collision
+                 z_aligned_cuboids.begin(),
+                 z_aligned_cuboids.end(),
+                 [](const auto &a, const auto &b) { return a.min_distance < b.min_distance; });
++            std::sort(
++                convex_meshes.begin(),
++                convex_meshes.end(),
++                [](const auto &a, const auto &b) { return a.min_distance < b.min_distance; });
+         }
+
+     private:
+diff --git a/src/impl/vamp/collision/shapes.hh b/src/impl/vamp/collision/shapes.hh
+index 19b001b..e6de3fa 100644
+--- a/src/impl/vamp/collision/shapes.hh
++++ b/src/impl/vamp/collision/shapes.hh
+@@ -222,6 +222,100 @@ namespace vamp::collision
+     template <typename DataT>
+     using Capsule = Cylinder<DataT>;
+
++    template <typename DataT>
++    struct Triangle
++    {
++        DataT ax;
++        DataT ay;
++        DataT az;
++        DataT bx;
++        DataT by;
++        DataT bz;
++        DataT cx;
++        DataT cy;
++        DataT cz;
++        DataT nx;
++        DataT ny;
++        DataT nz;
++
++        Triangle() = default;
++
++        explicit Triangle(
++            DataT ax,
++            DataT ay,
++            DataT az,
++            DataT bx,
++            DataT by,
++            DataT bz,
++            DataT cx,
++            DataT cy,
++            DataT cz,
++            DataT nx,
++            DataT ny,
++            DataT nz)
++          : ax(ax)
++          , ay(ay)
++          , az(az)
++          , bx(bx)
++          , by(by)
++          , bz(bz)
++          , cx(cx)
++          , cy(cy)
++          , cz(cz)
++          , nx(nx)
++          , ny(ny)
++          , nz(nz)
++        {
++        }
++
++        template <typename OtherDataT>
++        explicit Triangle(const Triangle<OtherDataT> &other)
++          : ax(other.ax)
++          , ay(other.ay)
++          , az(other.az)
++          , bx(other.bx)
++          , by(other.by)
++          , bz(other.bz)
++          , cx(other.cx)
++          , cy(other.cy)
++          , cz(other.cz)
++          , nx(other.nx)
++          , ny(other.ny)
++          , nz(other.nz)
++        {
++        }
++    };
++
++    // A closed convex triangular mesh. The oriented bounds are used as a broad
++    // phase; triangles and outward normals provide the exact narrow phase.
++    template <typename DataT>
++    struct ConvexMesh : public Shape<DataT>
++    {
++        Cuboid<DataT> bounds;
++        std::vector<Triangle<DataT>> triangles;
++        DataT margin;
++
++        ConvexMesh() = default;
++
++        explicit ConvexMesh(
++            const Cuboid<DataT> &bounds,
++            const std::vector<Triangle<DataT>> &triangles,
++            DataT margin)
++          : Shape<DataT>(), bounds(bounds), triangles(triangles), margin(margin)
++        {
++            Shape<DataT>::min_distance = bounds.min_distance;
++        }
++
++        template <typename OtherDataT>
++        explicit ConvexMesh(const ConvexMesh<OtherDataT> &other)
++          : Shape<DataT>(other)
++          , bounds(other.bounds)
++          , triangles(other.triangles.begin(), other.triangles.end())
++          , margin(other.margin)
++        {
++        }
++    };
++
+     // A sphere shape, represented as its center (x, y, z) and radius (r)
+     template <typename DataT>
+     struct Sphere : public Shape<DataT>
+diff --git a/src/impl/vamp/collision/validity.hh b/src/impl/vamp/collision/validity.hh
+index b555c13..94ddb3a 100644
+--- a/src/impl/vamp/collision/validity.hh
++++ b/src/impl/vamp/collision/validity.hh
+@@ -5,6 +5,7 @@
+ #include <vamp/collision/sphere_sphere.hh>
+ #include <vamp/collision/sphere_capsule.hh>
+ #include <vamp/collision/sphere_cuboid.hh>
++#include <vamp/collision/sphere_convex_mesh.hh>
+ #include <vamp/collision/sphere_heightfield.hh>
+ #include <vamp/collision/math.hh>
+
+@@ -129,6 +130,20 @@ namespace vamp
+             }
+         }
+
++        for (const auto &em : e.convex_meshes)
++        {
++            const auto diff = em.min_distance - max_extent;
++            if (diff.test_zero())
++            {
++                break;
++            }
++
++            if (not collision::sphere_convex_mesh(em, sx, sy, sz, sr).test_zero())
++            {
++                return true;
++            }
++        }
++
+         for (const auto &eh : e.heightfields)
+         {
+             if (not collision::sphere_heightfield(eh, sx, sy, sz, sr).test_zero())
+@@ -237,6 +252,20 @@ namespace vamp
+             }
+         }
+
++        for (const auto &em : e.convex_meshes)
++        {
++            const auto diff = em.min_distance - max_extent;
++            if (diff.test_zero())
++            {
++                break;
++            }
++
++            if (not collision::sphere_convex_mesh(em, sx, sy, sz, sr).test_zero())
++            {
++                objects.emplace_back(em.name);
++            }
++        }
++
+         for (const auto &eh : e.heightfields)
+         {
+             if (not collision::sphere_heightfield(eh, sx, sy, sz, sr).test_zero())
+diff --git a/src/vamp/__init__.py b/src/vamp/__init__.py
+index 032ea17..d1c189c 100644
+--- a/src/vamp/__init__.py
++++ b/src/vamp/__init__.py
+@@ -8,6 +8,7 @@ __all__ = [
+     "Attachment",
+     "Sphere",
+     "Cuboid",
++    "ConvexMesh",
+     "Cylinder",
+     "RRTCSettings",
+     "PRMSettings",
+@@ -32,6 +33,7 @@ from .constants import *
+ from . import _core
+ from ._core import Sphere as Sphere
+ from ._core import Cuboid as Cuboid
++from ._core import ConvexMesh as ConvexMesh
+ from ._core import Cylinder as Cylinder
+ from ._core import Attachment as Attachment
+ from ._core import Environment as Environment
+diff --git a/src/impl/vamp/collision/sphere_convex_mesh.hh b/src/impl/vamp/collision/sphere_convex_mesh.hh
+new file mode 100644
+index 0000000..617ed7b
+--- /dev/null
++++ b/src/impl/vamp/collision/sphere_convex_mesh.hh
+@@ -0,0 +1,144 @@
++#pragma once
++
++#include <vamp/collision/shapes.hh>
++#include <vamp/collision/sphere_cuboid.hh>
++#include <vamp/collision/math.hh>
++
++namespace vamp::collision
++{
++    template <typename DataT>
++    inline constexpr auto minimum(const DataT &a, const DataT &b) noexcept -> DataT
++    {
++        return a.blend(b, b < a);
++    }
++
++    template <typename DataT>
++    inline constexpr auto point_segment_sql2(
++        const DataT &px,
++        const DataT &py,
++        const DataT &pz,
++        const DataT &ax,
++        const DataT &ay,
++        const DataT &az,
++        const DataT &bx,
++        const DataT &by,
++        const DataT &bz) noexcept -> DataT
++    {
++        const auto vx = bx - ax;
++        const auto vy = by - ay;
++        const auto vz = bz - az;
++        const auto wx = px - ax;
++        const auto wy = py - ay;
++        const auto wz = pz - az;
++        const auto denominator = dot_3(vx, vy, vz, vx, vy, vz);
++        const auto fraction = (dot_3(wx, wy, wz, vx, vy, vz) / denominator).clamp(0.F, 1.F);
++        return sql2_3(px, py, pz, ax + fraction * vx, ay + fraction * vy, az + fraction * vz);
++    }
++
++    template <typename DataT>
++    inline constexpr auto point_triangle_sql2(
++        const Triangle<DataT> &triangle,
++        const DataT &px,
++        const DataT &py,
++        const DataT &pz) noexcept -> DataT
++    {
++        const auto abx = triangle.bx - triangle.ax;
++        const auto aby = triangle.by - triangle.ay;
++        const auto abz = triangle.bz - triangle.az;
++        const auto acx = triangle.cx - triangle.ax;
++        const auto acy = triangle.cy - triangle.ay;
++        const auto acz = triangle.cz - triangle.az;
++        const auto apx = px - triangle.ax;
++        const auto apy = py - triangle.ay;
++        const auto apz = pz - triangle.az;
++        const auto d00 = dot_3(abx, aby, abz, abx, aby, abz);
++        const auto d01 = dot_3(abx, aby, abz, acx, acy, acz);
++        const auto d11 = dot_3(acx, acy, acz, acx, acy, acz);
++        const auto d20 = dot_3(apx, apy, apz, abx, aby, abz);
++        const auto d21 = dot_3(apx, apy, apz, acx, acy, acz);
++        const auto denominator = d00 * d11 - d01 * d01;
++        const auto barycentric_b = (d11 * d20 - d01 * d21) / denominator;
++        const auto barycentric_c = (d00 * d21 - d01 * d20) / denominator;
++        const auto barycentric_a = 1.F - barycentric_b - barycentric_c;
++        const auto projection_inside =
++            (barycentric_a >= 0.F) & (barycentric_b >= 0.F) & (barycentric_c >= 0.F);
++        const auto signed_plane_distance =
++            dot_3(apx, apy, apz, triangle.nx, triangle.ny, triangle.nz);
++        const auto plane_sql2 = signed_plane_distance * signed_plane_distance;
++        const auto ab_sql2 = point_segment_sql2(
++            px,
++            py,
++            pz,
++            triangle.ax,
++            triangle.ay,
++            triangle.az,
++            triangle.bx,
++            triangle.by,
++            triangle.bz);
++        const auto bc_sql2 = point_segment_sql2(
++            px,
++            py,
++            pz,
++            triangle.bx,
++            triangle.by,
++            triangle.bz,
++            triangle.cx,
++            triangle.cy,
++            triangle.cz);
++        const auto ca_sql2 = point_segment_sql2(
++            px,
++            py,
++            pz,
++            triangle.cx,
++            triangle.cy,
++            triangle.cz,
++            triangle.ax,
++            triangle.ay,
++            triangle.az);
++        const auto edge_sql2 = minimum(minimum(ab_sql2, bc_sql2), ca_sql2);
++        return edge_sql2.blend(plane_sql2, projection_inside);
++    }
++
++    template <typename DataT>
++    inline constexpr auto sphere_convex_mesh(
++        const ConvexMesh<DataT> &mesh,
++        const DataT &x,
++        const DataT &y,
++        const DataT &z,
++        const DataT &radius) noexcept -> DataT
++    {
++        const auto broad_phase = sphere_cuboid(mesh.bounds, x, y, z, radius * radius);
++        if (broad_phase.test_zero())
++        {
++            return broad_phase;
++        }
++
++        const auto &first = mesh.triangles.front();
++        auto surface_sql2 = point_triangle_sql2(first, x, y, z);
++        auto maximum_plane_distance = dot_3(
++            x - first.ax,
++            y - first.ay,
++            z - first.az,
++            first.nx,
++            first.ny,
++            first.nz);
++        for (auto index = 1U; index < mesh.triangles.size(); ++index)
++        {
++            const auto &triangle = mesh.triangles[index];
++            surface_sql2 = minimum(
++                surface_sql2,
++                point_triangle_sql2(triangle, x, y, z));
++            maximum_plane_distance = maximum_plane_distance.max(dot_3(
++                x - triangle.ax,
++                y - triangle.ay,
++                z - triangle.az,
++                triangle.nx,
++                triangle.ny,
++                triangle.nz));
++        }
++        const auto expanded_radius = radius + mesh.margin;
++        const auto radius_sql2 = expanded_radius * expanded_radius;
++        const auto outside_result = surface_sql2 - radius_sql2;
++        return outside_result.blend(-radius_sql2, maximum_plane_distance <= 0.F);
++    }
++}  // namespace vamp::collision

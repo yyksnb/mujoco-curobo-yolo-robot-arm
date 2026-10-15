@@ -1,17 +1,8 @@
-# cuRobo Configuration Placeholder
+# cuRobo Configuration
 
-Stage 4.1 does not include a production robot model. A real cuRobo deployment
-must provide validated robot and world configuration files from the target robot
-package or cuRobo robot builder.
+`gen3/` contains the Task 1 survey robot, world, and graph-planning
+configuration. The files are consumed together and must remain consistent with
+the Gen3 model and MuJoCo tank scene used by Task 1.
 
-Expected fields for this repository's planner configuration:
-
-- `robot_config_path`: path to the cuRobo robot YAML/XRDF config.
-- `world_config_path`: optional path to a cuRobo world config template.
-- `ee_link`: end-effector link name in the robot model.
-- `base_link`: base link name in the robot model.
-- `joint_names`: ordered joint names matching this project's `RobotState`.
-- `use_cuda`: whether real planning requires CUDA.
-
-The placeholder JSON in this directory documents the shape only. It is not a
-valid cuRobo robot model.
+`robot_config_placeholder.json` documents the legacy pipeline configuration
+shape only. It is not a valid cuRobo robot model.
