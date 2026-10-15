@@ -116,7 +116,7 @@ collision_spheres:
     - -0.001281
     - -0.022346
     - -0.226675
-    radius: 0.037698
+    radius: 0.036943
   - center:
     - -0.004022
     - -0.003286
@@ -134,15 +134,35 @@ collision_spheres:
     radius: 0.038169
   forearm_link:
   - center:
-    - -0.002957
-    - -0.173842
-    - -0.00483
-    radius: 0.049268
+    - 0.000000000
+    - -0.206506598
+    - -0.006375000
+    radius: 0.036617548
   - center:
-    - 0.0
-    - -0.185257
-    - -0.006375
-    radius: 0.035643
+    - 0.000000000
+    - -0.194894796
+    - -0.006375000
+    radius: 0.036645854
+  - center:
+    - 0.000000000
+    - -0.183282993
+    - -0.006375000
+    radius: 0.036660062
+  - center:
+    - 0.000000000
+    - -0.171671191
+    - -0.006375000
+    radius: 0.036922127
+  - center:
+    - 0.000000000
+    - -0.160059388
+    - -0.006375000
+    radius: 0.037395229
+  - center:
+    - 0.000000000
+    - -0.148447586
+    - -0.006375000
+    radius: 0.037481262
   - center:
     - 0.000746
     - -0.13259
@@ -518,43 +538,45 @@ collision_spheres:
     - 0.015
     - 0.062
     radius: 0.025
+  # Jaw carriage boxes at the fully closed reference. Planning moves these
+  # spheres with the commanded total opening; they are not fixed wrist geometry.
   - center:
-    - -0.065
+    - -0.023
     - -0.0125
     - 0.085
     radius: 0.019
   - center:
-    - -0.047
+    - -0.005
     - -0.0125
     - 0.085
     radius: 0.019
   - center:
-    - -0.065
+    - -0.023
     - 0.0125
     - 0.085
     radius: 0.019
   - center:
-    - -0.047
+    - -0.005
     - 0.0125
     - 0.085
     radius: 0.019
   - center:
-    - 0.047
+    - 0.005
     - -0.0125
     - 0.085
     radius: 0.019
   - center:
-    - 0.065
+    - 0.023
     - -0.0125
     - 0.085
     radius: 0.019
   - center:
-    - 0.047
+    - 0.005
     - 0.0125
     - 0.085
     radius: 0.019
   - center:
-    - 0.065
+    - 0.023
     - 0.0125
     - 0.085
     radius: 0.019

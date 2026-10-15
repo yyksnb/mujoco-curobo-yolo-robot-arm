@@ -619,6 +619,21 @@ def _parse_planning(
         ),
         _number(
             policy_payload,
+            "pregrasp_tcp_path_detour_ratio_limit",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "egress_tcp_path_detour_ratio_limit",
+            "policy",
+        ),
+        _number(
+            policy_payload,
+            "egress_portal_maximum_joint_edge_rad",
+            "policy",
+        ),
+        _number(
+            policy_payload,
             "payload_tcp_max_angular_velocity_rad_s",
             "policy",
         ),

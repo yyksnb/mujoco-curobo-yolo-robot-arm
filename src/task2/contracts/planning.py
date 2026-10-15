@@ -440,6 +440,9 @@ class PlanningPolicy:
     preplace_offset_m: float
     joint_limit_margin_rad: float
     pregrasp_joint_path_detour_ratio_limit: float
+    pregrasp_tcp_path_detour_ratio_limit: float
+    egress_tcp_path_detour_ratio_limit: float
+    egress_portal_maximum_joint_edge_rad: float
     payload_tcp_max_angular_velocity_rad_s: float
     payload_tcp_max_translation_velocity_m_s: float
     payload_tcp_max_translation_acceleration_m_s2: float
@@ -462,6 +465,9 @@ class PlanningPolicy:
             self.preplace_offset_m,
             self.joint_limit_margin_rad,
             self.pregrasp_joint_path_detour_ratio_limit,
+            self.pregrasp_tcp_path_detour_ratio_limit,
+            self.egress_tcp_path_detour_ratio_limit,
+            self.egress_portal_maximum_joint_edge_rad,
             self.payload_tcp_max_angular_velocity_rad_s,
             self.payload_tcp_max_translation_velocity_m_s,
             self.payload_tcp_max_translation_acceleration_m_s2,

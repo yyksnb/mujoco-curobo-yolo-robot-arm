@@ -52,6 +52,7 @@ class CollisionSphereGroup:
     sphere_count: int
     translation_per_closed_fraction_m: Vector3
     sweep_radius_inflation_m: float
+    reference_closed_fraction: float | None = None
 
     def validate(self, total_spheres: int) -> None:
         if not self.group or self.first_sphere < 0 or self.sphere_count <= 0:
@@ -64,6 +65,13 @@ class CollisionSphereGroup:
             raise ValueError("VAMP collision sphere translation must be finite xyz")
         if not isfinite(self.sweep_radius_inflation_m) or self.sweep_radius_inflation_m < 0.0:
             raise ValueError("VAMP sweep radius inflation must be non-negative")
+        if self.reference_closed_fraction is not None and (
+            not isfinite(self.reference_closed_fraction)
+            or not 0.0 <= self.reference_closed_fraction <= 1.0
+        ):
+            raise ValueError(
+                "VAMP collision sphere reference closed fraction must lie in [0, 1]"
+            )
 
 
 @dataclass(frozen=True)
@@ -114,6 +122,7 @@ class VampConfig:
     robot_sphere_count: int
     tool_fraction_midpoint: float
     maximum_gripper_opening_m: float
+    source_support_contact_hull_clearance_m: float
     collision_sphere_groups: tuple[CollisionSphereGroup, ...]
     collision_sphere_calibrations: tuple[CollisionSphereCalibration, ...]
     source_support_contact_hulls: tuple[SourceSupportContactHull, ...]
@@ -132,6 +141,13 @@ class VampConfig:
             raise ValueError("VAMP tool fraction midpoint must lie in [0, 1]")
         if not isfinite(self.maximum_gripper_opening_m) or self.maximum_gripper_opening_m <= 0.0:
             raise ValueError("VAMP maximum gripper opening must be positive")
+        if (
+            not isfinite(self.source_support_contact_hull_clearance_m)
+            or self.source_support_contact_hull_clearance_m < 0.0
+        ):
+            raise ValueError(
+                "VAMP source-support contact hull clearance must be non-negative"
+            )
         if not isfinite(self.range_rad) or self.range_rad <= 0.0:
             raise ValueError("VAMP range must be positive")
         if self.sample_offset_start < 0 or self.sample_offset_stride < self.max_samples:
@@ -190,6 +206,15 @@ def parse_vamp_config(
                     item,
                     "sweep_radius_inflation_m",
                     "VAMP collision sphere group",
+                ),
+                (
+                    _config_number(
+                        item,
+                        "reference_closed_fraction",
+                        "VAMP collision sphere group",
+                    )
+                    if "reference_closed_fraction" in item
+                    else None
                 ),
             )
         )
@@ -264,6 +289,11 @@ def parse_vamp_config(
         ),
         _config_number(
             end_effector_profile, "maximum_gripper_opening_m", "VAMP profile"
+        ),
+        _config_number(
+            end_effector_profile,
+            "source_support_contact_hull_clearance_m",
+            "VAMP profile",
         ),
         tuple(groups),
         tuple(calibrations),
@@ -812,11 +842,10 @@ class VampBackend:
                     unsupported_geometry = True
                     continue
                 support_vertices, support_faces = support_polyhedron
-                if _convex_polyhedra_intersect(
-                    pad_vertices,
-                    pad_faces,
-                    support_vertices,
-                    support_faces,
+                if _prepared_polyhedra_within_clearance(
+                    _prepare_polyhedron(pad_vertices, pad_faces),
+                    _prepare_polyhedron(support_vertices, support_faces),
+                    self._config.source_support_contact_hull_clearance_m,
                 ):
                     contacts.add(hull.group)
                     break
@@ -922,12 +951,10 @@ class VampBackend:
                         contacts.add(geometry.collision_group)
                 continue
 
-            attached_spheres = tuple(
-                self._vamp.Sphere(
-                    (attached_matrix[:3, :3] @ center + attached_matrix[:3, 3]).tolist(),
-                    radius,
-                )
-                for center, radius in _attached_sphere_specs(attached)
+            attached_spheres = self._attachment_spheres(
+                configuration,
+                T_tcp_object,
+                (attached,),
             )
             named_spheres = [(sphere, "attached_object") for sphere in attached_spheres]
             for geometry in geometries_in_base:
@@ -970,9 +997,14 @@ class VampBackend:
             adjusted = robot_sphere
             group = self._collision_group_by_sphere[index]
             if group is not None:
+                reference_closed_fraction = (
+                    self._config.tool_fraction_midpoint
+                    if group.reference_closed_fraction is None
+                    else group.reference_closed_fraction
+                )
                 local_shift = np.asarray(
                     group.translation_per_closed_fraction_m, dtype=np.float64
-                ) * (closed_fraction - self._config.tool_fraction_midpoint)
+                ) * (closed_fraction - reference_closed_fraction)
                 base_shift = tcp_rotation @ local_shift
                 adjusted = self._vamp.Sphere(
                     [
@@ -1235,8 +1267,18 @@ def _prepared_polyhedra_intersect(
     left: _PreparedPolyhedron,
     right: _PreparedPolyhedron,
 ) -> bool:
-    if np.any(left.maximum < right.minimum - 1e-12) or np.any(
-        right.maximum < left.minimum - 1e-12
+    return _prepared_polyhedra_within_clearance(left, right, 0.0)
+
+
+def _prepared_polyhedra_within_clearance(
+    left: _PreparedPolyhedron,
+    right: _PreparedPolyhedron,
+    clearance_m: float,
+) -> bool:
+    if not isfinite(clearance_m) or clearance_m < 0.0:
+        raise ValueError("convex polyhedron clearance must be non-negative")
+    if np.any(left.maximum + clearance_m < right.minimum - 1e-12) or np.any(
+        right.maximum + clearance_m < left.minimum - 1e-12
     ):
         return False
     edge_axes = np.cross(
@@ -1260,9 +1302,12 @@ def _prepared_polyhedra_intersect(
     right_projection = right.vertices @ axes.T
     return not bool(
         np.any(
-            (np.max(left_projection, axis=0) < np.min(right_projection, axis=0) - 1e-12)
+            (
+                np.max(left_projection, axis=0) + clearance_m
+                < np.min(right_projection, axis=0) - 1e-12
+            )
             | (
-                np.max(right_projection, axis=0)
+                np.max(right_projection, axis=0) + clearance_m
                 < np.min(left_projection, axis=0) - 1e-12
             )
         )

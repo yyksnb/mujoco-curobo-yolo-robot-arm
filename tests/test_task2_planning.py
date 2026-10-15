@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from math import inf, nextafter
+from math import inf, nextafter, pi
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +27,7 @@ from task2.backends.vamp import (
     _outward_convex_faces,
     _prepared_convex_polyhedron,
     _prepared_polyhedra_intersect,
+    _prepared_polyhedra_within_clearance,
     _sphere_intersects_geometry,
 )
 from task2.config import load_task2_config
@@ -56,7 +57,6 @@ from task2.contracts import (
 from task2.contracts.geometry import compose, inverse
 from task2.ik import IKResult, IKSolution
 from task2.planning import (
-    _OrientationPathMetrics,
     _Route,
     _RouteFailure,
     PlanningDependencies,
@@ -67,11 +67,12 @@ from task2.planning import (
     _farthest_collision_valid_shortcut,
     _joint_path_detour_ratio,
     _joint_path_length,
+    _maximum_bounded_joint_path_edge,
     _maximum_joint_path_edge,
+    _maximum_physical_joint_path_edge,
     _joint_space_portal_route,
     _joint_space_portal_then_vertical_route,
     _normalize_segment_sample_time,
-    _pregrasp_path_quality_key,
     _retime_payload_motion,
     _sampled_orientation_deviation,
     _staged_lift_route,
@@ -762,6 +763,10 @@ def _two_endpoint_free_placement_request() -> PlanningRequest:
     return replace(
         baseline,
         candidates=(candidate,),
+        object_config=replace(
+            baseline.object_config,
+            payload_motion_strategy=LocalMotionStrategy.CONTINUOUS_CARTESIAN,
+        ),
         placement_goal=replace(
             baseline.placement_goal,
             T_world_tcp=placement_pose,
@@ -1081,19 +1086,38 @@ def test_orientation_preference_cost_samples_between_vamp_knots() -> None:
     assert metrics.sample_count > 3
 
 
-def test_pregrasp_quality_prefers_cumulative_rotation_before_max_deviation() -> None:
-    direct = _OrientationPathMetrics(0.40, 1.0, 1.20, 10)
-    winding = _OrientationPathMetrics(0.05, 0.9, 1.50, 10)
-    assert _pregrasp_path_quality_key(direct, 1.0, 0) < _pregrasp_path_quality_key(
-        winding, 0.2, 1
-    )
-
-
 def test_maximum_joint_path_edge_detects_a_direct_branch_flip() -> None:
     path = ((0.0, 0.0), (2.5, -2.5), (2.6, -2.4))
 
     assert _joint_path_detour_ratio(path) < 1.1
     assert _maximum_joint_path_edge(path) == pytest.approx(np.sqrt(12.5))
+
+
+def test_bounded_joint_path_edge_ignores_unwrapped_continuous_joints() -> None:
+    model = _request().robot_model
+    start = list(model.default_joint_positions)
+    goal = start.copy()
+    goal[0] += 4.0
+    goal[3] = -goal[3]
+
+    assert model.joint_limits[0].continuous
+    assert not model.joint_limits[3].continuous
+    assert _maximum_bounded_joint_path_edge(
+        (tuple(start), tuple(goal)), model
+    ) == pytest.approx(2.0 * abs(start[3]))
+
+
+def test_physical_joint_path_edge_uses_periodic_continuous_joint_distance() -> None:
+    model = _request().robot_model
+    start = list(model.default_joint_positions)
+    goal = start.copy()
+    goal[0] += 2.0 * np.pi - 0.1
+    goal[1] += 0.2
+
+    assert _maximum_joint_path_edge((tuple(start), tuple(goal))) > 6.0
+    assert _maximum_physical_joint_path_edge(
+        (tuple(start), tuple(goal)), model
+    ) == pytest.approx(0.2)
 
 
 def test_cartesian_route_preserves_the_globally_smoother_ik_branch() -> None:
@@ -1213,10 +1237,135 @@ def test_joint_space_portal_compares_a_bounded_set_of_reachable_goals() -> None:
     assert path[-1][0] == pytest.approx(0.6)
 
 
+def test_joint_space_portal_rejects_a_large_joint_edge_before_ranking() -> None:
+    baseline = _request()
+    request = replace(
+        baseline,
+        planning_policy=replace(
+            baseline.planning_policy,
+            egress_portal_maximum_joint_edge_rad=1.0,
+        ),
+    )
+    start = request.initial_state.positions_rad
+
+    class _PortalIK(_FakeIK):
+        def solve(self, targets, seed_states, constraints):
+            del targets, constraints
+            solutions = []
+            for value in (0.3, 0.6):
+                positions = list(seed_states[0].positions_rad)
+                positions[0] = value
+                solutions.append(
+                    IKSolution(
+                        RobotState(self.model.joint_names, tuple(positions)),
+                        0.0,
+                        0.0,
+                    )
+                )
+            return IKResult(tuple(solutions), None, "portal IK succeeded")
+
+    class _PortalVamp(_FakeVamp):
+        def __init__(self, robot_model):
+            super().__init__(robot_model)
+            self.multi_goal_sizes = []
+
+        def plan_to_any(self, start, goals, environment, *, sample_offset):
+            del environment, sample_offset
+            self.multi_goal_sizes.append(len(goals))
+            goal = goals[0]
+            midpoint = list(start)
+            midpoint[0] = 2.0 if goal[0] == pytest.approx(0.3) else 0.3
+            return VampPlan(
+                (tuple(start), tuple(midpoint), tuple(goal)),
+                0.001,
+                1,
+                0,
+            )
+
+    vamp = _PortalVamp(request.robot_model)
+    path = _joint_space_portal_route(
+        request,
+        _PortalIK(request.robot_model),
+        vamp,
+        start,
+        _pose(request.robot_model.base_frame, request.robot_model.tcp_frame),
+        {},
+        19,
+        TrajectoryStage.EGRESS,
+        monotonic(),
+        8,
+    )
+
+    assert vamp.multi_goal_sizes == [2, 1]
+    assert path[-1][0] == pytest.approx(0.6)
+    assert _maximum_joint_path_edge(path) <= 1.0
+
+
+def test_joint_space_portal_rejects_tcp_detours() -> None:
+    baseline = _request()
+    request = replace(
+        baseline,
+        planning_policy=replace(
+            baseline.planning_policy,
+            egress_tcp_path_detour_ratio_limit=1.1,
+            egress_portal_maximum_joint_edge_rad=10.0,
+            trajectory_validation_joint_step_rad=10.0,
+        ),
+    )
+    start = request.initial_state.positions_rad
+
+    class _PortalIK(_FakeIK):
+        def solve(self, targets, seed_states, constraints):
+            del targets, constraints
+            positions = list(seed_states[0].positions_rad)
+            positions[0] = 0.3
+            return IKResult(
+                (
+                    IKSolution(
+                        RobotState(self.model.joint_names, tuple(positions)),
+                        0.0,
+                        0.0,
+                    ),
+                ),
+                None,
+                "portal IK succeeded",
+            )
+
+    class _DetouringPortalVamp(_FakeVamp):
+        def plan_to_any(self, start, goals, environment, *, sample_offset):
+            del environment, sample_offset
+            midpoint = list(start)
+            midpoint[0] = 2.0
+            return VampPlan(
+                (tuple(start), tuple(midpoint), tuple(goals[0])),
+                0.001,
+                1,
+                0,
+            )
+
+    with pytest.raises(_RouteFailure, match="TCP path detour ratio limit"):
+        _joint_space_portal_route(
+            request,
+            _PortalIK(request.robot_model),
+            _DetouringPortalVamp(request.robot_model),
+            start,
+            _pose(request.robot_model.base_frame, request.robot_model.tcp_frame),
+            {},
+            19,
+            TrajectoryStage.EGRESS,
+            monotonic(),
+            8,
+        )
+
+
 def test_joint_space_portal_reaches_transition_before_vertical_exit() -> None:
     baseline = _request()
     request = replace(
         baseline,
+        planning_policy=replace(
+            baseline.planning_policy,
+            egress_portal_maximum_joint_edge_rad=4.0,
+        ),
         vertical_transit_corridor=VerticalTransitCorridor(
             "test_portal",
             (0.4, 0.2),
@@ -1440,6 +1589,7 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
             payload_tcp_max_angular_velocity_rad_s=1000.0,
             payload_tcp_max_translation_velocity_m_s=1000.0,
             payload_tcp_max_translation_acceleration_m_s2=1000.0,
+            trajectory_validation_max_samples=100000,
         ),
         object_config=replace(
             baseline.object_config,
@@ -1482,37 +1632,66 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
         (0.0, 0.0, -1.0)
     )
     grasp_z = request.candidates[0].T_world_tcp.matrix[2][3]
-    portal_by_stage = {}
-    for stage in (TrajectoryStage.PREGRASP, TrajectoryStage.EGRESS):
-        portal_z = [
-            10.0 * knot.positions_rad[2]
-            for knot in result.trajectory.knots
-            if knot.stage is stage
-            and 10.0 * knot.positions_rad[0] == pytest.approx(0.4)
-            and 10.0 * knot.positions_rad[1] == pytest.approx(0.2)
-        ]
-        portal_by_stage[stage] = portal_z
-        assert len(portal_z) >= 2
-        assert max(portal_z) - min(portal_z) >= 0.15
-    assert min(portal_by_stage[TrajectoryStage.PREGRASP]) <= grasp_z + 0.17 + 1e-9
-    assert any(
-        value == pytest.approx(grasp_z + 0.4)
-        for value in portal_by_stage[TrajectoryStage.PREGRASP]
+    pregrasp_world = request.candidates[0].T_world_pregrasp
+    pregrasp_xy = np.asarray(
+        (pregrasp_world.matrix[0][3], pregrasp_world.matrix[1][3])
     )
+    pregrasp_stage_tcp = [
+        np.asarray(
+            (
+                10.0 * knot.positions_rad[0],
+                10.0 * knot.positions_rad[1],
+                10.0 * knot.positions_rad[2],
+            )
+        )
+        for knot in result.trajectory.knots
+        if knot.stage is TrajectoryStage.PREGRASP
+    ]
+    assert len(pregrasp_stage_tcp) >= 3
+    portal_index = next(
+        index
+        for index, xyz in enumerate(pregrasp_stage_tcp)
+        if xyz[:2] == pytest.approx((0.4, 0.2))
+        and xyz[2] == pytest.approx(grasp_z + 0.4)
+    )
+    assert pregrasp_stage_tcp[-1] == pytest.approx(
+        (*pregrasp_xy, pregrasp_world.matrix[2][3])
+    )
+    assert portal_index < len(pregrasp_stage_tcp) - 1
+    pregrasp_portal_z = [
+        10.0 * knot.positions_rad[2]
+        for knot in result.trajectory.knots
+        if knot.stage is TrajectoryStage.PREGRASP
+        and 10.0 * knot.positions_rad[0] == pytest.approx(0.4)
+        and 10.0 * knot.positions_rad[1] == pytest.approx(0.2)
+    ]
+    assert len(pregrasp_portal_z) >= 2
+    assert pregrasp_portal_z[0] > pregrasp_portal_z[-1]
+    assert max(pregrasp_portal_z) == pytest.approx(grasp_z + 0.4)
+    assert min(pregrasp_portal_z) <= (
+        grasp_z
+        + request.vertical_transit_corridor.minimum_vertical_lift_m
+        + request.vertical_transit_corridor.ingress_waypoint_step_m
+        + 1e-9
+    )
+    egress_portal_z = [
+        10.0 * knot.positions_rad[2]
+        for knot in result.trajectory.knots
+        if knot.stage is TrajectoryStage.EGRESS
+        and 10.0 * knot.positions_rad[0] == pytest.approx(0.4)
+        and 10.0 * knot.positions_rad[1] == pytest.approx(0.2)
+    ]
+    assert len(egress_portal_z) >= 2
+    assert max(egress_portal_z) - min(egress_portal_z) >= 0.15
     assert any(
         value == pytest.approx(grasp_z + 0.25)
-        for value in portal_by_stage[TrajectoryStage.EGRESS]
+        for value in egress_portal_z
     )
     assert any(
         value == pytest.approx(grasp_z + 0.45)
-        for value in portal_by_stage[TrajectoryStage.EGRESS]
+        for value in egress_portal_z
     )
-    assert portal_by_stage[TrajectoryStage.PREGRASP][0] > portal_by_stage[
-        TrajectoryStage.PREGRASP
-    ][-1]
-    assert portal_by_stage[TrajectoryStage.EGRESS][0] < portal_by_stage[
-        TrajectoryStage.EGRESS
-    ][-1]
+    assert egress_portal_z[0] < egress_portal_z[-1]
     pregrasp_positions = tuple(
         knot.positions_rad
         for knot in result.trajectory.knots
@@ -1522,19 +1701,25 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
         max(abs(a - b) for a, b in zip(left, right)) > 1e-10
         for left, right in zip(pregrasp_positions, pregrasp_positions[1:])
     )
+    assert (
+        _maximum_bounded_joint_path_edge(
+            pregrasp_positions,
+            request.robot_model,
+        )
+        <= pi
+    )
+    assert all(
+        max(abs(value) for value in knot.velocities_rad_s) <= 1e-12
+        for knot in result.trajectory.knots
+        if knot.stage is TrajectoryStage.PREGRASP
+    )
     loaded_plan_environments = [
         environment
         for environment in vamp.plan_environments
         if environment.get("attached_geometry")
     ]
-    unloaded_plan_calls = [
-        call
-        for call in vamp.plan_calls
-        if call[2].get("T_tcp_object") is None
-    ]
-    # LIFT reaches each vertical semantic target through a loaded joint-space
-    # route.  Before support departure those routes exclude only the declared
-    # source support; non-support scene geometry remains present.
+    # Before source-support departure, LIFT planning excludes only the declared
+    # support; non-support scene geometry remains present.
     lift_environments = [
         environment
         for environment in loaded_plan_environments
@@ -1548,11 +1733,6 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
         for environment in lift_environments
         for geometry in environment["scene"].geometries
     )
-    assert len(unloaded_plan_calls) >= 2
-    assert {call[0] == request.initial_state.positions_rad for call in unloaded_plan_calls} == {
-        False,
-        True,
-    }
     maximum_polynomial_xy_deviation_m = 0.0
     portal_xy = np.asarray(request.vertical_transit_corridor.portal_world_xy_m)
     for segment in result.trajectory.segments:
@@ -1592,16 +1772,17 @@ def test_vertical_transit_corridor_materializes_vertical_ingress_and_egress() ->
         attempt
         for attempt in result.attempts
         if attempt.stage is TrajectoryStage.EGRESS
-        and "vertical transit" in attempt.reason
+        and attempt.reason.startswith("EGRESS followed")
     )
     assert len(transit_egress_attempts) == 1
     assert transit_egress_attempts[0].error_code is None
     assert transit_egress_attempts[0].reason == (
-        "EGRESS followed the explicit diagonal vertical transit and Cartesian transfer"
+        "EGRESS followed the fixed portal-to-transition, vertical exit, and "
+        "Cartesian transfer"
     )
 
 
-def test_continuous_local_motion_keeps_endpoint_first_pregrasp(monkeypatch) -> None:
+def test_continuous_local_motion_uses_the_fixed_semantic_pregrasp(monkeypatch) -> None:
     baseline = _request("rivet_gun")
     request = replace(
         baseline,
@@ -1615,6 +1796,7 @@ def test_continuous_local_motion_keeps_endpoint_first_pregrasp(monkeypatch) -> N
             payload_tcp_max_angular_velocity_rad_s=1000.0,
             payload_tcp_max_translation_velocity_m_s=1000.0,
             payload_tcp_max_translation_acceleration_m_s2=1000.0,
+            trajectory_validation_max_samples=100000,
         ),
         object_config=replace(
             baseline.object_config,
@@ -1635,11 +1817,18 @@ def test_continuous_local_motion_keeps_endpoint_first_pregrasp(monkeypatch) -> N
         budgets=PlanningBudgets(1, 1, 5.0, 20.0),
     )
 
-    def reject_forward_portal(*args, **kwargs):
-        raise AssertionError("continuous motion must solve the PREGRASP endpoint first")
+    portal_calls = 0
+    original_portal_route = _joint_space_portal_route
+
+    def track_pregrasp_portal(*args, **kwargs):
+        nonlocal portal_calls
+        stage = kwargs["stage"] if "stage" in kwargs else args[7]
+        if stage is TrajectoryStage.PREGRASP:
+            portal_calls += 1
+        return original_portal_route(*args, **kwargs)
 
     monkeypatch.setattr(
-        "task2.planning._joint_space_portal_route", reject_forward_portal
+        "task2.planning._joint_space_portal_route", track_pregrasp_portal
     )
     result = plan(request, dependencies=_fake_dependencies())
 
@@ -1648,9 +1837,16 @@ def test_continuous_local_motion_keeps_endpoint_first_pregrasp(monkeypatch) -> N
     assert tuple(phase.stage for phase in result.trajectory.phases) == tuple(
         TrajectoryStage
     )
+    assert portal_calls == 0
+    assert any(
+        attempt.stage is TrajectoryStage.PREGRASP
+        and attempt.error_code is None
+        and "semantic_connector" in attempt.reason
+        for attempt in result.attempts
+    )
 
 
-def test_staged_portal_keeps_endpoint_first_pregrasp(monkeypatch) -> None:
+def test_staged_portal_keeps_a_single_semantic_pregrasp_topology(monkeypatch) -> None:
     baseline = _request()
     request = replace(
         baseline,
@@ -1664,6 +1860,7 @@ def test_staged_portal_keeps_endpoint_first_pregrasp(monkeypatch) -> None:
             payload_tcp_max_angular_velocity_rad_s=1000.0,
             payload_tcp_max_translation_velocity_m_s=1000.0,
             payload_tcp_max_translation_acceleration_m_s2=1000.0,
+            trajectory_validation_max_samples=100000,
         ),
         object_config=replace(
             baseline.object_config,
@@ -1684,12 +1881,6 @@ def test_staged_portal_keeps_endpoint_first_pregrasp(monkeypatch) -> None:
         budgets=PlanningBudgets(1, 1, 5.0, 20.0),
     )
 
-    def reject_forward_portal(*args, **kwargs):
-        raise AssertionError("staged portal must preserve the grasp IK branch")
-
-    monkeypatch.setattr(
-        "task2.planning._joint_space_portal_route", reject_forward_portal
-    )
     result = plan(request, dependencies=_fake_dependencies())
 
     assert result.success, result.message
@@ -1704,7 +1895,7 @@ def test_staged_portal_keeps_endpoint_first_pregrasp(monkeypatch) -> None:
         and attempt.error_code is None
     )
     assert pregrasp_reasons
-    assert all("forward_vertical" not in reason for reason in pregrasp_reasons)
+    assert all("semantic_connector" in reason for reason in pregrasp_reasons)
 
 
 def test_continuous_local_motion_rejects_failed_cartesian_pregrasp_transit(
@@ -1756,7 +1947,7 @@ def test_continuous_local_motion_rejects_failed_cartesian_pregrasp_transit(
     assert "controlled Cartesian transit failure" in result.message
 
 
-def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
+def test_adaptive_portal_uses_one_staged_payload_exit_topology(
     monkeypatch,
 ) -> None:
     baseline = _request()
@@ -1789,6 +1980,7 @@ def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
             payload_tcp_max_angular_velocity_rad_s=1000.0,
             payload_tcp_max_translation_velocity_m_s=1000.0,
             payload_tcp_max_translation_acceleration_m_s2=1000.0,
+            trajectory_validation_max_samples=100000,
         ),
         object_config=replace(
             baseline.object_config,
@@ -1811,6 +2003,9 @@ def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
     lift_continuation_calls = 0
     lift_pose_step_lengths_m: tuple[float, ...] = ()
     lift_pose_translations: tuple[np.ndarray, ...] = ()
+    egress_portal_calls = 0
+    original_staged_lift = _staged_lift_route
+    original_portal_then_vertical = _joint_space_portal_then_vertical_route
 
     def track_continuous_ik(*args, **kwargs):
         nonlocal lift_continuation_calls
@@ -1822,24 +2017,35 @@ def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
     def track_staged_lift(*args, **kwargs):
         nonlocal lift_pose_step_lengths_m, lift_pose_translations
         poses = kwargs["poses"] if "poses" in kwargs else args[4]
-        translations = tuple(
-            np.asarray(pose.matrix, dtype=np.float64)[:3, 3]
-            for pose in poses
+        lift_pose_translations = tuple(
+            np.asarray(pose.matrix, dtype=np.float64)[:3, 3] for pose in poses
         )
-        lift_pose_translations = translations
         lift_pose_step_lengths_m = tuple(
             float(np.linalg.norm(right - left))
-            for left, right in zip(translations, translations[1:])
+            for left, right in zip(
+                lift_pose_translations,
+                lift_pose_translations[1:],
+            )
         )
-        return _staged_lift_route(*args, **kwargs)
+        return original_staged_lift(*args, **kwargs)
+
+    def track_portal_then_vertical(*args, **kwargs):
+        nonlocal egress_portal_calls
+        egress_portal_calls += 1
+        return original_portal_then_vertical(*args, **kwargs)
 
     monkeypatch.setattr("task2.planning._continuous_ik", track_continuous_ik)
     monkeypatch.setattr("task2.planning._staged_lift_route", track_staged_lift)
+    monkeypatch.setattr(
+        "task2.planning._joint_space_portal_then_vertical_route",
+        track_portal_then_vertical,
+    )
+    vamp = _FakeVamp(request.robot_model)
     result = plan(
         request,
         dependencies=replace(
             _fake_dependencies(),
-            create_vamp=lambda robot_model: _FakeVamp(robot_model),
+            create_vamp=lambda robot_model: vamp,
             create_ruckig=lambda robot_model: RuckigTimeParameterizer(
                 robot_model, backend.ruckig
             ),
@@ -1855,8 +2061,9 @@ def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
         and attempt.reason.startswith("EGRESS followed")
     )
     assert len(egress_attempts) == 1
+    assert egress_portal_calls == 1
     assert lift_continuation_calls == 0
-    assert lift_pose_step_lengths_m
+    assert lift_pose_translations
     grasp_translation = np.asarray(
         compose(
             inverse(request.T_world_base),
@@ -1864,7 +2071,7 @@ def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
         ).matrix,
         dtype=np.float64,
     )[:3, 3]
-    assert np.allclose(lift_pose_translations[0][:2], grasp_translation[:2])
+    assert lift_pose_translations[0][:2] == pytest.approx(grasp_translation[:2])
     assert lift_pose_translations[0][2] - grasp_translation[2] == pytest.approx(
         request.object_config.payload_initial_vertical_clearance_m
     )
@@ -1872,11 +2079,12 @@ def test_adaptive_portal_uses_one_payload_exit_topology_at_the_minimum_lift(
         not np.allclose(translation[:2], grasp_translation[:2])
         for translation in lift_pose_translations[1:]
     )
+    assert lift_pose_step_lengths_m
     assert max(lift_pose_step_lengths_m) <= 0.03 + 1e-9
     assert max(lift_pose_step_lengths_m) > 0.01
     assert egress_attempts[0].reason == (
-        "EGRESS followed a collision-valid joint-space portal to the opening "
-        "transition and Cartesian vertical exit"
+        "EGRESS followed the fixed portal-to-transition, vertical exit, and "
+        "Cartesian transfer"
     )
     assert all(
         "adaptive portal" not in attempt.reason
@@ -2347,7 +2555,7 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
     assert vamp.range_rad == 0.5
     assert vamp.dynamic_domain is False
     assert vamp.simplify_iterations == 4
-    assert vamp.robot_sphere_count == 432
+    assert vamp.robot_sphere_count == 436
     assert tuple(
         (
             group.group,
@@ -2355,23 +2563,28 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
             group.sphere_count,
             group.translation_per_closed_fraction_m,
             group.sweep_radius_inflation_m,
+            group.reference_closed_fraction,
         )
         for group in vamp.collision_sphere_groups
     ) == (
-        ("left_pad", 176, 128, (0.0, 0.042, 0.0), 0.021),
-        ("right_pad", 304, 128, (0.0, -0.042, 0.0), 0.021),
+        ("left_carriage_structure", 148, 4, (0.0, 0.042, 0.0), 0.0, 1.0),
+        ("right_carriage_structure", 152, 4, (0.0, -0.042, 0.0), 0.0, 1.0),
+        ("left_finger_structure", 156, 12, (0.0, 0.042, 0.0), 0.0, 0.0),
+        ("right_finger_structure", 168, 12, (0.0, -0.042, 0.0), 0.0, 0.0),
+        ("left_pad", 180, 128, (0.0, 0.042, 0.0), 0.021, None),
+        ("right_pad", 308, 128, (0.0, -0.042, 0.0), 0.021, None),
     )
     assert tuple(
         (item.sphere_index, item.center_at_default_m, item.radius_m)
         for item in vamp.collision_sphere_calibrations
     ) == (
-        (27, (0.21516, 0.001, 0.539479), 0.036648),
-        (41, (0.27569, -0.019505, 0.428311), 0.035516),
-        (42, (0.287652, -0.005146, 0.399621), 0.010515),
-        (176, (0.643443, -0.008751, 0.405724), 0.026419),
-        (303, (0.668818, 0.005874, 0.411724), 0.024911),
-        (304, (0.643443, -0.008751, 0.461724), 0.026419),
-        (431, (0.668818, 0.005874, 0.455724), 0.024911),
+        (22, (0.114356, -0.034096, 0.706641), 0.037193),
+        (45, (0.27569, -0.019505, 0.428311), 0.035516),
+        (46, (0.287652, -0.005146, 0.399621), 0.010515),
+        (180, (0.643443, -0.008751, 0.405724), 0.026419),
+        (307, (0.668818, 0.005874, 0.411724), 0.024911),
+        (308, (0.643443, -0.008751, 0.461724), 0.026419),
+        (435, (0.668818, 0.005874, 0.455724), 0.024911),
     )
     assert tuple(
         (item.group, item.translation_per_closed_fraction_m)
@@ -2381,6 +2594,7 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         ("right_pad", (0.0, -0.042, 0.0)),
     )
     assert CONFIG.planning_policy.approach_contact_transition_m == 0.01
+    assert vamp.source_support_contact_hull_clearance_m == 0.0001
     assert (
         CONFIG.planning_object("masking_tape").approach_contact_transition_m
         == 0.03
@@ -2412,6 +2626,10 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         CONFIG.planning_object("marker").payload_initial_vertical_clearance_m
         == 0.010
     )
+    assert (
+        CONFIG.planning_object("drill_bit").payload_initial_vertical_clearance_m
+        == 0.020
+    )
     assert all(
         CONFIG.planning_object(object_type).payload_initial_vertical_clearance_m
         == 0.0
@@ -2422,6 +2640,9 @@ def test_planning_uses_calibrated_vamp_range_and_contact_transition() -> None:
         for object_type in ("rivet_gun", "standard_part")
     } == {LocalMotionStrategy.CONTINUOUS_CARTESIAN}
     assert CONFIG.planning_policy.pregrasp_joint_path_detour_ratio_limit == 3.0
+    assert CONFIG.planning_policy.pregrasp_tcp_path_detour_ratio_limit == 2.25
+    assert CONFIG.planning_policy.egress_tcp_path_detour_ratio_limit == 2.25
+    assert CONFIG.planning_policy.egress_portal_maximum_joint_edge_rad == 1.9
     assert CONFIG.planning_policy.payload_tcp_max_angular_velocity_rad_s == 0.66
     assert CONFIG.planning_policy.payload_tcp_max_translation_velocity_m_s == 0.30
     assert (
@@ -2491,13 +2712,190 @@ def test_native_attachment_spheres_apply_object_local_geometry_pose() -> None:
     assert spheres[0][1] == pytest.approx(0.04)
 
 
-def test_forearm_proxy_sphere_is_not_shrunk_and_tracks_the_formal_distal_surface() -> None:
+def test_semantic_attachment_contacts_apply_object_local_geometry_pose_once() -> None:
+    class NativeSphere:
+        def __init__(self, center, radius):
+            self.x, self.y, self.z = center
+            self.r = radius
+
+    identity = _pose("base", "tcp")
+    backend = SimpleNamespace(
+        _attachment_contact_cache={},
+        _semantic_polyhedra={},
+        _model=SimpleNamespace(base_frame="base"),
+        _vamp=SimpleNamespace(Sphere=NativeSphere),
+        _tcp_matrix=lambda _configuration: np.eye(4, dtype=np.float64),
+        _geometries_in_base=lambda geometries, _T_world_base: geometries,
+        _attachment_spheres=None,
+    )
+    backend._attachment_spheres = lambda configuration, T_tcp_object, attached: (
+        VampBackend._attachment_spheres(
+            backend, configuration, T_tcp_object, attached
+        )
+    )
+    T_tcp_object = RigidTransform(
+        "tcp",
+        "object",
+        (
+            (1.0, 0.0, 0.0, 0.10),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+    )
+    attached = AttachedGeometry(
+        "offset_sphere",
+        RigidTransform(
+            "object",
+            "offset_sphere",
+            (
+                (1.0, 0.0, 0.0, 0.01),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        Sphere(0.001),
+    )
+    obstacle = SceneGeometry(
+        "obstacle",
+        "tank",
+        "source_support",
+        RigidTransform(
+            "base",
+            "obstacle",
+            (
+                (1.0, 0.0, 0.0, 0.11),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            ),
+        ),
+        Box((0.002, 0.002, 0.002)),
+    )
+
+    contacts = VampBackend.semantic_attachment_contacts(
+        backend,
+        (0.0,),
+        T_tcp_object,
+        (attached,),
+        (obstacle,),
+        identity,
+    )
+
+    assert contacts == frozenset(("source_support",))
+
+
+def test_semantic_finger_structure_spheres_follow_commanded_opening() -> None:
+    config = CONFIG.planning_backends[PROFILE.planning_backend_profile].vamp
+    robot_spheres = tuple(
+        SimpleNamespace(x=0.0, y=0.0, z=0.0, r=0.01)
+        for _ in range(config.robot_sphere_count)
+    )
+    backend = SimpleNamespace(
+        _config=config,
+        _collision_group_by_sphere=tuple(
+            next(
+                (
+                    group
+                    for group in config.collision_sphere_groups
+                    if group.first_sphere <= index
+                    < group.first_sphere + group.sphere_count
+                ),
+                None,
+            )
+            for index in range(config.robot_sphere_count)
+        ),
+        _tcp_matrix=lambda _configuration: np.eye(4, dtype=np.float64),
+        robot_spheres=lambda _configuration: robot_spheres,
+        _vamp=SimpleNamespace(
+            Sphere=lambda center, radius: SimpleNamespace(
+                x=center[0], y=center[1], z=center[2], r=radius
+            )
+        ),
+    )
+
+    open_spheres = VampBackend._semantic_robot_spheres(backend, (0.0,), 0.084)
+    closed_spheres = VampBackend._semantic_robot_spheres(backend, (0.0,), 0.0)
+
+    assert open_spheres[148][0].y == pytest.approx(-0.042)
+    assert closed_spheres[148][0].y == pytest.approx(0.0)
+    assert open_spheres[152][0].y == pytest.approx(0.042)
+    assert closed_spheres[152][0].y == pytest.approx(0.0)
+    assert open_spheres[148][1] == "left_carriage_structure"
+    assert open_spheres[152][1] == "right_carriage_structure"
+    assert open_spheres[156][0].y == pytest.approx(0.0)
+    assert closed_spheres[156][0].y == pytest.approx(0.042)
+    assert open_spheres[168][0].y == pytest.approx(0.0)
+    assert closed_spheres[168][0].y == pytest.approx(-0.042)
+    assert open_spheres[156][1] == "left_finger_structure"
+    assert open_spheres[168][1] == "right_finger_structure"
+
+
+def test_half_arm_proxy_calibration_retains_the_previous_physical_surface_coverage() -> None:
+    spheres = yaml.safe_load(
+        (ROOT / "configs/curobo/gen3/task2_active_wrist_parallel_spheres.yml").read_text()
+    )["collision_spheres"]["half_arm_2_link"]
+    centers = np.asarray([item["center"] for item in spheres], dtype=np.float64)
+    new_effective_radii = np.asarray(
+        [float(item["radius"]) + 0.001 for item in spheres], dtype=np.float64
+    )
+    old_physical_radii = np.asarray(
+        [float(item["radius"]) for item in spheres], dtype=np.float64
+    )
+    old_physical_radii[1] = 0.037698
+
+    mesh_path = ROOT / "examples/mujoco/kinova_gen3/assets/half_arm_2_link.stl"
+    payload = mesh_path.read_bytes()
+    triangle_count = int.from_bytes(payload[80:84], "little")
+    records = np.frombuffer(
+        payload,
+        dtype=np.dtype(
+            [
+                ("normal", "<f4", (3,)),
+                ("vertices", "<f4", (3, 3)),
+                ("attribute", "<u2"),
+            ]
+        ),
+        count=triangle_count,
+        offset=84,
+    )
+    surface_points = []
+    for triangle in np.asarray(records["vertices"], dtype=np.float64):
+        for first_weight in range(7):
+            for second_weight in range(7 - first_weight):
+                weights = np.asarray(
+                    (first_weight, second_weight, 6 - first_weight - second_weight),
+                    dtype=np.float64,
+                ) / 6.0
+                surface_points.append(weights @ triangle)
+    points = np.asarray(surface_points, dtype=np.float64)
+    distances = np.linalg.norm(points[:, None, :] - centers[None, :, :], axis=2)
+    previously_covered = np.any(distances <= old_physical_radii[None, :], axis=1)
+
+    assert np.any(previously_covered)
+    assert np.all(
+        np.any(
+            distances[previously_covered] <= new_effective_radii[None, :],
+            axis=1,
+        )
+    )
+
+
+def test_forearm_proxy_split_preserves_the_previous_physical_surface_coverage() -> None:
     spheres = yaml.safe_load(
         (ROOT / "configs/curobo/gen3/task2_active_wrist_parallel_spheres.yml").read_text()
     )["collision_spheres"]["forearm_link"]
-    calibrated = spheres[1]
-    center = np.asarray(calibrated["center"], dtype=np.float64)
-    radius = float(calibrated["radius"])
+    centers = np.asarray([item["center"] for item in spheres], dtype=np.float64)
+    radii = np.asarray([item["radius"] for item in spheres], dtype=np.float64)
+    old_centers = np.vstack(
+        (
+            (-0.002957, -0.173842, -0.00483),
+            (0.0, -0.185257, -0.006375),
+            centers[6:],
+        )
+    )
+    old_radii = np.concatenate(((0.049268, 0.035643), radii[6:]))
 
     mesh_path = ROOT / "examples/mujoco/kinova_gen3/assets/forearm_link.stl"
     payload = mesh_path.read_bytes()
@@ -2514,12 +2912,26 @@ def test_forearm_proxy_sphere_is_not_shrunk_and_tracks_the_formal_distal_surface
         count=triangle_count,
         offset=84,
     )
-    vertices = np.asarray(records["vertices"], dtype=np.float64).reshape((-1, 3))
-    distal = vertices[vertices[:, 1] < -0.21]
+    surface_points = []
+    for triangle in np.asarray(records["vertices"], dtype=np.float64):
+        for first_weight in range(7):
+            for second_weight in range(7 - first_weight):
+                weights = np.asarray(
+                    (first_weight, second_weight, 6 - first_weight - second_weight),
+                    dtype=np.float64,
+                ) / 6.0
+                surface_points.append(weights @ triangle)
+    points = np.asarray(surface_points, dtype=np.float64)
+    old_distances = np.linalg.norm(
+        points[:, None, :] - old_centers[None, :, :], axis=2
+    )
+    new_distances = np.linalg.norm(points[:, None, :] - centers[None, :, :], axis=2)
+    previously_covered = np.any(old_distances <= old_radii[None, :], axis=1)
 
-    assert radius == pytest.approx(0.035643)
-    assert center[1] - radius == pytest.approx(vertices[:, 1].min(), abs=1e-7)
-    assert center[[0, 2]] == pytest.approx(distal[:, [0, 2]].mean(axis=0), abs=1e-7)
+    assert len(spheres) == 14
+    assert max(radii[:6]) < 0.049268
+    assert np.any(previously_covered)
+    assert np.all(np.any(new_distances[previously_covered] <= radii[None, :], axis=1))
 
 
 def test_pad_collision_spheres_cover_tapered_mujoco_envelope_without_old_box_air() -> None:
@@ -2958,6 +3370,10 @@ def test_orientation_free_region_skips_zero_motion_sample_without_timing_leak() 
             payload_tcp_max_translation_velocity_m_s=1000.0,
             payload_tcp_max_translation_acceleration_m_s2=1000.0,
         ),
+        object_config=replace(
+            baseline.object_config,
+            payload_motion_strategy=LocalMotionStrategy.CONTINUOUS_CARTESIAN,
+        ),
     )
     fixed_vamp = _FixedOrientationVamp(
         request.robot_model,
@@ -3188,6 +3604,16 @@ def test_box_attachment_semantic_collision_uses_exact_oriented_geometry() -> Non
     assert _prepared_polyhedra_intersect(
         slender_polyhedron, intersecting_polyhedron
     )
+    assert not _prepared_polyhedra_within_clearance(
+        slender_polyhedron,
+        separated_polyhedron,
+        0.004,
+    )
+    assert _prepared_polyhedra_within_clearance(
+        slender_polyhedron,
+        separated_polyhedron,
+        0.011,
+    )
 
 
 def test_plan_preserves_request_config_and_backend_failure_codes() -> None:
@@ -3293,7 +3719,14 @@ def test_source_support_contact_is_pad_only_and_ends_on_departure(
     support_groups, post_ruckig_contact, expected_success
 ) -> None:
     baseline = _request()
-    request = replace(baseline, candidates=(baseline.candidates[0],))
+    request = replace(
+        baseline,
+        candidates=(baseline.candidates[0],),
+        object_config=replace(
+            baseline.object_config,
+            payload_motion_strategy=LocalMotionStrategy.CONTINUOUS_CARTESIAN,
+        ),
+    )
     backend = CONFIG.planning_backends[PROFILE.planning_backend_profile]
     vamp = _SourceSupportVamp(
         request.robot_model, support_groups=support_groups
